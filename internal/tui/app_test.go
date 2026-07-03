@@ -27,7 +27,7 @@ func TestBrowseFlow(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test")
+	app := New(nil, path, "test", false)
 
 	// Init dispatches connectCmd; run it and feed the result back.
 	msg := app.Init()()
@@ -79,7 +79,7 @@ func TestSortUsesCurrentColumn(t *testing.T) {
 	e.Exec(ctx, `INSERT INTO users (name, email) VALUES ('Ada','a'),('Linus','b')`)
 	e.Close()
 
-	app := New(nil, path, "test")
+	app := New(nil, path, "test", false)
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	// Load table.
@@ -123,7 +123,7 @@ func TestColumnFilter(t *testing.T) {
 	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
 	e.Close()
 
-	app := New(nil, path, "test")
+	app := New(nil, path, "test", false)
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load users
@@ -172,7 +172,7 @@ func TestContinuousScroll(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test")
+	app := New(nil, path, "test", false)
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -212,7 +212,7 @@ func TestSidebarFilter(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test")
+	app := New(nil, path, "test", false)
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	if len(app.sidebar.tables) != 4 {
@@ -288,10 +288,141 @@ func TestSidebarFilter(t *testing.T) {
 	}
 }
 
+// loadTable is the shared setup: open a fresh sqlite db, run schema/seed, and
+// drive the model up to a loaded grid.
+func loadTable(t *testing.T, readOnly bool, seed func(e db.Engine)) App {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed(e)
+	e.Close()
+
+	app := New(nil, path, "test", readOnly)
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load the (only) table
+	app = m.(App)
+	app = update(t, app, cmd())
+	return app
+}
+
+func typeRunes(t *testing.T, app App, s string) App {
+	t.Helper()
+	for _, r := range s {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	return app
+}
+
+// TestQuickEditCell drives the §8 quick path: `e` on a cell → overwrite the
+// value → Enter runs the keyed UPDATE, the grid reflects it, and the DB is
+// actually changed.
+func TestQuickEditCell(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// Default sort is PK descending → row 0 is id=2 (Linus). Move to "name".
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+
+	// `e` opens the overlay pre-filled with the current value.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !app.grid.editing {
+		t.Fatal("`e` should start editing")
+	}
+	if app.grid.editVal != "Linus" {
+		t.Fatalf("overlay pre-fill = %q, want Linus", app.grid.editVal)
+	}
+
+	// Clear "Linus" and type "Grace", then commit.
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "Grace")
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if app.grid.editing {
+		t.Fatal("Enter should leave edit mode")
+	}
+	if cmd == nil {
+		t.Fatal("committing a changed cell should run an UPDATE")
+	}
+	app = update(t, app, cmd())
+
+	// Grid reflects the new value immediately.
+	if got, _, _ := app.grid.currentCell(); got != "Grace" {
+		t.Fatalf("grid cell after edit = %v, want Grace", got)
+	}
+	if !strings.Contains(app.status, "set name") {
+		t.Fatalf("status should confirm the edit, got %q", app.status)
+	}
+
+	// And the row really changed in the DB (id=2 was Linus).
+	rs, err := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Rows) != 1 || rs.Rows[0][0] != "Grace" {
+		t.Fatalf("db row = %+v, want name Grace", rs.Rows)
+	}
+}
+
+// TestQuickEditReadOnly verifies a read-only connection refuses the edit key.
+func TestQuickEditReadOnly(t *testing.T) {
+	app := loadTable(t, true, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if app.grid.editing {
+		t.Fatal("read-only connection must not enter edit mode")
+	}
+	if !strings.Contains(app.status, "read-only") {
+		t.Fatalf("status should explain the refusal, got %q", app.status)
+	}
+}
+
+// TestQuickEditUntouchedNullNoop guards §8: a bare Enter on an untouched NULL
+// cell is a no-op — it must not blank the value to an empty string.
+func TestQuickEditUntouchedNullNoop(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (id, name) VALUES (1, NULL)`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !app.grid.editing || app.grid.editVal != "" {
+		t.Fatalf("editing a NULL cell should open an empty overlay; editing=%v val=%q",
+			app.grid.editing, app.grid.editVal)
+	}
+	// Bare Enter, no typing → no command, cell stays NULL.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("bare Enter on an untouched NULL cell must not run an UPDATE")
+	}
+	if got, _, _ := app.grid.currentCell(); got != nil {
+		t.Fatalf("cell should remain NULL, got %v", got)
+	}
+	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 1`)
+	if rs.Rows[0][0] != nil {
+		t.Fatalf("db value should stay NULL, got %v", rs.Rows[0][0])
+	}
+}
+
 func TestDatabaseName(t *testing.T) {
 	cases := map[string]string{
-		"./demo.db":                    "demo",
-		"sqlite:///Users/jm/notes.db":  "notes",
+		"./demo.db":                   "demo",
+		"sqlite:///Users/jm/notes.db": "notes",
 		"postgres://jm@host:5432/appdev?sslmode=disable": "appdev",
 		"mysql://jm@localhost:3306/scratch":              "scratch",
 	}

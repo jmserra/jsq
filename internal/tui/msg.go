@@ -24,5 +24,13 @@ type moreRowsMsg struct {
 	full bool
 }
 
+// editDoneMsg is delivered after a quick-path cell UPDATE runs (§8). affected is
+// the reported row count (should be exactly 1 for a keyed edit).
+type editDoneMsg struct {
+	col      string
+	val      string
+	affected int64
+}
+
 // errMsg carries any async failure.
 type errMsg struct{ err error }

@@ -22,6 +22,7 @@ var (
 	filterStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 	nullStyle   = lipgloss.NewStyle().Faint(true)
 	selStyle    = lipgloss.NewStyle().Reverse(true)
+	editStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
 )
 
 type column struct {
@@ -48,9 +49,18 @@ type grid struct {
 	sortCol string
 	sortAsc bool
 
+	pk []string // PK column names (from the ResultSet), for keyed edits (§8)
+
 	filters   map[int]string // colIndex → committed LIKE pattern (server-side)
 	filtering int            // colIndex being edited, or -1
 	filterVal string         // in-progress filter text
+
+	// Quick-path cell edit (§8): a single-line overlay on the cursor cell.
+	editing      bool
+	editVal      string // in-progress text
+	editR, editC int    // visible-row / column index being edited
+	editOrigNull bool   // the original cell was SQL NULL
+	editDirty    bool   // the user typed at least one key
 
 	hasMore bool // last window came back full → more rows may exist
 	loading bool // a continuous-scroll fetch is in flight
@@ -82,6 +92,7 @@ func (g *grid) setResult(rs *db.ResultSet) {
 	if rs.Table != nil {
 		g.table = *rs.Table
 	}
+	g.pk = rs.PK
 	g.cols = make([]column, len(rs.Cols))
 	for i, name := range rs.Cols {
 		g.cols[i] = column{name: name, width: colWidthFor(name, rs.Rows, i)}
@@ -182,6 +193,11 @@ func (g *grid) effWidth(c int) int {
 	w := g.cols[c].width
 	if c == g.filtering {
 		if need := runewidth.StringWidth("⌕"+g.filterVal) + 1; need > w {
+			return need
+		}
+	}
+	if g.editing && c == g.editC {
+		if need := runewidth.StringWidth(g.editVal) + 1; need > w {
 			return need
 		}
 	}
@@ -315,6 +331,123 @@ func likeToRegex(p string) *regexp.Regexp {
 	return re
 }
 
+// --- quick-path cell edit (§8) ---
+
+// keyPred is one "col = val" predicate for a keyed UPDATE's WHERE.
+type keyPred struct {
+	col string
+	val any
+}
+
+// editReq is a resolved single-cell update: SET col = val WHERE <full PK>.
+type editReq struct {
+	table db.TableRef
+	col   string
+	val   string
+	keys  []keyPred
+}
+
+// colIndex returns the display index of the named column, or -1.
+func (g *grid) colIndex(name string) int {
+	for i, c := range g.cols {
+		if c.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// editable reports whether the grid can be edited: rows came from a single-table
+// select with a resolved PK, and every PK column is present in the result (§8).
+func (g *grid) editable() bool {
+	if g.table.Name == "" || len(g.pk) == 0 {
+		return false
+	}
+	for _, name := range g.pk {
+		if g.colIndex(name) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// startEdit opens the inline overlay on the cursor cell, pre-filled with its
+// current value (empty for a NULL cell). Returns false if editing isn't possible.
+func (g *grid) startEdit() bool {
+	if !g.editable() || g.cursorR >= len(g.visible) || g.cursorC >= len(g.cols) {
+		return false
+	}
+	var v any
+	if row := g.rows[g.visible[g.cursorR]]; g.cursorC < len(row) {
+		v = row[g.cursorC]
+	}
+	g.editing = true
+	g.editR, g.editC = g.cursorR, g.cursorC
+	g.editOrigNull = v == nil
+	g.editDirty = false
+	if v == nil {
+		g.editVal = ""
+	} else {
+		g.editVal = fmt.Sprintf("%v", v)
+	}
+	return true
+}
+
+func (g *grid) editInput(s string) { g.editVal += s; g.editDirty = true }
+func (g *grid) cancelEdit()        { g.editing, g.editVal, g.editDirty = false, "", false }
+
+func (g *grid) editBackspace() {
+	if r := []rune(g.editVal); len(r) > 0 {
+		g.editVal = string(r[:len(r)-1])
+	}
+	g.editDirty = true
+}
+
+// commitEdit ends edit mode and returns the update to run. ok is false when
+// nothing should run: a bare Enter with no typing (untouched cell, including an
+// untouched NULL which stays NULL — §8), or the row can't be keyed.
+func (g *grid) commitEdit() (editReq, bool) {
+	val, dirty := g.editVal, g.editDirty
+	g.cancelEdit()
+	if !dirty {
+		return editReq{}, false
+	}
+	keys, ok := g.keyPreds()
+	if !ok {
+		return editReq{}, false
+	}
+	return editReq{table: g.table, col: g.cols[g.editC].name, val: val, keys: keys}, true
+}
+
+// keyPreds builds the WHERE predicates from the edited row's PK values. Returns
+// false if any PK column is missing or NULL (can't safely key the update).
+func (g *grid) keyPreds() ([]keyPred, bool) {
+	if len(g.pk) == 0 || g.editR >= len(g.visible) {
+		return nil, false
+	}
+	row := g.rows[g.visible[g.editR]]
+	preds := make([]keyPred, 0, len(g.pk))
+	for _, name := range g.pk {
+		ci := g.colIndex(name)
+		if ci < 0 || ci >= len(row) || row[ci] == nil {
+			return nil, false
+		}
+		preds = append(preds, keyPred{col: name, val: row[ci]})
+	}
+	return preds, true
+}
+
+// applyEdit writes the committed value back into the in-memory row so the grid
+// reflects the change immediately, without a server round-trip.
+func (g *grid) applyEdit(val string) {
+	if g.editR < len(g.visible) {
+		row := g.rows[g.visible[g.editR]]
+		if g.editC < len(row) {
+			row[g.editC] = val
+		}
+	}
+}
+
 // --- rendering ---
 
 func colWidthFor(name string, rows [][]any, i int) int {
@@ -404,7 +537,10 @@ func (g *grid) renderRow(r int) string {
 	for c := g.colOff; c < len(g.cols); c++ {
 		var cell string
 		isNull := false
-		if c < len(row) {
+		isEdit := g.editing && r == g.editR && c == g.editC
+		if isEdit {
+			cell = g.editVal + "▏"
+		} else if c < len(row) {
 			v := row[c]
 			isNull = v == nil
 			cell = cellString(v)
@@ -412,6 +548,8 @@ func (g *grid) renderRow(r int) string {
 		w := g.effWidth(c)
 		cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
 		switch {
+		case isEdit:
+			cell = editStyle.Render(cell)
 		case r == g.cursorR && c == g.cursorC:
 			cell = selStyle.Render(cell)
 		case isNull:

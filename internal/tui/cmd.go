@@ -70,6 +70,30 @@ func loadMoreCmd(eng db.Engine, t db.Table, sortCol string, sortAsc bool, filter
 	}
 }
 
+// execEditCmd runs a quick-path keyed UPDATE (§8): SET col = val WHERE <full PK>.
+// The new value binds as a parameter; PK values bind from the edited row. Every
+// statement is keyed on the full PK — never a bare UPDATE.
+func execEditCmd(eng db.Engine, req editReq) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		args := make([]any, 0, len(req.keys)+1)
+		set := eng.QuoteIdent(req.col) + " = " + eng.Placeholder(1)
+		args = append(args, req.val)
+		preds := make([]string, len(req.keys))
+		for i, k := range req.keys {
+			preds[i] = eng.QuoteIdent(k.col) + " = " + eng.Placeholder(i+2)
+			args = append(args, k.val)
+		}
+		q := fmt.Sprintf("UPDATE %s SET %s WHERE %s",
+			eng.QualifiedName(req.table), set, strings.Join(preds, " AND "))
+		n, err := eng.Exec(ctx, q, args...)
+		if err != nil {
+			return errMsg{err}
+		}
+		return editDoneMsg{col: req.col, val: req.val, affected: n}
+	}
+}
+
 // whereClause builds "WHERE p1 AND p2 …" from the column filters (stacking AND),
 // binding each pattern as a parameter via the engine's FilterPredicate.
 func whereClause(eng db.Engine, filters []filterSpec) (string, []any) {

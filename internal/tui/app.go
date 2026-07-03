@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,6 +37,7 @@ type App struct {
 
 	directDSN string // from CLI arg; empty → use the picker
 	connName  string
+	readOnly  bool // connection refuses mutations (read_only in config)
 
 	engine      db.Engine
 	sidebar     sidebar
@@ -56,12 +58,14 @@ type App struct {
 }
 
 // New builds the root model. If dsn != "", it connects directly; else the picker.
-func New(conns []config.Conn, dsn, name string) App {
+// readOnly disables all mutation for a directly-connected connection (§8).
+func New(conns []config.Conn, dsn, name string, readOnly bool) App {
 	a := App{
 		picker:      picker{conns: conns},
 		grid:        newGrid(),
 		directDSN:   dsn,
 		connName:    name,
+		readOnly:    readOnly,
 		showSidebar: true,
 	}
 	if dsn != "" {
@@ -127,6 +131,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.grid.appendRows(msg.rows, msg.full)
 		return a, nil
 
+	case editDoneMsg:
+		// A keyed edit must touch exactly one row; anything else is loud (§8).
+		if msg.affected == 1 {
+			a.grid.applyEdit(msg.val)
+			a.status = fmt.Sprintf("set %s = '%s'", msg.col, msg.val)
+		} else {
+			a.status = fmt.Sprintf("⚠ %s: %d rows affected, expected 1", msg.col, msg.affected)
+		}
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 	}
@@ -177,6 +191,10 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	// While editing a cell (§8 quick path), keys go to the edit overlay.
+	if a.screen == screenBrowse && a.grid.editing {
+		return a.handleEditKey(msg)
+	}
 	// While editing a column filter, keys go to the filter input.
 	if a.screen == screenBrowse && a.grid.filtering >= 0 {
 		return a.handleFilterKey(msg)
@@ -195,6 +213,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if c, ok := a.picker.selected(); ok {
 				a.connName = c.Name
+				a.readOnly = c.ReadOnly
 				a.status = "connecting to " + c.Name + "…"
 				return a, connectCmd(c.DSN(), c.Name)
 			}
@@ -288,6 +307,31 @@ func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 	return a, a.loadCurrentCmd()
 }
 
+// handleEditKey routes keys while a cell is being edited (§8 quick path). Enter
+// builds the keyed UPDATE and runs it immediately; Esc cancels. A bare Enter
+// with no typing is a no-op (commitEdit returns ok=false), so a NULL cell can't
+// be blanked by accident.
+func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		if req, ok := a.grid.commitEdit(); ok {
+			a.status = "saving…"
+			return a, execEditCmd(a.engine, req)
+		}
+		a.status = a.currentTable.Name
+	case tea.KeyEsc:
+		a.grid.cancelEdit()
+		a.status = a.currentTable.Name
+	case tea.KeyBackspace:
+		a.grid.editBackspace()
+	case tea.KeySpace:
+		a.grid.editInput(" ")
+	case tea.KeyRunes:
+		a.grid.editInput(string(msg.Runes))
+	}
+	return a, nil
+}
+
 // handleFilterKey routes keys while a column filter is being typed (§7.1).
 func (a App) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
@@ -335,6 +379,15 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.grid.clearCurrentFilter() {
 			return a, a.loadCurrentCmd()
 		}
+	case "e":
+		if a.readOnly {
+			a.status = "read-only connection — editing disabled"
+		} else if !a.grid.editable() {
+			a.status = "not editable — no single-table primary key"
+		} else if a.grid.startEdit() {
+			a.status = "editing " + a.grid.cols[a.grid.editC].name + " — Enter saves, Esc cancels"
+		}
+		return a, nil
 	case "enter":
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)

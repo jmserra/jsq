@@ -13,8 +13,9 @@ how the two relate.
 
 Browsing works end-to-end across all three engines: connect, list tables, and a
 fixed-width results grid with continuous scroll, per-column sort, per-column
-filter, and a full-cell viewer. **Editing (`e`/`E`/`o`/`D`/`p`), the `$EDITOR`
-query flow, query history, and the help overlay are on the roadmap** (see below).
+filter, and a full-cell viewer. **Quick single-cell edit (`e`) is in.** The
+heavier `$EDITOR` edits (`E`/`o`/`D`/`p`), the `$EDITOR` query flow, query
+history, and the help overlay are on the roadmap (see below).
 
 ## Install
 
@@ -74,6 +75,7 @@ file can live in your dotfiles without a secret in it.
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
 | `Esc` | clear the current column's filter |
+| `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
 | `H` | toggle the table sidebar (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
 | `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
@@ -85,10 +87,17 @@ case-insensitive, work on any column type, and stack across columns. **Scrolling
 is continuous** — reaching the loaded edge fetches the next window; there are no
 pages. The grid opens sorted by primary key, newest first.
 
+**Editing** with `e` is available only when the grid came from a single-table
+select with a resolved primary key, and the connection isn't `read_only`. The
+`UPDATE` is always keyed on the full primary key and runs immediately; the status
+line reports what changed. A bare `Enter` that changed nothing (including an
+untouched `NULL` cell) does nothing — so you can't blank a value by accident. For
+long, multi-line, or `NULL`-setting edits, the `$EDITOR` path (`E`) is coming.
+
 ## Roadmap
 
-- **Editing** — `e` quick cell edit, `E`/`o`/`D`/`p` (edit / insert / delete /
-  duplicate) generated as SQL and opened in `$EDITOR`
+- **Editing** — `E`/`o`/`D`/`p` (edit / insert / delete / duplicate) generated
+  as SQL and opened in `$EDITOR` (the `e` quick cell edit already works)
 - **`s` / `S`** — author free-form SQL in `$EDITOR`
 - **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back
 - **`?` help overlay** — generated from the keymap

@@ -478,9 +478,9 @@ either previewed in nvim (full path) or shown in the status line after it runs
 
 A grid is editable **only** when its rows came from a single-table select and
 jsq resolved a primary key (or a unique row identity). Otherwise the grid is
-read-only and edit keys are inert (status line says why). A connection flagged
-`read_only = true`, or connected via an ad-hoc URL you didn't mark writable,
-disables all mutation regardless.
+read-only and edit keys are inert (status line says why). **Connections are
+editable by default** — the sole opt-out is the `read_only = true` flag on a
+connection, which disables all mutation regardless of the editability rule above.
 
 ### Mechanic (decided): two-speed editing
 

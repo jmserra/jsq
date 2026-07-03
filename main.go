@@ -44,6 +44,7 @@ func run() error {
 	}
 
 	var dsn, name string
+	var readOnly bool
 	switch {
 	case arg == "":
 		if len(conns) == 0 {
@@ -56,10 +57,10 @@ func run() error {
 		if !ok {
 			return fmt.Errorf("unknown connection %q; available: %s", arg, names(conns))
 		}
-		dsn, name = c.DSN(), c.Name
+		dsn, name, readOnly = c.DSN(), c.Name, c.ReadOnly
 	}
 
-	p := tea.NewProgram(tui.New(conns, dsn, name), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(conns, dsn, name, readOnly), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
