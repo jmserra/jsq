@@ -1,0 +1,14 @@
+# Example jsq connections file.
+# Copy to ~/.config/jsq/connections.toml (or point at it with `jsq -c`).
+# One section per connection; the section header is the connection name,
+# so `jsq demo` connects the [demo] section. jsq only ever reads this file.
+
+[demo]
+url = "sqlite://./demo.db"
+
+[local]
+url = "postgres://user@localhost:5432/mydb?sslmode=disable"
+
+[work]
+url = "mysql://user@localhost:3306/mydb"
+env = "JSQ_WORK_PASSWORD"   # password read from this env var at connect time

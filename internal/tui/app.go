@@ -1,0 +1,381 @@
+// Package tui is the bubbletea front end: picker → flat table list → grid.
+package tui
+
+import (
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/jmserra/jsq/internal/config"
+	"github.com/jmserra/jsq/internal/db"
+)
+
+type screen int
+
+const (
+	screenPicker screen = iota
+	screenBrowse
+)
+
+type focus int
+
+const (
+	focusSidebar focus = iota
+	focusGrid
+)
+
+const (
+	sidebarWidth = 24
+	leftPad      = 1 // 1-char blank margin before the table list / grid
+)
+
+// App is the root bubbletea Model.
+type App struct {
+	screen screen
+	picker picker
+
+	directDSN string // from CLI arg; empty → use the picker
+	connName  string
+
+	engine      db.Engine
+	sidebar     sidebar
+	grid        grid
+	cell        cellView
+	focus       focus
+	showSidebar bool
+
+	currentTable db.Table
+	sortCol      string
+	sortAsc      bool
+	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
+
+	dbName string
+	w, h   int
+	status string
+	err    error
+}
+
+// New builds the root model. If dsn != "", it connects directly; else the picker.
+func New(conns []config.Conn, dsn, name string) App {
+	a := App{
+		picker:      picker{conns: conns},
+		grid:        newGrid(),
+		directDSN:   dsn,
+		connName:    name,
+		showSidebar: true,
+	}
+	if dsn != "" {
+		a.screen = screenBrowse
+		a.status = "connecting…"
+	}
+	return a
+}
+
+func (a App) Init() tea.Cmd {
+	if a.directDSN != "" {
+		return connectCmd(a.directDSN, a.connName)
+	}
+	return nil
+}
+
+func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		a.w, a.h = msg.Width, msg.Height
+		a.layout()
+		return a, nil
+
+	case errMsg:
+		a.err = msg.err
+		return a, nil
+
+	case connectedMsg:
+		a.engine = msg.engine
+		if msg.name != "" {
+			a.connName = msg.name
+		}
+		a.dbName = msg.dbName
+		a.sidebar.setTables(msg.tables)
+		a.screen = screenBrowse
+		a.showSidebar = true
+		a.focus = focusSidebar
+		a.layout()
+		a.status = ""
+		return a, nil
+
+	case rowsMsg:
+		a.grid.setResult(msg.rs)
+		a.grid.hasMore = msg.full
+		a.grid.loading = false
+		// Header marker: explicit J/K sort, else the default PK-descending order.
+		sc, sa := a.sortCol, a.sortAsc
+		if sc == "" && len(msg.rs.PK) > 0 {
+			sc, sa = msg.rs.PK[0], false
+		}
+		a.grid.setSort(sc, sa)
+		if a.resetGrid {
+			a.grid.reset()
+			a.resetGrid = false
+		}
+		a.showSidebar = false
+		a.focus = focusGrid
+		a.layout()
+		a.status = msg.table.Name
+		return a, nil
+
+	case moreRowsMsg:
+		a.grid.appendRows(msg.rows, msg.full)
+		return a, nil
+
+	case tea.KeyMsg:
+		return a.handleKey(msg)
+	}
+	return a, nil
+}
+
+func (a *App) layout() {
+	if a.screen != screenBrowse {
+		return
+	}
+	bodyH := a.h - 1 // status line
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	avail := a.w - leftPad
+	if avail < 1 {
+		avail = 1
+	}
+	gridW := avail
+	if a.showSidebar {
+		gridW = avail - sidebarWidth
+		a.sidebar.w = sidebarWidth - 1
+		a.sidebar.h = bodyH
+	}
+	if gridW < 1 {
+		gridW = 1
+	}
+	a.grid.setSize(gridW, bodyH)
+}
+
+func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyCtrlC {
+		return a, tea.Quit
+	}
+	// Cell viewer captures keys while open.
+	if a.cell.active {
+		switch msg.String() {
+		case "esc", "enter", "q":
+			a.cell.active = false
+		case "j", "down":
+			a.cell.scroll(1)
+		case "k", "up":
+			a.cell.scroll(-1)
+		case "g":
+			a.cell.off = 0
+		case "G":
+			a.cell.scroll(len(a.cell.lines))
+		}
+		return a, nil
+	}
+	// While editing a column filter, keys go to the filter input.
+	if a.screen == screenBrowse && a.grid.filtering >= 0 {
+		return a.handleFilterKey(msg)
+	}
+	switch a.screen {
+	case screenPicker:
+		switch msg.String() {
+		case "j", "down":
+			a.picker.move(1)
+		case "k", "up":
+			a.picker.move(-1)
+		case "enter":
+			if c, ok := a.picker.selected(); ok {
+				a.connName = c.Name
+				a.status = "connecting to " + c.Name + "…"
+				return a, connectCmd(c.DSN(), c.Name)
+			}
+		}
+		return a, nil
+
+	case screenBrowse:
+		switch msg.String() {
+		case "H":
+			a.showSidebar = !a.showSidebar
+			if a.showSidebar {
+				a.focus = focusSidebar
+			} else {
+				a.focus = focusGrid
+			}
+			a.layout()
+			return a, nil
+		case "tab":
+			if a.focus == focusSidebar {
+				a.focus = focusGrid
+			} else if a.showSidebar {
+				a.focus = focusSidebar
+			}
+			return a, nil
+		}
+		if a.showSidebar && a.focus == focusSidebar {
+			return a.handleSidebarKey(msg)
+		}
+		return a.handleGridKey(msg)
+	}
+	return a, nil
+}
+
+func (a App) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		a.sidebar.move(1)
+	case "k", "up":
+		a.sidebar.move(-1)
+	case "g":
+		a.sidebar.top()
+	case "G":
+		a.sidebar.bottom()
+	case "enter":
+		if t, ok := a.sidebar.selected(); ok {
+			a.currentTable = t
+			a.sortCol, a.sortAsc = "", true // reset to default (PK desc) on new table
+			a.resetGrid = true              // new table → cursor to top-left
+			a.grid.clearFilters()
+			a.status = "loading " + t.Name + "…"
+			return a, a.loadCurrentCmd()
+		}
+	}
+	return a, nil
+}
+
+// handleFilterKey routes keys while a column filter is being typed (§7.1).
+func (a App) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		a.grid.commitFilter()
+		return a, a.loadCurrentCmd()
+	case tea.KeyEsc:
+		a.grid.clearFilter()
+		return a, a.loadCurrentCmd()
+	case tea.KeyBackspace:
+		a.grid.filterBackspace()
+	case tea.KeyDown:
+		a.grid.moveRow(1)
+	case tea.KeyUp:
+		a.grid.moveRow(-1)
+	case tea.KeySpace:
+		a.grid.filterInput(" ")
+	case tea.KeyRunes:
+		a.grid.filterInput(string(msg.Runes))
+	}
+	return a, nil
+}
+
+func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		a.grid.moveRow(1)
+	case "k", "up":
+		a.grid.moveRow(-1)
+	case "h", "left":
+		a.grid.moveCol(-1)
+	case "l", "right":
+		a.grid.moveCol(1)
+	case "g":
+		a.grid.top()
+	case "G":
+		a.grid.bottom()
+	case "0":
+		a.grid.firstCol()
+	case "$":
+		a.grid.lastCol()
+	case "/":
+		a.grid.startFilter()
+	case "esc":
+		if a.grid.clearCurrentFilter() {
+			return a, a.loadCurrentCmd()
+		}
+	case "enter":
+		if v, col, ok := a.grid.currentCell(); ok {
+			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
+		}
+	case "J":
+		if name, ok := a.grid.currentColName(); ok {
+			a.sortCol, a.sortAsc = name, true
+			return a, a.loadCurrentCmd()
+		}
+	case "K":
+		if name, ok := a.grid.currentColName(); ok {
+			a.sortCol, a.sortAsc = name, false
+			return a, a.loadCurrentCmd()
+		}
+	}
+	// After a movement, fetch the next window if the cursor neared the edge.
+	return a, a.maybeLoadMore()
+}
+
+// maybeLoadMore triggers a continuous-scroll fetch when the cursor nears the
+// loaded edge and more rows exist.
+func (a *App) maybeLoadMore() tea.Cmd {
+	if !a.grid.wantMore() {
+		return nil
+	}
+	a.grid.loading = true
+	return loadMoreCmd(a.engine, a.currentTable, a.sortCol, a.sortAsc,
+		a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
+}
+
+// loadCurrentCmd (re)loads the current table with the active sort and filters.
+func (a App) loadCurrentCmd() tea.Cmd {
+	return loadCmd(a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.grid.filterSpecs())
+}
+
+func (a App) gridLimit() int {
+	if n := (a.h - 2) * 4; n >= 200 {
+		return n
+	}
+	return 200
+}
+
+func (a App) View() string {
+	if a.err != nil {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).
+			Render("error: "+a.err.Error()) + "\n\npress ctrl-c to quit"
+	}
+	switch a.screen {
+	case screenPicker:
+		return lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.picker.View())
+	case screenBrowse:
+		return a.browseView()
+	}
+	return ""
+}
+
+func (a App) browseView() string {
+	if a.cell.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
+		return a.statusLine() + "\n" + body
+	}
+	body := a.grid.View()
+	if a.showSidebar {
+		sb := lipgloss.NewStyle().Width(sidebarWidth).Render(a.sidebar.View(a.focus == focusSidebar))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, sb, a.grid.View())
+	}
+	body = lipgloss.NewStyle().PaddingLeft(leftPad).Render(body)
+	return a.statusLine() + "\n" + body
+}
+
+// statusLine renders "connName > dbName > table" (table = current table / msg).
+func (a App) statusLine() string {
+	name := a.connName
+	if name == "" {
+		name = "adhoc"
+	}
+	parts := []string{name}
+	if a.dbName != "" {
+		parts = append(parts, a.dbName)
+	}
+	if a.status != "" {
+		parts = append(parts, a.status)
+	}
+	return lipgloss.NewStyle().Faint(true).Render(" " + strings.Join(parts, " > ") + " ")
+}
