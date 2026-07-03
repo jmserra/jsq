@@ -181,6 +181,10 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.grid.filtering >= 0 {
 		return a.handleFilterKey(msg)
 	}
+	// While typing a table-list filter, keys go to that input.
+	if a.screen == screenBrowse && a.showSidebar && a.focus == focusSidebar && a.sidebar.filtering {
+		return a.handleSidebarFilterKey(msg)
+	}
 	switch a.screen {
 	case screenPicker:
 		switch msg.String() {
@@ -234,17 +238,54 @@ func (a App) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.sidebar.top()
 	case "G":
 		a.sidebar.bottom()
+	case "/":
+		a.sidebar.startFilter()
+	case "esc":
+		a.sidebar.clearFilter()
 	case "enter":
 		if t, ok := a.sidebar.selected(); ok {
-			a.currentTable = t
-			a.sortCol, a.sortAsc = "", true // reset to default (PK desc) on new table
-			a.resetGrid = true              // new table → cursor to top-left
-			a.grid.clearFilters()
-			a.status = "loading " + t.Name + "…"
-			return a, a.loadCurrentCmd()
+			return a.selectTable(t)
 		}
 	}
 	return a, nil
+}
+
+// handleSidebarFilterKey routes keys while the table-list filter is being typed
+// (§7). Purely client-side — narrowing the already-loaded table names, no
+// server round-trip. Enter loads the highlighted table; Esc cancels the filter.
+func (a App) handleSidebarFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		t, ok := a.sidebar.selected()
+		a.sidebar.commitFilter() // keep the pattern active for when H returns here
+		if ok {
+			return a.selectTable(t)
+		}
+	case tea.KeyEsc:
+		a.sidebar.clearFilter()
+	case tea.KeyBackspace:
+		a.sidebar.filterBackspace()
+	case tea.KeyDown:
+		a.sidebar.move(1)
+	case tea.KeyUp:
+		a.sidebar.move(-1)
+	case tea.KeySpace:
+		a.sidebar.filterInput(" ")
+	case tea.KeyRunes:
+		a.sidebar.filterInput(string(msg.Runes))
+	}
+	return a, nil
+}
+
+// selectTable loads the given table into the grid with default sort and no
+// filters, and auto-hides the sidebar (handled on rowsMsg).
+func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
+	a.currentTable = t
+	a.sortCol, a.sortAsc = "", true // reset to default (PK desc) on new table
+	a.resetGrid = true              // new table → cursor to top-left
+	a.grid.clearFilters()
+	a.status = "loading " + t.Name + "…"
+	return a, a.loadCurrentCmd()
 }
 
 // handleFilterKey routes keys while a column filter is being typed (§7.1).

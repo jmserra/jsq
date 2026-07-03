@@ -196,6 +196,98 @@ func TestContinuousScroll(t *testing.T) {
 	}
 }
 
+// TestSidebarFilter drives the table-list filter (§7): `/` narrows the list as
+// you type, arrows move within matches, and Enter loads the highlighted table.
+func TestSidebarFilter(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"users", "orders", "order_items", "products"} {
+		if _, err := e.Exec(ctx, "CREATE TABLE "+name+" (id INTEGER PRIMARY KEY)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.Close()
+
+	app := New(nil, path, "test")
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if len(app.sidebar.tables) != 4 {
+		t.Fatalf("sidebar should list 4 tables, got %d", len(app.sidebar.tables))
+	}
+
+	// `/` enters filter mode; typing "order" narrows to orders + order_items.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if !app.sidebar.filtering {
+		t.Fatal("`/` should enter filter mode")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("order")})
+	if len(app.sidebar.visible) != 2 {
+		t.Fatalf("filter %q matched %d tables, want 2", "order", len(app.sidebar.visible))
+	}
+	if t0, _ := app.sidebar.selected(); t0.Name != "order_items" {
+		t.Fatalf("cursor should sit on first match order_items, got %q", t0.Name)
+	}
+
+	// Backspace re-widens the match set; a non-matching filter empties it.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if len(app.sidebar.visible) != 2 { // "orde" still matches both
+		t.Fatalf("after backspace, matched %d, want 2", len(app.sidebar.visible))
+	}
+
+	// Arrow down moves to the second match, Enter loads it.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyDown})
+	sel, _ := app.sidebar.selected()
+	if sel.Name != "orders" {
+		t.Fatalf("after ↓, selected = %q, want orders", sel.Name)
+	}
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("Enter in filter mode should load the highlighted table")
+	}
+	if app.sidebar.filtering {
+		t.Fatal("Enter should leave filter mode")
+	}
+	app = update(t, app, cmd())
+	if app.status != "orders" {
+		t.Fatalf("loaded table = %q, want orders", app.status)
+	}
+	if app.showSidebar {
+		t.Fatal("sidebar should auto-hide after loading a table")
+	}
+
+	// Reopening the sidebar keeps the filter active (narrowed, no longer typing).
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	if app.sidebar.filtering {
+		t.Fatal("reopened sidebar should not be in typing mode")
+	}
+	if len(app.sidebar.visible) != 2 {
+		t.Fatalf("reopened sidebar should keep the %q filter (2 matches), got %d", "orde", len(app.sidebar.visible))
+	}
+	// Esc in normal nav clears the active filter and restores the full list.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.sidebar.hasFilter() || len(app.sidebar.visible) != 4 {
+		t.Fatalf("Esc should clear the active filter; hasFilter=%v visible=%d",
+			app.sidebar.hasFilter(), len(app.sidebar.visible))
+	}
+
+	// Esc cancels an in-progress filter without loading anything.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("prod")})
+	if len(app.sidebar.visible) != 1 {
+		t.Fatalf("filter %q matched %d, want 1", "prod", len(app.sidebar.visible))
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.sidebar.filtering || len(app.sidebar.visible) != 4 {
+		t.Fatalf("Esc should cancel filter and restore all 4 tables, filtering=%v visible=%d",
+			app.sidebar.filtering, len(app.sidebar.visible))
+	}
+}
+
 func TestDatabaseName(t *testing.T) {
 	cases := map[string]string{
 		"./demo.db":                    "demo",
