@@ -136,7 +136,12 @@ func editorCmd(seed editorSeed) tea.Cmd {
 		if fi, err := os.Stat(path); err == nil && fi.ModTime().After(seedMtime) {
 			mtimeBumped = true
 		}
-		return editorResult(seed.sql, string(data), mtimeBumped)
+		msg := editorResult(seed.sql, string(data), mtimeBumped)
+		if sub, ok := msg.(editorSubmitMsg); ok {
+			sub.remember = seed.remember // carry the s "remember for table" marker
+			return sub
+		}
+		return msg
 	})
 }
 

@@ -33,7 +33,7 @@ internal/db/
 internal/tui/
   app.go        # root App Model: screen/focus, ALL key routing (hardcoded — no keymap.go), layout, View
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd)
-  sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s/S helpers (selectTemplate, isReadSQL)
+  sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
   sidebar.go    # flat filterable table list Model
@@ -42,7 +42,7 @@ internal/tui/
   util.go       # clamp()
 ```
 
-The `$EDITOR` full path (`E`/`o`/`D`/`p`, and later `s`/`S`): the generators
+The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a
 temp file and spawns `$EDITOR` via `tea.ExecProcess`. `E` and `D` build their seed
 inline (`buildUpdateStmt`/`buildDeleteStmt`, from in-memory grid PK data); `o` and
@@ -58,14 +58,20 @@ not on every table open.) For vim-family editors
 selected — `vi'` inside a string's quotes, `v$` for a NULL/number token. On exit
 `editorResult` decides submit-vs-abort (mtime bump or content change → run;
 cleared buffer or `:q!` → abort). The `editorSubmitMsg` handler then classifies
-the SQL (`isReadSQL`): a **read** (`s`/`S` SELECT-likes) runs via `runQueryCmd` →
+the SQL (`isReadSQL`): a **read** (`s` SELECT-likes) runs via `runQueryCmd` →
 `queryResultMsg`, shown in the grid with `adHoc=true` (no table provenance → not
 editable, and J/K/`/` are guarded off since they'd re-query the table); a
-**write** (E/o/D/p, or an `s`/`S` mutation) runs **verbatim** via `execRawCmd`,
-then the view reloads. Note WITH counts as a write, and the write branch is where
-the `read_only` guard for free-form `s`/`S` mutations lives. This is the
-deliberate exception to invariant 6 — full-path SQL is user-authored and inlined
+**write** (E/o/D/p, or an `s` mutation) runs **verbatim** via `execRawCmd`, then
+the view reloads. Note WITH counts as a write, and the write branch is where the
+`read_only` guard for free-form `s` mutations lives. This is the deliberate
+exception to invariant 6 — full-path SQL is user-authored and inlined
 (`sqlLiteral`), not parameter-bound.
+
+`s` (`App.scratchSeed`) prefills the `selectTemplate` for the current table, or
+`App.lastQuery[table]` if one was run — the seed's `remember` field (the table)
+rides through `editorCmd`→`editorSubmitMsg`, and the submit handler stores the SQL
+back into `lastQuery` (even on error) so the next `s` on that table continues the
+edit-run loop. Only `s` sets `remember`; E/o/D/p leave it zero.
 
 Note: many `.go` comments still carry `§N` section refs that pointed at the old
 DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.

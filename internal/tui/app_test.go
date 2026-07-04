@@ -1031,6 +1031,37 @@ func TestScratchMutationReadOnly(t *testing.T) {
 	}
 }
 
+// TestScratchRemembersLastQuery covers the edit-run-edit loop: s prefills the
+// SELECT template first, then your last query on that table, keyed per table.
+func TestScratchRemembersLastQuery(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	// First s: the SELECT template, tagged to remember the current table.
+	first := app.scratchSeed()
+	if !strings.Contains(first.sql, `SELECT * FROM "users" LIMIT 100`) {
+		t.Fatalf("first scratch should be the template, got %q", first.sql)
+	}
+	if first.remember != app.currentTable {
+		t.Fatalf("scratch should remember the current table")
+	}
+
+	// Running a custom query remembers it; the next s prefills it.
+	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users WHERE id > 0;", remember: app.currentTable})
+	if got := app.scratchSeed().sql; got != "SELECT name FROM users WHERE id > 0;" {
+		t.Fatalf("scratch should prefill the last query, got %q", got)
+	}
+
+	// It's per table: a different table gets the template, not this query.
+	app.currentTable = db.Table{Name: "other"}
+	if got := app.scratchSeed().sql; !strings.Contains(got, `SELECT * FROM "other" LIMIT 100`) {
+		t.Fatalf("a different table should get the template, got %q", got)
+	}
+}
+
 func TestSQLLiteral(t *testing.T) {
 	cases := []struct {
 		in   any

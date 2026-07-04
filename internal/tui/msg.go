@@ -36,9 +36,13 @@ type editDoneMsg struct {
 // must fetch column metadata first) and is ready to open in $EDITOR.
 type editorReadyMsg struct{ seed editorSeed }
 
-// editorSubmitMsg carries the SQL the user saved in $EDITOR (E/o full paths). It
-// is run verbatim.
-type editorSubmitMsg struct{ sql string }
+// editorSubmitMsg carries the SQL the user saved in $EDITOR (any full path), run
+// verbatim. remember (Name set) is the table to store this as the last scratch
+// query for — set only for s.
+type editorSubmitMsg struct {
+	sql      string
+	remember db.Table
+}
 
 // editorAbortedMsg means the editor closed without saving (:q!) or the buffer was
 // cleared — nothing runs.

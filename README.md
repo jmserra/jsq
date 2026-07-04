@@ -20,8 +20,8 @@ Browsing works end-to-end across all three engines: connect, list tables, and a
 fixed-width results grid with continuous scroll, per-column sort, per-column
 filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 (`e`), plus the `$EDITOR` full paths — cell edit (`E`), blank-row insert (`o`),
-row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`/`S`)
-is in too.**
+row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`) is in
+too.**
 
 On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
@@ -117,8 +117,7 @@ section-per-connection layout reads like INI but gets a strict parser.
 | `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
-| `s` | author free-form SQL in a scratch `$EDITOR` buffer; `:wq` runs it — a read shows its rows, a write runs and reports the affected count |
-| `S` | like `s`, pre-filled with `SELECT * FROM <current table> LIMIT 100;` |
+| `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
 | `H` | toggle the table sidebar (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
 | `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
@@ -318,17 +317,20 @@ is the scroll key, tiebroken by PK. **Default order** is by primary key
 descending (newest first). The header shows a `▲`/`▼` marker. Composes with
 filters.
 
-### Free-form SQL (`s` / `S`)
+### Free-form SQL (`s`)
 
-`s` opens a scratch buffer in `$EDITOR`; `S` opens it pre-filled with
-`SELECT * FROM <current table> LIMIT 100;`. On `:wq` the statement runs: a **read**
-replaces the result pane with its rows (shown read-only — no table provenance, so
-sort/filter/scroll don't apply), a **write** runs via `Exec` and reloads the
-current table with the affected count. Classification errs safe — only a leading
-`SELECT`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`/`PRAGMA`/`DESCRIBE` counts as a read;
-everything else, **including any `WITH …`**, is a mutation (a data-modifying CTE
-like `WITH … DELETE` also leads with `WITH`, and the write path is what enforces a
-`read_only` connection's refusal). An empty buffer or `:q!` aborts.
+`s` opens `$EDITOR` prefilled with `SELECT * FROM <current table> LIMIT 100;` —
+or, if you've already run a query on this table, **your last query on it**, so you
+can iterate in a tight edit-run-edit loop (the last query is remembered per table,
+even if it errored, so you can fix a typo and re-run). On `:wq` the statement
+runs: a **read** replaces the result pane with its rows (shown read-only — no
+table provenance, so sort/filter/scroll don't apply), a **write** runs via `Exec`
+and reloads the current table with the affected count. Classification errs safe —
+only a leading `SELECT`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`/`PRAGMA`/`DESCRIBE`
+counts as a read; everything else, **including any `WITH …`**, is a mutation (a
+data-modifying CTE like `WITH … DELETE` also leads with `WITH`, and the write path
+is what enforces a `read_only` connection's refusal). An empty buffer or `:q!`
+aborts.
 
 ### Query history *(roadmap)*
 

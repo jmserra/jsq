@@ -50,7 +50,9 @@ type App struct {
 	sortCol      string
 	sortAsc      bool
 	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
-	adHoc        bool // grid shows a free-form (s/S) query result, not a table
+	adHoc        bool // grid shows a free-form (s) query result, not a table
+
+	lastQuery map[db.Table]string // per-table last scratch (s) query, for the edit loop
 
 	dbName         string
 	w, h           int
@@ -69,6 +71,7 @@ func New(conns []config.Conn, dsn, name string, readOnly bool) App {
 		connName:    name,
 		readOnly:    readOnly,
 		showSidebar: true,
+		lastQuery:   map[db.Table]string{},
 	}
 	if dsn != "" {
 		a.screen = screenBrowse
@@ -153,9 +156,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, editorCmd(msg.seed)
 
 	case editorSubmitMsg:
-		// A read (s/S) shows its rows; a mutation runs via Exec — and is refused
-		// on a read-only connection (the s/S mutation guard; E/o/D/p are already
-		// blocked at the key).
+		// Remember an s query as its table's last query, so the next s prefills
+		// it (even if it errors) for a tight edit-run-edit loop.
+		if msg.remember.Name != "" {
+			a.lastQuery[msg.remember] = msg.sql
+		}
+		// A read (s) shows its rows; a mutation runs via Exec — and is refused on a
+		// read-only connection (the s mutation guard; E/o/D/p are already blocked
+		// at the key).
 		if isReadSQL(msg.sql) {
 			a.status = "running query…"
 			return a, runQueryCmd(a.engine, msg.sql)
@@ -503,13 +511,7 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, a.loadCurrentCmd()
 		}
 	case "s":
-		return a, editorCmd(editorSeed{sql: ""})
-	case "S":
-		if a.currentTable.Name == "" {
-			a.status = "no table to template from"
-			return a, nil
-		}
-		return a, editorCmd(editorSeed{sql: selectTemplate(a.engine, a.currentTable.Ref())})
+		return a, editorCmd(a.scratchSeed())
 	}
 	// After a movement, fetch the next window if the cursor neared the edge.
 	return a, a.maybeLoadMore()
@@ -524,6 +526,17 @@ func (a *App) maybeLoadMore() tea.Cmd {
 	a.grid.loading = true
 	return loadMoreCmd(a.engine, a.currentTable, a.sortCol, a.sortAsc,
 		a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
+}
+
+// scratchSeed is the prefill for s: this table's last scratch query if one was
+// run, else the SELECT template. remember ties the eventual submit back to the
+// table so the loop continues.
+func (a App) scratchSeed() editorSeed {
+	sql := selectTemplate(a.engine, a.currentTable.Ref())
+	if last, ok := a.lastQuery[a.currentTable]; ok {
+		sql = last
+	}
+	return editorSeed{sql: sql, remember: a.currentTable}
 }
 
 // loadCurrentCmd (re)loads the current table with the active sort and filters.

@@ -60,6 +60,11 @@ type editorSeed struct {
 	line int // 1-based cursor line (0 = leave at top)
 	col  int // 1-based byte column to place the cursor
 	kind selectKind
+
+	// remember, when its Name is set, is the table whose scratch (s) query this
+	// is: on submit the SQL is stored as that table's last query, so the next s
+	// on it prefills your last query. Only s sets this; E/o/D/p leave it zero.
+	remember db.Table
 }
 
 // buildUpdateStmt is the E full-path starting point (the editing model in
