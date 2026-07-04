@@ -51,10 +51,11 @@ type App struct {
 	sortAsc      bool
 	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
 
-	dbName string
-	w, h   int
-	status string
-	err    error
+	dbName         string
+	w, h           int
+	status         string
+	postExecStatus string // shown after the reload that follows a full-path exec
+	err            error
 }
 
 // New builds the root model. If dsn != "", it connects directly; else the picker.
@@ -125,6 +126,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.focus = focusGrid
 		a.layout()
 		a.status = msg.table.Name
+		// A reload triggered by a full-path exec keeps its confirmation visible.
+		if a.postExecStatus != "" {
+			a.status = a.postExecStatus
+			a.postExecStatus = ""
+		}
 		return a, nil
 
 	case moreRowsMsg:
@@ -140,6 +146,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("⚠ %s: %d rows affected, expected 1", msg.col, msg.affected)
 		}
 		return a, nil
+
+	case editorSubmitMsg:
+		a.status = "running…"
+		return a, execRawCmd(a.engine, msg.sql)
+
+	case editorAbortedMsg:
+		a.status = "edit cancelled"
+		return a, nil
+
+	case execDoneMsg:
+		// Reload the current view so the change is reflected; the affected count
+		// survives the reload via postExecStatus.
+		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
+		return a, a.loadCurrentCmd()
 
 	case tea.KeyMsg:
 		return a.handleKey(msg)
@@ -386,6 +406,15 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "not editable — no single-table primary key"
 		} else if a.grid.startEdit() {
 			a.status = "editing " + a.grid.cols[a.grid.editC].name + " — Enter saves, Esc cancels"
+		}
+		return a, nil
+	case "E":
+		if a.readOnly {
+			a.status = "read-only connection — editing disabled"
+		} else if !a.grid.editable() {
+			a.status = "not editable — no single-table primary key"
+		} else if col, val, keys, ok := a.grid.fullEditTarget(); ok {
+			return a, editorCmd(buildUpdateStmt(a.engine, a.grid.table, col, val, keys))
 		}
 		return a, nil
 	case "enter":

@@ -419,13 +419,18 @@ func (g *grid) commitEdit() (editReq, bool) {
 	return editReq{table: g.table, col: g.cols[g.editC].name, val: val, keys: keys}, true
 }
 
-// keyPreds builds the WHERE predicates from the edited row's PK values. Returns
-// false if any PK column is missing or NULL (can't safely key the update).
-func (g *grid) keyPreds() ([]keyPred, bool) {
-	if len(g.pk) == 0 || g.editR >= len(g.visible) {
+// keyPreds builds the WHERE predicates from the edited row's PK values (quick
+// path). Returns false if any PK column is missing or NULL.
+func (g *grid) keyPreds() ([]keyPred, bool) { return g.keyPredsAt(g.editR) }
+
+// keyPredsAt builds the WHERE predicates from the PK values of the given
+// visible-row index. Returns false if any PK column is missing or NULL (can't
+// safely key the statement).
+func (g *grid) keyPredsAt(vr int) ([]keyPred, bool) {
+	if len(g.pk) == 0 || vr < 0 || vr >= len(g.visible) {
 		return nil, false
 	}
-	row := g.rows[g.visible[g.editR]]
+	row := g.rows[g.visible[vr]]
 	preds := make([]keyPred, 0, len(g.pk))
 	for _, name := range g.pk {
 		ci := g.colIndex(name)
@@ -435,6 +440,24 @@ func (g *grid) keyPreds() ([]keyPred, bool) {
 		preds = append(preds, keyPred{col: name, val: row[ci]})
 	}
 	return preds, true
+}
+
+// fullEditTarget returns the current cell's column, value, and the full-PK
+// predicates for the E full-path UPDATE. Unlike startEdit it opens no overlay —
+// E builds SQL and hands off to $EDITOR. ok is false when the grid isn't
+// editable or the row can't be keyed.
+func (g *grid) fullEditTarget() (col string, val any, keys []keyPred, ok bool) {
+	if !g.editable() || g.cursorR >= len(g.visible) || g.cursorC >= len(g.cols) {
+		return "", nil, nil, false
+	}
+	keys, ok = g.keyPredsAt(g.cursorR)
+	if !ok {
+		return "", nil, nil, false
+	}
+	if row := g.rows[g.visible[g.cursorR]]; g.cursorC < len(row) {
+		val = row[g.cursorC]
+	}
+	return g.cols[g.cursorC].name, val, keys, true
 }
 
 // applyEdit writes the committed value back into the in-memory row so the grid

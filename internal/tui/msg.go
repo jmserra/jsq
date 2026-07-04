@@ -32,5 +32,19 @@ type editDoneMsg struct {
 	affected int64
 }
 
+// editorSubmitMsg carries the SQL the user saved in $EDITOR (E full path). It is
+// run verbatim.
+type editorSubmitMsg struct{ sql string }
+
+// editorAbortedMsg means the editor closed without saving (:q!) or the buffer was
+// cleared — nothing runs.
+type editorAbortedMsg struct{}
+
+// execDoneMsg is delivered after a full-path statement runs (E; later o/D/p/s).
+type execDoneMsg struct {
+	sql      string
+	affected int64
+}
+
 // errMsg carries any async failure.
 type errMsg struct{ err error }

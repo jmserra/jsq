@@ -1,4 +1,4 @@
-// Package config loads the read-only connections file (§5 of DESIGN.md).
+// Package config loads the read-only connections file (see README.md).
 // The file is TOML with one section per connection; the section header is the
 // connection name. jsq never writes this file.
 package config

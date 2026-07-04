@@ -3,7 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jmserra/jsq/internal/db"
@@ -91,6 +95,118 @@ func execEditCmd(eng db.Engine, req editReq) tea.Cmd {
 			return errMsg{err}
 		}
 		return editDoneMsg{col: req.col, val: req.val, affected: n}
+	}
+}
+
+// editorCmd writes the seed SQL to a temp file, opens $EDITOR on it via
+// tea.ExecProcess (which releases and restores the terminal) with the cursor on
+// the value and (vim-family) the value pre-selected, and on exit reads it back
+// (E full path). An emptied buffer or a quit-without-save (:q!) aborts; a save
+// (:wq) — whether edited or run as-is — submits the SQL to run verbatim.
+func editorCmd(seed updateSeed) tea.Cmd {
+	f, err := os.CreateTemp("", "jsq-*.sql")
+	if err != nil {
+		return func() tea.Msg { return errMsg{err} }
+	}
+	path := f.Name()
+	if _, err := f.WriteString(seed.sql); err != nil {
+		f.Close()
+		os.Remove(path)
+		return func() tea.Msg { return errMsg{err} }
+	}
+	f.Close()
+
+	var seedMtime time.Time
+	if fi, err := os.Stat(path); err == nil {
+		seedMtime = fi.ModTime()
+	}
+
+	name, args := editorInvocation(path, seed)
+	c := exec.Command(name, args...)
+	return tea.ExecProcess(c, func(runErr error) tea.Msg {
+		defer os.Remove(path)
+		if runErr != nil {
+			return errMsg{runErr}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return errMsg{err}
+		}
+		mtimeBumped := false
+		if fi, err := os.Stat(path); err == nil && fi.ModTime().After(seedMtime) {
+			mtimeBumped = true
+		}
+		return editorResult(seed.sql, string(data), mtimeBumped)
+	})
+}
+
+// editorResult decides run-vs-abort from the editor's outcome. An emptied buffer
+// (cleared → cancel) aborts. Otherwise a save runs the SQL: mtime bumps on :wq
+// even without edits, and a content change covers the case where mtime
+// granularity can't tell an as-is :wq from a :q!. Neither → :q! → abort.
+func editorResult(seed, post string, mtimeBumped bool) tea.Msg {
+	if strings.TrimSpace(stripSQLComments(post)) == "" {
+		return editorAbortedMsg{}
+	}
+	if post != seed || mtimeBumped {
+		return editorSubmitMsg{sql: post}
+	}
+	return editorAbortedMsg{}
+}
+
+// editorInvocation resolves $EDITOR (falling back to vi) into a command name and
+// its args: the editor's own flags (whitespace-split, so "code -w" works), then
+// any vim-family cursor/selection commands, then the file path.
+func editorInvocation(path string, seed updateSeed) (string, []string) {
+	ed := os.Getenv("EDITOR")
+	if ed == "" {
+		ed = "vi"
+	}
+	parts := strings.Fields(ed)
+	name := parts[0]
+	args := append([]string{}, parts[1:]...)
+	args = append(args, positionArgs(name, seed)...)
+	return name, append(args, path)
+}
+
+// positionArgs returns vim-family startup commands to place the cursor on the
+// value and pre-select it in Visual mode (empty for non-vim editors, which just
+// open the file). feedkeys — not :normal — is used so the selection persists
+// into the interactive session.
+func positionArgs(editor string, seed updateSeed) []string {
+	if seed.line < 1 || seed.col < 1 || !isVimFamily(editor) {
+		return nil
+	}
+	cur := fmt.Sprintf("+call cursor(%d,%d)", seed.line, seed.col)
+	switch seed.kind {
+	case selectInsideQuotes:
+		return []string{cur, `+call feedkeys("vi'", "n")`}
+	case selectToken:
+		return []string{cur, `+call feedkeys("v$", "n")`}
+	default:
+		return []string{cur}
+	}
+}
+
+// isVimFamily reports whether the editor command is a vim variant that
+// understands the +call cursor/feedkeys startup commands.
+func isVimFamily(editor string) bool {
+	switch filepath.Base(editor) {
+	case "vim", "nvim", "vi", "view", "gvim", "mvim", "rvim", "vimx":
+		return true
+	}
+	return false
+}
+
+// execRawCmd runs a full-path statement verbatim — the user authored it in
+// $EDITOR, so it is not parameterized (unlike the keyed quick-path edit).
+func execRawCmd(eng db.Engine, query string) tea.Cmd {
+	return func() tea.Msg {
+		n, err := eng.Exec(context.Background(), query)
+		if err != nil {
+			return errMsg{err}
+		}
+		return execDoneMsg{sql: query, affected: n}
 	}
 }
 

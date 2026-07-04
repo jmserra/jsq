@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -416,6 +418,242 @@ func TestQuickEditUntouchedNullNoop(t *testing.T) {
 	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 1`)
 	if rs.Rows[0][0] != nil {
 		t.Fatalf("db value should stay NULL, got %v", rs.Rows[0][0])
+	}
+}
+
+// TestFullEditRunsEditedSQL drives the E full path at the message boundary:
+// fullEditTarget + buildUpdateStmt produce a keyed UPDATE; submitting edited SQL
+// runs it verbatim and reloads the grid to reflect the change. The $EDITOR spawn
+// lives in editorCmd and isn't driven here (no editor in tests).
+func TestFullEditRunsEditedSQL(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	// Default PK-descending sort puts id=2 (Linus) on row 0; move to "name".
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+
+	col, val, keys, ok := app.grid.fullEditTarget()
+	if !ok || col != "name" || val != "Linus" {
+		t.Fatalf("fullEditTarget = (%q, %v, ok=%v), want name/Linus", col, val, ok)
+	}
+	seed := buildUpdateStmt(app.engine, app.grid.table, col, val, keys)
+	for _, want := range []string{"UPDATE", `SET "name" = 'Linus'`, `WHERE "id" = 2`} {
+		if !strings.Contains(seed.sql, want) {
+			t.Fatalf("generated UPDATE missing %q:\n%s", want, seed.sql)
+		}
+	}
+	if strings.Contains(seed.sql, "-- jsq") {
+		t.Fatalf("statement should have no leading comment:\n%s", seed.sql)
+	}
+	// The cursor lands on the first char inside the quotes, with the inner text
+	// selected so `c` edits the string value in place.
+	if seed.kind != selectInsideQuotes || seed.line != 1 {
+		t.Fatalf("want inside-quotes selection on line 1, got kind=%d line=%d", seed.kind, seed.line)
+	}
+	if line0 := strings.SplitN(seed.sql, "\n", 2)[0]; seed.col-1 >= len(line0) || line0[seed.col-1] != 'L' {
+		t.Fatalf("cursor col %d should sit on the 'L' of Linus in %q", seed.col, line0)
+	}
+
+	// Simulate editing the value in $EDITOR and :wq.
+	edited := strings.Replace(seed.sql, "'Linus'", "'Neo'", 1)
+	m, cmd := app.Update(editorSubmitMsg{sql: edited})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("submitting edited SQL should run it")
+	}
+	done := cmd() // execRawCmd → execDoneMsg
+	if _, ok := done.(execDoneMsg); !ok {
+		t.Fatalf("want execDoneMsg, got %T (%+v)", done, done)
+	}
+	m, cmd = app.Update(done) // → reload
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("execDone should reload the view")
+	}
+	app = update(t, app, cmd()) // rowsMsg
+
+	if got, _, _ := app.grid.currentCell(); got != "Neo" {
+		t.Fatalf("grid cell after full edit = %v, want Neo", got)
+	}
+	if !strings.Contains(app.status, "affected") {
+		t.Fatalf("status should confirm the exec, got %q", app.status)
+	}
+	rs, err := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Rows) != 1 || rs.Rows[0][0] != "Neo" {
+		t.Fatalf("db row = %+v, want name Neo", rs.Rows)
+	}
+
+	// An aborted editor runs nothing and says so.
+	m, cmd = app.Update(editorAbortedMsg{})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("an aborted edit must not run anything")
+	}
+	if !strings.Contains(app.status, "cancel") {
+		t.Fatalf("status should note the cancel, got %q", app.status)
+	}
+}
+
+// TestFullEditReadOnly verifies E is refused on a read-only connection and never
+// opens an editor.
+func TestFullEditReadOnly(t *testing.T) {
+	app := loadTable(t, true, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("read-only E must not open an editor")
+	}
+	if !strings.Contains(app.status, "read-only") {
+		t.Fatalf("status should explain the refusal, got %q", app.status)
+	}
+}
+
+// TestEditorResult covers the run-vs-abort decision after $EDITOR exits.
+func TestEditorResult(t *testing.T) {
+	seed := "-- jsq: edit\nUPDATE t SET c = 'a' WHERE id = 1;\n"
+
+	// Edited and saved → run the edited SQL.
+	edited := strings.Replace(seed, "'a'", "'b'", 1)
+	if got := editorResult(seed, edited, true); got != (editorSubmitMsg{sql: edited}) {
+		t.Errorf("edited+save: got %#v, want submit(edited)", got)
+	}
+	// Run as-is (:wq, unchanged content but mtime bumped) → run the seed.
+	if got := editorResult(seed, seed, true); got != (editorSubmitMsg{sql: seed}) {
+		t.Errorf("as-is save: got %#v, want submit(seed)", got)
+	}
+	// Quit without saving (:q!, unchanged, no mtime bump) → abort.
+	if _, ok := editorResult(seed, seed, false).(editorAbortedMsg); !ok {
+		t.Errorf(":q! should abort")
+	}
+	// Buffer cleared (only comments/blank left) → abort even if saved.
+	if _, ok := editorResult(seed, "-- gone\n\n", true).(editorAbortedMsg); !ok {
+		t.Errorf("cleared buffer should abort")
+	}
+}
+
+func TestEditorInvocation(t *testing.T) {
+	// A non-vim editor with its own flag and no positioning.
+	t.Setenv("EDITOR", "code -w")
+	if n, args := editorInvocation("/x.sql", updateSeed{}); n != "code" ||
+		len(args) != 2 || args[0] != "-w" || args[1] != "/x.sql" {
+		t.Fatalf("code -w → %q %v", n, args)
+	}
+	// A zero seed adds no positioning even for a vim-family editor.
+	t.Setenv("EDITOR", "")
+	if n, args := editorInvocation("/x.sql", updateSeed{}); n != "vi" ||
+		len(args) != 1 || args[0] != "/x.sql" {
+		t.Fatalf("default vi, zero seed → %q %v, want vi [/x.sql]", n, args)
+	}
+	// A vim-family editor with a real seed gets cursor + Visual-select commands
+	// before the path.
+	t.Setenv("EDITOR", "nvim")
+	n, args := editorInvocation("/x.sql", updateSeed{line: 1, col: 29, kind: selectToken})
+	want := []string{"+call cursor(1,29)", `+call feedkeys("v$", "n")`, "/x.sql"}
+	if n != "nvim" || len(args) != len(want) {
+		t.Fatalf("nvim → %q %v", n, args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("nvim arg[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+	// Inside-quotes selection uses vi'.
+	if _, a := editorInvocation("/x.sql", updateSeed{line: 1, col: 5, kind: selectInsideQuotes}); a[1] != `+call feedkeys("vi'", "n")` {
+		t.Fatalf("inside-quotes should feedkeys vi', got %q", a[1])
+	}
+}
+
+// TestEditorSpawnRoundTrip exercises the real glue editorCmd owns — resolve
+// $EDITOR, spawn it on the seed file, read the result back, decide — with a fake
+// editor that rewrites the file (the tea.ExecProcess wrapper aside).
+func TestEditorSpawnRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	ed := filepath.Join(dir, "fakeed.sh")
+	if err := os.WriteFile(ed, []byte("#!/bin/sh\nsed -i 's/Ada/Neo/' \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", ed)
+
+	seed := "UPDATE t SET c = 'Ada' WHERE id = 1;\n"
+	path := filepath.Join(dir, "stmt.sql")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name, args := editorInvocation(path, updateSeed{})
+	if err := exec.Command(name, args...).Run(); err != nil {
+		t.Fatalf("fake editor failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := editorResult(seed, string(data), true)
+	sub, ok := msg.(editorSubmitMsg)
+	if !ok || !strings.Contains(sub.sql, "'Neo'") {
+		t.Fatalf("round trip = %#v, want submit containing 'Neo'", msg)
+	}
+}
+
+// TestBuildUpdateStmtSelection locks how each value type is targeted: numbers
+// and NULL select the whole token; strings select inside the quotes; empty and
+// multi-line values just place the cursor.
+func TestBuildUpdateStmtSelection(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, _ := db.Open(ctx, path)
+	defer e.Close()
+	tref := db.TableRef{Name: "t"}
+	keys := []keyPred{{col: "id", val: int64(1)}}
+
+	cases := []struct {
+		name string
+		val  any
+		kind selectKind
+		set  string
+	}{
+		{"number", int64(42), selectToken, `SET "c" = 42`},
+		{"null", nil, selectToken, `SET "c" = NULL`},
+		{"string", "Ada", selectInsideQuotes, `SET "c" = 'Ada'`},
+		{"empty", "", selectNone, `SET "c" = ''`},
+		{"multiline", "a\nb", selectNone, "SET \"c\" = 'a\nb'"},
+	}
+	for _, c := range cases {
+		seed := buildUpdateStmt(e, tref, "c", c.val, keys)
+		if seed.kind != c.kind {
+			t.Errorf("%s: kind = %d, want %d", c.name, seed.kind, c.kind)
+		}
+		if !strings.Contains(seed.sql, c.set) {
+			t.Errorf("%s: sql missing %q:\n%s", c.name, c.set, seed.sql)
+		}
+	}
+}
+
+func TestSQLLiteral(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{nil, "NULL"},
+		{int64(42), "42"},
+		{3.5, "3.5"},
+		{true, "TRUE"},
+		{"ada@x.io", "'ada@x.io'"},
+		{"O'Brien", "'O''Brien'"},
+	}
+	for _, c := range cases {
+		if got := sqlLiteral(c.in); got != c.want {
+			t.Errorf("sqlLiteral(%#v) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

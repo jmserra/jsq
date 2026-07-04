@@ -1,4 +1,4 @@
-// Package db is the single abstraction over a database engine (§6 of DESIGN.md).
+// Package db is the single abstraction over a database engine (see README.md).
 // First slice implements SQLite; Postgres/MySQL are stubbed at Open.
 package db
 

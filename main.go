@@ -1,4 +1,4 @@
-// Command jsq is a minimal, vim-only SQL TUI. See DESIGN.md.
+// Command jsq is a minimal, vim-only SQL TUI. See README.md.
 package main
 
 import (
