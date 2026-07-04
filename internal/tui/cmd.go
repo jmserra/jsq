@@ -224,6 +224,19 @@ func prepareInsertCmd(eng db.Engine, t db.Table) tea.Cmd {
 	}
 }
 
+// prepareDuplicateCmd fetches columns and builds the p (duplicate) seed from the
+// captured row values (keyed by column name); it then opens in $EDITOR.
+func prepareDuplicateCmd(eng db.Engine, t db.Table, vals map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		ref := t.Ref()
+		cols, err := eng.Columns(context.Background(), ref)
+		if err != nil {
+			return errMsg{err}
+		}
+		return editorReadyMsg{seed: buildDuplicateStmt(eng, ref, cols, vals)}
+	}
+}
+
 // whereClause builds "WHERE p1 AND p2 …" from the column filters (stacking AND),
 // binding each pattern as a parameter via the engine's FilterPredicate.
 func whereClause(eng db.Engine, filters []filterSpec) (string, []any) {

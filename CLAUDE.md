@@ -33,7 +33,7 @@ internal/db/
 internal/tui/
   app.go        # root App Model: screen/focus, ALL key routing (hardcoded — no keymap.go), layout, View
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd)
-  sqlgen.go     # pure SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D; p later)
+  sqlgen.go     # pure SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
   sidebar.go    # flat filterable table list Model
@@ -42,13 +42,14 @@ internal/tui/
   util.go       # clamp()
 ```
 
-The `$EDITOR` full path (`E`/`o`/`D`, and later `p`/`s`/`S`): the generators
+The `$EDITOR` full path (`E`/`o`/`D`/`p`, and later `s`/`S`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a
 temp file and spawns `$EDITOR` via `tea.ExecProcess`. `E` and `D` build their seed
-inline (`buildUpdateStmt`/`buildDeleteStmt`, from in-memory grid PK data); `o`
-needs enriched column metadata so it goes async — `prepareInsertCmd` fetches
-`Columns()` then `buildInsertStmt`, returning an `editorReadyMsg` that `Update`
-turns into `editorCmd`. (`Columns()`
+inline (`buildUpdateStmt`/`buildDeleteStmt`, from in-memory grid PK data); `o` and
+`p` need enriched column metadata so they go async — `prepareInsertCmd` /
+`prepareDuplicateCmd` fetch `Columns()` then `buildInsertStmt`/`buildDuplicateStmt`
+(the latter seeded with the row's captured values), returning an `editorReadyMsg`
+that `Update` turns into `editorCmd`. (`Columns()`
 now also populates `Column.Unique` per engine — pg/sqlite via a unique-constraint
 / unique-index query, mysql via `column_key`; it's only called for insert prep,
 not on every table open.) For vim-family editors

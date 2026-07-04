@@ -469,6 +469,22 @@ func (g *grid) rowKeys() ([]keyPred, bool) {
 	return g.keyPredsAt(g.cursorR)
 }
 
+// currentRowValues returns the row under the cursor keyed by column name, for the
+// p full-path duplicate. ok is false when the grid isn't editable or has no row.
+func (g *grid) currentRowValues() (map[string]any, bool) {
+	if !g.editable() || g.cursorR >= len(g.visible) {
+		return nil, false
+	}
+	row := g.rows[g.visible[g.cursorR]]
+	vals := make(map[string]any, len(g.cols))
+	for i, c := range g.cols {
+		if i < len(row) {
+			vals[c.name] = row[i]
+		}
+	}
+	return vals, true
+}
+
 // applyEdit writes the committed value back into the in-memory row so the grid
 // reflects the change immediately, without a server round-trip.
 func (g *grid) applyEdit(val string) {
