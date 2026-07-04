@@ -101,9 +101,9 @@ func execEditCmd(eng db.Engine, req editReq) tea.Cmd {
 // editorCmd writes the seed SQL to a temp file, opens $EDITOR on it via
 // tea.ExecProcess (which releases and restores the terminal) with the cursor on
 // the value and (vim-family) the value pre-selected, and on exit reads it back
-// (E full path). An emptied buffer or a quit-without-save (:q!) aborts; a save
-// (:wq) — whether edited or run as-is — submits the SQL to run verbatim.
-func editorCmd(seed updateSeed) tea.Cmd {
+// (the E/o full paths). An emptied buffer or a quit-without-save (:q!) aborts; a
+// save (:wq) — whether edited or run as-is — submits the SQL to run verbatim.
+func editorCmd(seed editorSeed) tea.Cmd {
 	f, err := os.CreateTemp("", "jsq-*.sql")
 	if err != nil {
 		return func() tea.Msg { return errMsg{err} }
@@ -157,7 +157,7 @@ func editorResult(seed, post string, mtimeBumped bool) tea.Msg {
 // editorInvocation resolves $EDITOR (falling back to vi) into a command name and
 // its args: the editor's own flags (whitespace-split, so "code -w" works), then
 // any vim-family cursor/selection commands, then the file path.
-func editorInvocation(path string, seed updateSeed) (string, []string) {
+func editorInvocation(path string, seed editorSeed) (string, []string) {
 	ed := os.Getenv("EDITOR")
 	if ed == "" {
 		ed = "vi"
@@ -173,7 +173,7 @@ func editorInvocation(path string, seed updateSeed) (string, []string) {
 // value and pre-select it in Visual mode (empty for non-vim editors, which just
 // open the file). feedkeys — not :normal — is used so the selection persists
 // into the interactive session.
-func positionArgs(editor string, seed updateSeed) []string {
+func positionArgs(editor string, seed editorSeed) []string {
 	if seed.line < 1 || seed.col < 1 || !isVimFamily(editor) {
 		return nil
 	}
@@ -207,6 +207,20 @@ func execRawCmd(eng db.Engine, query string) tea.Cmd {
 			return errMsg{err}
 		}
 		return execDoneMsg{sql: query, affected: n}
+	}
+}
+
+// prepareInsertCmd fetches the table's enriched columns (off the Update loop, as
+// it's a DB call) and builds the blank-INSERT seed for the o full path; the seed
+// then opens in $EDITOR via editorCmd.
+func prepareInsertCmd(eng db.Engine, t db.Table) tea.Cmd {
+	return func() tea.Msg {
+		ref := t.Ref()
+		cols, err := eng.Columns(context.Background(), ref)
+		if err != nil {
+			return errMsg{err}
+		}
+		return editorReadyMsg{seed: buildInsertStmt(eng, ref, cols)}
 	}
 }
 

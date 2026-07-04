@@ -36,8 +36,8 @@ func sqlitePath(dsn string) string {
 	return dsn
 }
 
-func (e *sqliteEngine) Close() error         { return e.db.Close() }
-func (e *sqliteEngine) UsesSchemas() bool     { return false }
+func (e *sqliteEngine) Close() error           { return e.db.Close() }
+func (e *sqliteEngine) UsesSchemas() bool      { return false }
 func (e *sqliteEngine) Placeholder(int) string { return "?" }
 
 func (e *sqliteEngine) QuoteIdent(s string) string {
@@ -85,10 +85,10 @@ func (e *sqliteEngine) Columns(ctx context.Context, t TableRef) ([]Column, error
 	pkCount := 0
 	for rows.Next() {
 		var (
-			cid           int
-			name, ctype   string
-			notnull, pk   int
-			dflt          sql.NullString
+			cid         int
+			name, ctype string
+			notnull, pk int
+			dflt        sql.NullString
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			return nil, err
@@ -113,21 +113,99 @@ func (e *sqliteEngine) Columns(ctx context.Context, t TableRef) ([]Column, error
 			}
 		}
 	}
-	return cols, rows.Err()
-}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-func (e *sqliteEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {
-	cols, err := e.Columns(ctx, t)
+	uniq, err := e.uniqueColumns(ctx, t)
 	if err != nil {
 		return nil, err
 	}
-	var pk []string
-	for _, c := range cols {
-		if c.PrimaryKey {
-			pk = append(pk, c.Name)
+	for i := range cols {
+		if cols[i].PrimaryKey || uniq[cols[i].Name] {
+			cols[i].Unique = true
 		}
 	}
-	return pk, nil
+	return cols, nil
+}
+
+// uniqueColumns returns the set of columns covered by a UNIQUE index (used to
+// annotate generated inserts), via PRAGMA index_list + index_info.
+func (e *sqliteEngine) uniqueColumns(ctx context.Context, t TableRef) (map[string]bool, error) {
+	rows, err := e.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", e.QuoteIdent(t.Name)))
+	if err != nil {
+		return nil, err
+	}
+	var uniqueIdx []string
+	for rows.Next() {
+		var (
+			seq, unique, partial int
+			name, origin         string
+		)
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if unique == 1 {
+			uniqueIdx = append(uniqueIdx, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	out := map[string]bool{}
+	for _, idx := range uniqueIdx {
+		irows, err := e.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%s)", e.QuoteIdent(idx)))
+		if err != nil {
+			return nil, err
+		}
+		for irows.Next() {
+			var seqno, cid int
+			var cname sql.NullString
+			if err := irows.Scan(&seqno, &cid, &cname); err != nil {
+				irows.Close()
+				return nil, err
+			}
+			if cname.Valid {
+				out[cname.String] = true
+			}
+		}
+		if err := irows.Err(); err != nil {
+			irows.Close()
+			return nil, err
+		}
+		irows.Close()
+	}
+	return out, nil
+}
+
+// PrimaryKey reads just the PK from PRAGMA table_info — deliberately not via
+// Columns, which also runs the unique-index PRAGMAs. PrimaryKey is on the hot
+// path (every load and scroll fetch); the unique lookup is only wanted for o.
+func (e *sqliteEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {
+	rows, err := e.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", e.QuoteIdent(t.Name)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pk []string
+	for rows.Next() {
+		var (
+			cid, notnull, pkFlag int
+			name, ctype          string
+			dflt                 sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pkFlag); err != nil {
+			return nil, err
+		}
+		if pkFlag > 0 {
+			pk = append(pk, name)
+		}
+	}
+	return pk, rows.Err()
 }
 
 func (e *sqliteEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {

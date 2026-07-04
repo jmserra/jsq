@@ -25,9 +25,9 @@ func openPostgres(ctx context.Context, dsn string) (Engine, error) {
 	return &pgEngine{db: sdb}, nil
 }
 
-func (e *pgEngine) Close() error              { return e.db.Close() }
-func (e *pgEngine) UsesSchemas() bool         { return true }
-func (e *pgEngine) Placeholder(i int) string  { return fmt.Sprintf("$%d", i) }
+func (e *pgEngine) Close() error             { return e.db.Close() }
+func (e *pgEngine) UsesSchemas() bool        { return true }
+func (e *pgEngine) Placeholder(i int) string { return fmt.Sprintf("$%d", i) }
 
 func (e *pgEngine) QuoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
@@ -128,9 +128,50 @@ func (e *pgEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	for _, name := range pk {
 		if i, ok := idx[name]; ok {
 			cols[i].PrimaryKey = true
+			cols[i].Unique = true
+		}
+	}
+	uniq, err := e.uniqueColumns(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range uniq {
+		if i, ok := idx[name]; ok {
+			cols[i].Unique = true
 		}
 	}
 	return cols, nil
+}
+
+// uniqueColumns returns columns covered by a UNIQUE constraint (used to annotate
+// generated inserts). Bare unique indexes aren't included — constraints are the
+// common case and mirror the PrimaryKey query.
+func (e *pgEngine) uniqueColumns(ctx context.Context, t TableRef) ([]string, error) {
+	schema := t.Schema
+	if schema == "" {
+		schema = "public"
+	}
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		 AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'UNIQUE'
+		  AND tc.table_schema = $1 AND tc.table_name = $2`, schema, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {

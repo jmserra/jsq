@@ -33,7 +33,7 @@ internal/db/
 internal/tui/
   app.go        # root App Model: screen/focus, ALL key routing (hardcoded — no keymap.go), layout, View
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd)
-  sqlgen.go     # pure SQL-text generation for the $EDITOR full paths (buildUpdateStmt/sqlLiteral; E now, o/D/p later)
+  sqlgen.go     # pure SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o; D/p later)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
   sidebar.go    # flat filterable table list Model
@@ -42,9 +42,15 @@ internal/tui/
   util.go       # clamp()
 ```
 
-The `$EDITOR` full path (`E`, and later `o`/`D`/`p`/`s`/`S`): `buildUpdateStmt`
-returns an `updateSeed` (SQL + value line/col + `selectKind`); `editorCmd` seeds a
-temp file and spawns `$EDITOR` via `tea.ExecProcess`. For vim-family editors
+The `$EDITOR` full path (`E`/`o`, and later `D`/`p`/`s`/`S`): the generators
+return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a
+temp file and spawns `$EDITOR` via `tea.ExecProcess`. `E` builds its seed inline
+(`buildUpdateStmt`, in-memory grid data); `o` needs enriched column metadata so
+it goes async — `prepareInsertCmd` fetches `Columns()` then `buildInsertStmt`,
+returning an `editorReadyMsg` that `Update` turns into `editorCmd`. (`Columns()`
+now also populates `Column.Unique` per engine — pg/sqlite via a unique-constraint
+/ unique-index query, mysql via `column_key`; it's only called for insert prep,
+not on every table open.) For vim-family editors
 (`isVimFamily`), `positionArgs` adds `+call cursor(...)` and a `feedkeys` (not
 `:normal`, which drops the selection) so the editor opens with the value
 selected — `vi'` inside a string's quotes, `v$` for a NULL/number token. On exit

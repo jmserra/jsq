@@ -18,14 +18,14 @@ first, then the philosophy and design that shape it.
 
 Browsing works end-to-end across all three engines: connect, list tables, and a
 fixed-width results grid with continuous scroll, per-column sort, per-column
-filter, and a full-cell viewer. **Both cell edits are in: the quick overlay
-(`e`) and the `$EDITOR` full path (`E`).**
+filter, and a full-cell viewer. **Editing: the quick cell overlay (`e`), the
+`$EDITOR` full-path cell edit (`E`), and the blank-row insert (`o`) are in.**
 
 On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
 
-- **Editing** — `o`/`D`/`p` (insert / delete / duplicate) generated as SQL and
-  opened in `$EDITOR` (the `e` quick cell edit and `E` full-path edit already work).
+- **Editing** — `D`/`p` (delete / duplicate) generated as SQL and opened in
+  `$EDITOR` (`e` quick cell edit, `E` full-path edit, and `o` insert already work).
 - **`s` / `S`** — author free-form SQL in `$EDITOR`.
 - **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back.
 - **`?` help overlay** — generated from the keymap.
@@ -113,6 +113,7 @@ section-per-connection layout reads like INI but gets a strict parser.
 | `Esc` | clear the current column's filter |
 | `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
 | `E` | edit the current cell in `$EDITOR` — opens the generated keyed `UPDATE` with the value pre-selected (vim/nvim); `:wq` runs it, `:q!` or an empty buffer aborts |
+| `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
 | `H` | toggle the table sidebar (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
 | `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
@@ -358,12 +359,14 @@ on a connection, which disables all mutation regardless.
   with the cursor on it and the value pre-selected in Visual mode, so `c` edits it
   straight away (inside the quotes for a string, the whole token for a
   number/`NULL`). Set `NULL` by writing a bare `NULL`. The statement is always
-  keyed on the full PK. `E` (edit the current cell) is **built**; `o`
-  (blank `INSERT` skeleton), `D` (`DELETE … WHERE pk = …`), and `p` (duplicate:
-  an `INSERT` pre-filled from the current row, same table only, auto-generated PK
-  omitted / natural PK flagged as the value to change) are **roadmap** on this
-  same path. Because you author the SQL, the full path runs it as written — it is
-  not parameterized, unlike the quick path.
+  keyed on the full PK. `E` (edit the current cell) and `o` (blank `INSERT`
+  skeleton — insertable columns only, one `NULL` per line with a `-- col` comment,
+  auto-generated columns omitted so the DB assigns them, a `⚠ PRIMARY KEY`/
+  `⚠ UNIQUE` flag on columns likely to collide, and a note on defaulted columns so
+  you can delete the line to use the default) are **built**. `D` (`DELETE … WHERE pk = …`) and `p` (duplicate: an `INSERT`
+  pre-filled from the current row, same table only, natural PK flagged as the
+  value to change) are **roadmap** on this same path. Because you author the SQL,
+  the full path runs it as written — it is not parameterized, unlike the quick path.
 
 ### Safety rails
 

@@ -147,6 +147,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case editorReadyMsg:
+		return a, editorCmd(msg.seed)
+
 	case editorSubmitMsg:
 		a.status = "running…"
 		return a, execRawCmd(a.engine, msg.sql)
@@ -415,6 +418,16 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "not editable — no single-table primary key"
 		} else if col, val, keys, ok := a.grid.fullEditTarget(); ok {
 			return a, editorCmd(buildUpdateStmt(a.engine, a.grid.table, col, val, keys))
+		}
+		return a, nil
+	case "o":
+		if a.readOnly {
+			a.status = "read-only connection — editing disabled"
+		} else if !a.grid.editable() {
+			a.status = "not editable — no single-table primary key"
+		} else {
+			a.status = "preparing insert…"
+			return a, prepareInsertCmd(a.engine, a.currentTable)
 		}
 		return a, nil
 	case "enter":

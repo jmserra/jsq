@@ -32,8 +32,12 @@ type editDoneMsg struct {
 	affected int64
 }
 
-// editorSubmitMsg carries the SQL the user saved in $EDITOR (E full path). It is
-// run verbatim.
+// editorReadyMsg carries a seed that was built off the Update loop (e.g. o, which
+// must fetch column metadata first) and is ready to open in $EDITOR.
+type editorReadyMsg struct{ seed editorSeed }
+
+// editorSubmitMsg carries the SQL the user saved in $EDITOR (E/o full paths). It
+// is run verbatim.
 type editorSubmitMsg struct{ sql string }
 
 // editorAbortedMsg means the editor closed without saving (:q!) or the buffer was
