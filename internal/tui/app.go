@@ -430,6 +430,15 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, prepareInsertCmd(a.engine, a.currentTable)
 		}
 		return a, nil
+	case "D":
+		if a.readOnly {
+			a.status = "read-only connection — editing disabled"
+		} else if !a.grid.editable() {
+			a.status = "not editable — no single-table primary key"
+		} else if keys, ok := a.grid.rowKeys(); ok {
+			return a, editorCmd(buildDeleteStmt(a.engine, a.grid.table, keys))
+		}
+		return a, nil
 	case "enter":
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)

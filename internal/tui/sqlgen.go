@@ -154,6 +154,18 @@ func buildInsertStmt(eng db.Engine, table db.TableRef, cols []db.Column) editorS
 	return editorSeed{sql: b.String(), line: 3, col: 3, kind: selectNone}
 }
 
+// buildDeleteStmt is the D full-path starting point: a full-PK-keyed DELETE for
+// the current row, opened in $EDITOR for review — :wq confirms and runs it, :q!
+// (or an emptied buffer) aborts. Never a bare DELETE.
+func buildDeleteStmt(eng db.Engine, table db.TableRef, keys []keyPred) editorSeed {
+	preds := make([]string, len(keys))
+	for i, k := range keys {
+		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
+	}
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s;\n", eng.QualifiedName(table), strings.Join(preds, " AND "))
+	return editorSeed{sql: sql, line: 1, col: 1, kind: selectNone}
+}
+
 // stripSQLComments drops -- line comments and blank lines. Used only to detect an
 // emptied editor buffer (cleared → abort); the statement that actually runs is
 // the file's full contents.

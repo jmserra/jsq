@@ -460,6 +460,15 @@ func (g *grid) fullEditTarget() (col string, val any, keys []keyPred, ok bool) {
 	return g.cols[g.cursorC].name, val, keys, true
 }
 
+// rowKeys returns the full-PK predicates of the row under the cursor, for the D
+// full-path DELETE. ok is false when the grid isn't editable or can't be keyed.
+func (g *grid) rowKeys() ([]keyPred, bool) {
+	if !g.editable() || g.cursorR >= len(g.visible) {
+		return nil, false
+	}
+	return g.keyPredsAt(g.cursorR)
+}
+
 // applyEdit writes the committed value back into the in-memory row so the grid
 // reflects the change immediately, without a server round-trip.
 func (g *grid) applyEdit(val string) {

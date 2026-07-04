@@ -748,6 +748,81 @@ func TestBlankInsertReadOnly(t *testing.T) {
 	}
 }
 
+// TestDeleteRow drives the D full path: D yields a PK-keyed DELETE, and
+// submitting it (as if :wq) removes the row and reloads.
+func TestDeleteRow(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	// Default PK-descending sort puts id=2 (Linus) on row 0.
+	if got, _, _ := app.grid.currentCell(); got != int64(2) {
+		t.Fatalf("row 0 should be id=2, got %v", got)
+	}
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("D should open a DELETE in the editor")
+	}
+	// D builds its seed inline, so we can't read it from the ExecProcess cmd;
+	// rebuild it the same way to submit verbatim (as if the user :wq'd).
+	keys, ok := app.grid.rowKeys()
+	if !ok {
+		t.Fatal("row should be keyable")
+	}
+	seed := buildDeleteStmt(app.engine, app.grid.table, keys)
+	if !strings.Contains(seed.sql, `DELETE FROM "users" WHERE "id" = 2;`) {
+		t.Fatalf("delete seed wrong:\n%s", seed.sql)
+	}
+
+	m, cmd = app.Update(editorSubmitMsg{sql: seed.sql})
+	app = m.(App)
+	m, cmd = app.Update(cmd()) // execDone → reload
+	app = m.(App)
+	app = update(t, app, cmd()) // rowsMsg
+
+	rs, _ := app.engine.Query(context.Background(), `SELECT id FROM users ORDER BY id`)
+	if len(rs.Rows) != 1 || rs.Rows[0][0] != int64(1) {
+		t.Fatalf("db rows = %+v, want only id=1", rs.Rows)
+	}
+	if len(app.grid.rows) != 1 {
+		t.Fatalf("grid should show 1 row after delete, got %d", len(app.grid.rows))
+	}
+}
+
+// TestBuildDeleteComposite checks a composite PK ANDs its predicates.
+func TestBuildDeleteComposite(t *testing.T) {
+	ctx := context.Background()
+	e, _ := db.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	defer e.Close()
+	seed := buildDeleteStmt(e, db.TableRef{Name: "grades"}, []keyPred{
+		{col: "student", val: int64(7)},
+		{col: "course", val: "cs101"},
+	})
+	if !strings.Contains(seed.sql, `DELETE FROM "grades" WHERE "student" = 7 AND "course" = 'cs101';`) {
+		t.Fatalf("composite delete wrong:\n%s", seed.sql)
+	}
+}
+
+// TestDeleteReadOnly verifies D is refused on a read-only connection.
+func TestDeleteReadOnly(t *testing.T) {
+	app := loadTable(t, true, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("read-only D must not open an editor")
+	}
+	if !strings.Contains(app.status, "read-only") {
+		t.Fatalf("status should explain the refusal, got %q", app.status)
+	}
+}
+
 func TestSQLLiteral(t *testing.T) {
 	cases := []struct {
 		in   any
