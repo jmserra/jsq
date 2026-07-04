@@ -33,7 +33,7 @@ internal/db/
 internal/tui/
   app.go        # root App Model: screen/focus, ALL key routing (hardcoded — no keymap.go), layout, View
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd)
-  sqlgen.go     # pure SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p)
+  sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s/S helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
   sidebar.go    # flat filterable table list Model
@@ -57,10 +57,15 @@ not on every table open.) For vim-family editors
 `:normal`, which drops the selection) so the editor opens with the value
 selected — `vi'` inside a string's quotes, `v$` for a NULL/number token. On exit
 `editorResult` decides submit-vs-abort (mtime bump or content change → run;
-cleared buffer or `:q!` → abort). Submitted SQL runs **verbatim** via
-`execRawCmd`, then the view reloads. This is the deliberate exception to
-invariant 6 — full-path SQL is user-authored and inlined (`sqlLiteral`), not
-parameter-bound.
+cleared buffer or `:q!` → abort). The `editorSubmitMsg` handler then classifies
+the SQL (`isReadSQL`): a **read** (`s`/`S` SELECT-likes) runs via `runQueryCmd` →
+`queryResultMsg`, shown in the grid with `adHoc=true` (no table provenance → not
+editable, and J/K/`/` are guarded off since they'd re-query the table); a
+**write** (E/o/D/p, or an `s`/`S` mutation) runs **verbatim** via `execRawCmd`,
+then the view reloads. Note WITH counts as a write, and the write branch is where
+the `read_only` guard for free-form `s`/`S` mutations lives. This is the
+deliberate exception to invariant 6 — full-path SQL is user-authored and inlined
+(`sqlLiteral`), not parameter-bound.
 
 Note: many `.go` comments still carry `§N` section refs that pointed at the old
 DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.

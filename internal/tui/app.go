@@ -50,6 +50,7 @@ type App struct {
 	sortCol      string
 	sortAsc      bool
 	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
+	adHoc        bool // grid shows a free-form (s/S) query result, not a table
 
 	dbName         string
 	w, h           int
@@ -122,6 +123,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.grid.reset()
 			a.resetGrid = false
 		}
+		a.adHoc = false // a table load leaves any prior s/S result behind
 		a.showSidebar = false
 		a.focus = focusGrid
 		a.layout()
@@ -151,11 +153,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, editorCmd(msg.seed)
 
 	case editorSubmitMsg:
+		// A read (s/S) shows its rows; a mutation runs via Exec — and is refused
+		// on a read-only connection (the s/S mutation guard; E/o/D/p are already
+		// blocked at the key).
+		if isReadSQL(msg.sql) {
+			a.status = "running query…"
+			return a, runQueryCmd(a.engine, msg.sql)
+		}
+		if a.readOnly {
+			a.status = "read-only connection — statement not run"
+			return a, nil
+		}
 		a.status = "running…"
 		return a, execRawCmd(a.engine, msg.sql)
 
 	case editorAbortedMsg:
 		a.status = "edit cancelled"
+		return a, nil
+
+	case queryResultMsg:
+		a.grid.setResult(msg.rs)
+		a.grid.setSort("", false)
+		a.grid.clearFilters()
+		a.grid.hasMore = false
+		a.grid.loading = false
+		a.grid.reset()
+		a.adHoc = true
+		a.showSidebar = false
+		a.focus = focusGrid
+		a.layout()
+		a.status = fmt.Sprintf("query — %d row(s)", len(msg.rs.Rows))
 		return a, nil
 
 	case execDoneMsg:
@@ -397,6 +424,10 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "$":
 		a.grid.lastCol()
 	case "/":
+		if a.adHoc {
+			a.status = "filter unavailable on a query result"
+			return a, nil
+		}
 		a.grid.startFilter()
 	case "esc":
 		if a.grid.clearCurrentFilter() {
@@ -454,15 +485,31 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
 		}
 	case "J":
+		if a.adHoc {
+			a.status = "sort unavailable on a query result"
+			return a, nil
+		}
 		if name, ok := a.grid.currentColName(); ok {
 			a.sortCol, a.sortAsc = name, true
 			return a, a.loadCurrentCmd()
 		}
 	case "K":
+		if a.adHoc {
+			a.status = "sort unavailable on a query result"
+			return a, nil
+		}
 		if name, ok := a.grid.currentColName(); ok {
 			a.sortCol, a.sortAsc = name, false
 			return a, a.loadCurrentCmd()
 		}
+	case "s":
+		return a, editorCmd(editorSeed{sql: ""})
+	case "S":
+		if a.currentTable.Name == "" {
+			a.status = "no table to template from"
+			return a, nil
+		}
+		return a, editorCmd(editorSeed{sql: selectTemplate(a.engine, a.currentTable.Ref())})
 	}
 	// After a movement, fetch the next window if the cursor neared the edge.
 	return a, a.maybeLoadMore()

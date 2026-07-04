@@ -44,11 +44,15 @@ type editorSubmitMsg struct{ sql string }
 // cleared — nothing runs.
 type editorAbortedMsg struct{}
 
-// execDoneMsg is delivered after a full-path statement runs (E; later o/D/p/s).
+// execDoneMsg is delivered after a full-path mutation runs (E/o/D/p, or an s/S
+// write).
 type execDoneMsg struct {
 	sql      string
 	affected int64
 }
+
+// queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
+type queryResultMsg struct{ rs *db.ResultSet }
 
 // errMsg carries any async failure.
 type errMsg struct{ err error }

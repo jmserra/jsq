@@ -923,6 +923,114 @@ func TestDeleteReadOnly(t *testing.T) {
 	}
 }
 
+func TestIsReadSQL(t *testing.T) {
+	reads := []string{"SELECT 1", "  select * from t", "-- note\nSELECT 1", "PRAGMA x",
+		"EXPLAIN SELECT 1", "SHOW TABLES", "VALUES (1)", "TABLE users"}
+	for _, s := range reads {
+		if !isReadSQL(s) {
+			t.Errorf("isReadSQL(%q) = false, want true", s)
+		}
+	}
+	// WITH is deliberately not a read (a data-modifying CTE also leads with WITH).
+	writes := []string{"INSERT INTO t VALUES (1)", "update t set a=1", "DELETE FROM t",
+		"WITH x AS (SELECT 1) SELECT * FROM x", "CREATE TABLE t (a int)", "", "-- only a comment"}
+	for _, s := range writes {
+		if isReadSQL(s) {
+			t.Errorf("isReadSQL(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestSelectTemplate(t *testing.T) {
+	ctx := context.Background()
+	e, _ := db.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	defer e.Close()
+	if got, want := selectTemplate(e, db.TableRef{Name: "users"}), "SELECT * FROM \"users\" LIMIT 100;\n"; got != want {
+		t.Fatalf("selectTemplate = %q, want %q", got, want)
+	}
+}
+
+// TestScratchQuery drives the s read path: submitting a SELECT runs it and shows
+// the rows as a read-only (non-editable, non-sortable) result pane.
+func TestScratchQuery(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// s opens the editor (an ExecProcess we don't drive); simulate :wq of a SELECT.
+	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd == nil {
+		t.Fatal("s should open the editor")
+	}
+	m, cmd := app.Update(editorSubmitMsg{sql: "SELECT name FROM users ORDER BY name;"})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("a read submit should run a query")
+	}
+	qr, ok := cmd().(queryResultMsg)
+	if !ok {
+		t.Fatalf("want queryResultMsg")
+	}
+	app = update(t, app, qr)
+
+	if !app.adHoc {
+		t.Fatal("a query result should set adHoc")
+	}
+	if app.grid.editable() {
+		t.Fatal("a query result must be non-editable")
+	}
+	if len(app.grid.rows) != 2 {
+		t.Fatalf("query should show 2 rows, got %d", len(app.grid.rows))
+	}
+	view := app.View()
+	if !strings.Contains(view, "Ada") || !strings.Contains(view, "Linus") {
+		t.Fatalf("query view missing rows:\n%s", view)
+	}
+	// Sort/filter operate on the table, not the ad-hoc result, so they're disabled.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("J on a query result must not reload the table")
+	}
+	if !strings.Contains(app.status, "unavailable") {
+		t.Fatalf("status should note sort is unavailable, got %q", app.status)
+	}
+}
+
+// TestScratchMutationReadOnly verifies a read-only connection refuses a free-form
+// mutation but still runs a free-form read.
+func TestScratchMutationReadOnly(t *testing.T) {
+	app := loadTable(t, true, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	m, cmd := app.Update(editorSubmitMsg{sql: `INSERT INTO users (name) VALUES ('X');`})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("read-only must refuse a free-form mutation")
+	}
+	if !strings.Contains(app.status, "read-only") {
+		t.Fatalf("status should explain the refusal, got %q", app.status)
+	}
+	rs, _ := app.engine.Query(context.Background(), `SELECT count(*) FROM users`)
+	if rs.Rows[0][0] != int64(1) {
+		t.Fatalf("mutation must not have run; row count = %v", rs.Rows[0][0])
+	}
+
+	// A read is still allowed.
+	m, cmd = app.Update(editorSubmitMsg{sql: `SELECT * FROM users;`})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("a read should run even on a read-only connection")
+	}
+	if _, ok := cmd().(queryResultMsg); !ok {
+		t.Fatalf("a read submit should produce a query result")
+	}
+}
+
 func TestSQLLiteral(t *testing.T) {
 	cases := []struct {
 		in   any

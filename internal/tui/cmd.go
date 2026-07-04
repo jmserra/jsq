@@ -224,6 +224,18 @@ func prepareInsertCmd(eng db.Engine, t db.Table) tea.Cmd {
 	}
 }
 
+// runQueryCmd runs a free-form read (s/S) and returns its result set to display.
+// The result carries no table/PK provenance, so the grid renders it read-only.
+func runQueryCmd(eng db.Engine, query string) tea.Cmd {
+	return func() tea.Msg {
+		rs, err := eng.Query(context.Background(), query)
+		if err != nil {
+			return errMsg{err}
+		}
+		return queryResultMsg{rs: rs}
+	}
+}
+
 // prepareDuplicateCmd fetches columns and builds the p (duplicate) seed from the
 // captured row values (keyed by column name); it then opens in $EDITOR.
 func prepareDuplicateCmd(eng db.Engine, t db.Table, vals map[string]any) tea.Cmd {

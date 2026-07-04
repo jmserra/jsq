@@ -194,6 +194,49 @@ func buildDeleteStmt(eng db.Engine, table db.TableRef, keys []keyPred) editorSee
 	return editorSeed{sql: sql, line: 1, col: 1, kind: selectNone}
 }
 
+// selectTemplate is the S starting point: a bounded select of the current table.
+func selectTemplate(eng db.Engine, t db.TableRef) string {
+	return fmt.Sprintf("SELECT * FROM %s LIMIT 100;\n", eng.QualifiedName(t))
+}
+
+// leadingKeyword returns the upper-cased first SQL keyword, skipping leading
+// line comments (-- …) and whitespace.
+func leadingKeyword(sql string) string {
+	for {
+		sql = strings.TrimLeft(sql, " \t\r\n")
+		if strings.HasPrefix(sql, "--") {
+			i := strings.IndexByte(sql, '\n')
+			if i < 0 {
+				return ""
+			}
+			sql = sql[i+1:]
+			continue
+		}
+		break
+	}
+	end := len(sql)
+	for i, r := range sql {
+		if strings.ContainsRune(" \t\r\n(;", r) {
+			end = i
+			break
+		}
+	}
+	return strings.ToUpper(sql[:end])
+}
+
+// isReadSQL reports whether a free-form statement (s/S) is a read that should
+// display its rows, vs a mutation that runs via Exec. Errs safe: only plainly
+// read-only leading verbs count — notably WITH does not, since a data-modifying
+// CTE (WITH … DELETE) also leads with WITH, and routing it to the read path would
+// bypass the read_only guard.
+func isReadSQL(sql string) bool {
+	switch leadingKeyword(sql) {
+	case "SELECT", "VALUES", "TABLE", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE", "DESC":
+		return true
+	}
+	return false
+}
+
 // stripSQLComments drops -- line comments and blank lines. Used only to detect an
 // emptied editor buffer (cleared → abort); the statement that actually runs is
 // the file's full contents.

@@ -20,15 +20,17 @@ Browsing works end-to-end across all three engines: connect, list tables, and a
 fixed-width results grid with continuous scroll, per-column sort, per-column
 filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 (`e`), plus the `$EDITOR` full paths — cell edit (`E`), blank-row insert (`o`),
-row delete (`D`), and row duplicate (`p`).**
+row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`/`S`)
+is in too.**
 
 On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
 
-- **`s` / `S`** — author free-form SQL in `$EDITOR`.
 - **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back.
 - **`?` help overlay** — generated from the keymap.
 - **Clipboard yank** (`y`/`Y`) and a **database picker**.
+- **Dismissible errors** — a failed statement currently shows a full-screen
+  error; it should surface in the status line and let you continue.
 
 ---
 
@@ -115,6 +117,8 @@ section-per-connection layout reads like INI but gets a strict parser.
 | `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
+| `s` | author free-form SQL in a scratch `$EDITOR` buffer; `:wq` runs it — a read shows its rows, a write runs and reports the affected count |
+| `S` | like `s`, pre-filled with `SELECT * FROM <current table> LIMIT 100;` |
 | `H` | toggle the table sidebar (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
 | `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
@@ -314,14 +318,24 @@ is the scroll key, tiebroken by PK. **Default order** is by primary key
 descending (newest first). The header shows a `▲`/`▼` marker. Composes with
 filters.
 
+### Free-form SQL (`s` / `S`)
+
+`s` opens a scratch buffer in `$EDITOR`; `S` opens it pre-filled with
+`SELECT * FROM <current table> LIMIT 100;`. On `:wq` the statement runs: a **read**
+replaces the result pane with its rows (shown read-only — no table provenance, so
+sort/filter/scroll don't apply), a **write** runs via `Exec` and reloads the
+current table with the affected count. Classification errs safe — only a leading
+`SELECT`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`/`PRAGMA`/`DESCRIBE` counts as a read;
+everything else, **including any `WITH …`**, is a mutation (a data-modifying CTE
+like `WITH … DELETE` also leads with `WITH`, and the write path is what enforces a
+`read_only` connection's refusal). An empty buffer or `:q!` aborts.
+
 ### Query history *(roadmap)*
 
 One result pane, not tabs — the query, not the result, is the thing you keep.
 Planned: a session-scoped in-memory ring of every statement (reads and mutations
 alike); `Ctrl-r` history picker (reads re-execute, mutations open in nvim);
-`Ctrl-o` steps back to the previous read. Classification errs safe — only a
-leading `SELECT`/`SHOW`/`EXPLAIN`/`PRAGMA` counts as a read; everything else,
-including any `WITH …`, is treated as a mutation.
+`Ctrl-o` steps back to the previous read.
 
 ### Modes
 

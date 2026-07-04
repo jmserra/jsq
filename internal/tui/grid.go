@@ -91,6 +91,8 @@ func (g *grid) setResult(rs *db.ResultSet) {
 	g.rows = rs.Rows
 	if rs.Table != nil {
 		g.table = *rs.Table
+	} else {
+		g.table = db.TableRef{} // ad-hoc query result: no provenance → not editable
 	}
 	g.pk = rs.PK
 	g.cols = make([]column, len(rs.Cols))
