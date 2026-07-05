@@ -62,15 +62,32 @@ type Engine interface {
 	Close() error
 }
 
+// openConfig holds the resolved Open options.
+type openConfig struct{ readOnly bool }
+
+// Option customizes Open.
+type Option func(*openConfig)
+
+// ReadOnly, when ro is true, opens the connection so the database itself refuses
+// every write — a session-level backstop for the TUI's app-layer read_only guard
+// (which only classifies by leading keyword and so can't catch EXPLAIN ANALYZE
+// <DML>, a volatile function inside a SELECT, a write PRAGMA, etc.). Each engine
+// enforces it with its native mechanism (see the open* funcs).
+func ReadOnly(ro bool) Option { return func(c *openConfig) { c.readOnly = ro } }
+
 // Open infers the engine from a URL scheme or file path and connects.
-func Open(ctx context.Context, dsn string) (Engine, error) {
+func Open(ctx context.Context, dsn string, opts ...Option) (Engine, error) {
+	var cfg openConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	switch EngineOf(dsn) {
 	case "sqlite":
-		return openSQLite(ctx, dsn)
+		return openSQLite(ctx, dsn, cfg.readOnly)
 	case "postgres":
-		return openPostgres(ctx, dsn)
+		return openPostgres(ctx, dsn, cfg.readOnly)
 	case "mysql":
-		return openMySQL(ctx, dsn)
+		return openMySQL(ctx, dsn, cfg.readOnly)
 	default:
 		return nil, fmt.Errorf("cannot determine engine for %q", dsn)
 	}

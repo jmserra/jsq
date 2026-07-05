@@ -923,6 +923,71 @@ func TestDeleteReadOnly(t *testing.T) {
 	}
 }
 
+// TestActivityIndicator drives the header activity indicator + Esc-cancel: a DB
+// op sets an in-flight label the header shows, the spinner ticks, and Esc kills
+// the op (clearing the label) without surfacing an error.
+func TestActivityIndicator(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	// A settled grid shows no indicator.
+	if app.activity != "" || app.cancel != nil {
+		t.Fatalf("loaded grid should be idle; activity=%q cancel=%v", app.activity, app.cancel != nil)
+	}
+
+	// J starts a sort reload; the op is now in flight and the header shows it.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("J should start a reload")
+	}
+	if app.activity != "sorting" || app.cancel == nil {
+		t.Fatalf("J should mark an in-flight op; activity=%q cancel=%v", app.activity, app.cancel != nil)
+	}
+	view := app.View()
+	if !strings.Contains(view, "sorting") || !strings.Contains(view, "esc") {
+		t.Fatalf("header should show the activity + esc hint:\n%s", view)
+	}
+
+	// A tick advances the spinner and keeps ticking while busy.
+	prev := app.spinner
+	m, tcmd := app.Update(tickMsg{})
+	app = m.(App)
+	if app.spinner == prev || tcmd == nil {
+		t.Fatalf("tick should advance the spinner (%d→%d) and reschedule", prev, app.spinner)
+	}
+
+	// Esc kills the in-flight op: label cleared, cancel released, no error.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.activity != "" || app.cancel != nil {
+		t.Fatalf("Esc should clear the in-flight op; activity=%q cancel=%v", app.activity, app.cancel != nil)
+	}
+	if app.status != "cancelled" {
+		t.Fatalf("Esc should report the cancel, got %q", app.status)
+	}
+	if app.View() == "" || strings.Contains(app.View(), "sorting") {
+		t.Fatalf("cancelled header should drop the indicator:\n%s", app.View())
+	}
+}
+
+// TestCanceledSwallowed verifies a command whose context was cancelled yields a
+// nil message (no error screen) rather than an errMsg.
+func TestCanceledSwallowed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := dbErr(ctx, context.Canceled); got != nil {
+		t.Fatalf("a cancelled op should swallow to nil, got %#v", got)
+	}
+	live, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, ok := dbErr(live, context.DeadlineExceeded).(errMsg); !ok {
+		t.Fatalf("a real failure on a live ctx should be an errMsg")
+	}
+}
+
 func TestIsReadSQL(t *testing.T) {
 	reads := []string{"SELECT 1", "  select * from t", "-- note\nSELECT 1", "PRAGMA x",
 		"EXPLAIN SELECT 1", "SHOW TABLES", "VALUES (1)", "TABLE users"}

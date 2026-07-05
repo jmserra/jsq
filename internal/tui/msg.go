@@ -60,3 +60,7 @@ type queryResultMsg struct{ rs *db.ResultSet }
 
 // errMsg carries any async failure.
 type errMsg struct{ err error }
+
+// tickMsg drives the header activity spinner; it self-perpetuates once the
+// connection is up (see the connectedMsg handler).
+type tickMsg struct{}

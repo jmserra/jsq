@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -59,6 +60,12 @@ type App struct {
 	status         string
 	postExecStatus string // shown after the reload that follows a full-path exec
 	err            error
+
+	// Header activity indicator (top-right): activity names the in-flight DB op
+	// (empty → nothing shown), cancel kills it (Esc), spinner is the frame index.
+	activity string
+	cancel   context.CancelFunc
+	spinner  int
 }
 
 // New builds the root model. If dsn != "", it connects directly; else the picker.
@@ -82,10 +89,34 @@ func New(conns []config.Conn, dsn, name string, readOnly bool) App {
 
 func (a App) Init() tea.Cmd {
 	if a.directDSN != "" {
-		return connectCmd(a.directDSN, a.connName)
+		return connectCmd(a.directDSN, a.connName, a.readOnly)
 	}
 	return nil
 }
+
+// begin marks a new in-flight DB op labelled for the header indicator, cancels
+// any previous op, and returns a cancellable context for the op's command. The
+// stored cancel func is what Esc calls (see stop). Callers must set a.activity
+// via this before dispatching a cancellable tea.Cmd.
+func (a *App) begin(label string) context.Context {
+	a.stop()
+	a.activity = label
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancel = cancel
+	return ctx
+}
+
+// stop clears the activity indicator and cancels any in-flight op — used both to
+// kill a running op (Esc) and to tidy up once one completes.
+func (a *App) stop() {
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+	a.activity = ""
+}
+
+var spinnerFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -95,8 +126,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case errMsg:
+		a.stop()
 		a.err = msg.err
 		return a, nil
+
+	case tickMsg:
+		if a.activity != "" {
+			a.spinner++
+		}
+		return a, tickCmd()
 
 	case connectedMsg:
 		a.engine = msg.engine
@@ -110,9 +148,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.focus = focusSidebar
 		a.layout()
 		a.status = ""
-		return a, nil
+		// Kick off the perpetual spinner tick; it idles invisibly (View shows
+		// nothing while a.activity is empty) and animates only during a DB op.
+		return a, tickCmd()
 
 	case rowsMsg:
+		a.stop()
 		a.grid.setResult(msg.rs)
 		a.grid.hasMore = msg.full
 		a.grid.loading = false
@@ -139,10 +180,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case moreRowsMsg:
+		a.stop()
 		a.grid.appendRows(msg.rows, msg.full)
 		return a, nil
 
 	case editDoneMsg:
+		a.stop()
 		// A keyed edit must touch exactly one row; anything else is loud (§8).
 		if msg.affected == 1 {
 			a.grid.applyEdit(msg.val)
@@ -153,6 +196,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case editorReadyMsg:
+		a.stop() // insert/duplicate prep finished; the editor spawn isn't a DB op
 		return a, editorCmd(msg.seed)
 
 	case editorSubmitMsg:
@@ -165,21 +209,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// read-only connection (the s mutation guard; E/o/D/p are already blocked
 		// at the key).
 		if isReadSQL(msg.sql) {
+			ctx := a.begin("running query")
 			a.status = "running query…"
-			return a, runQueryCmd(a.engine, msg.sql)
+			return a, runQueryCmd(ctx, a.engine, msg.sql)
 		}
 		if a.readOnly {
 			a.status = "read-only connection — statement not run"
 			return a, nil
 		}
+		ctx := a.begin("running")
 		a.status = "running…"
-		return a, execRawCmd(a.engine, msg.sql)
+		return a, execRawCmd(ctx, a.engine, msg.sql)
 
 	case editorAbortedMsg:
+		a.stop()
 		a.status = "edit cancelled"
 		return a, nil
 
 	case queryResultMsg:
+		a.stop()
 		a.grid.setResult(msg.rs)
 		a.grid.setSort("", false)
 		a.grid.clearFilters()
@@ -197,7 +245,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload the current view so the change is reflected; the affected count
 		// survives the reload via postExecStatus.
 		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
-		return a, a.loadCurrentCmd()
+		ctx := a.begin("reloading")
+		return a, a.loadCurrentCmd(ctx)
 
 	case tea.KeyMsg:
 		return a.handleKey(msg)
@@ -261,6 +310,15 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.showSidebar && a.focus == focusSidebar && a.sidebar.filtering {
 		return a.handleSidebarFilterKey(msg)
 	}
+	// Esc kills an in-flight DB op (a slow query, a big load). This takes
+	// precedence over the grid's Esc (clear-filter), which only applies when
+	// nothing is running.
+	if msg.Type == tea.KeyEsc && a.cancel != nil {
+		a.stop()
+		a.grid.loading = false
+		a.status = "cancelled"
+		return a, nil
+	}
 	switch a.screen {
 	case screenPicker:
 		switch msg.String() {
@@ -273,7 +331,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.connName = c.Name
 				a.readOnly = c.ReadOnly
 				a.status = "connecting to " + c.Name + "…"
-				return a, connectCmd(c.DSN(), c.Name)
+				return a, connectCmd(c.DSN(), c.Name, c.ReadOnly)
 			}
 		}
 		return a, nil
@@ -361,8 +419,9 @@ func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 	a.sortCol, a.sortAsc = "", true // reset to default (PK desc) on new table
 	a.resetGrid = true              // new table → cursor to top-left
 	a.grid.clearFilters()
+	ctx := a.begin("loading " + t.Name)
 	a.status = "loading " + t.Name + "…"
-	return a, a.loadCurrentCmd()
+	return a, a.loadCurrentCmd(ctx)
 }
 
 // handleEditKey routes keys while a cell is being edited (§8 quick path). Enter
@@ -373,8 +432,9 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
 		if req, ok := a.grid.commitEdit(); ok {
+			ctx := a.begin("saving")
 			a.status = "saving…"
-			return a, execEditCmd(a.engine, req)
+			return a, execEditCmd(ctx, a.engine, req)
 		}
 		a.status = a.currentTable.Name
 	case tea.KeyEsc:
@@ -395,10 +455,12 @@ func (a App) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
 		a.grid.commitFilter()
-		return a, a.loadCurrentCmd()
+		ctx := a.begin("filtering")
+		return a, a.loadCurrentCmd(ctx)
 	case tea.KeyEsc:
 		a.grid.clearFilter()
-		return a, a.loadCurrentCmd()
+		ctx := a.begin("loading")
+		return a, a.loadCurrentCmd(ctx)
 	case tea.KeyBackspace:
 		a.grid.filterBackspace()
 	case tea.KeyDown:
@@ -439,7 +501,8 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.grid.startFilter()
 	case "esc":
 		if a.grid.clearCurrentFilter() {
-			return a, a.loadCurrentCmd()
+			ctx := a.begin("loading")
+			return a, a.loadCurrentCmd(ctx)
 		}
 	case "e":
 		if a.readOnly {
@@ -465,8 +528,9 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else {
+			ctx := a.begin("preparing insert")
 			a.status = "preparing insert…"
-			return a, prepareInsertCmd(a.engine, a.currentTable)
+			return a, prepareInsertCmd(ctx, a.engine, a.currentTable)
 		}
 		return a, nil
 	case "D":
@@ -484,8 +548,9 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if vals, ok := a.grid.currentRowValues(); ok {
+			ctx := a.begin("preparing duplicate")
 			a.status = "preparing duplicate…"
-			return a, prepareDuplicateCmd(a.engine, a.currentTable, vals)
+			return a, prepareDuplicateCmd(ctx, a.engine, a.currentTable, vals)
 		}
 		return a, nil
 	case "enter":
@@ -499,7 +564,8 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if name, ok := a.grid.currentColName(); ok {
 			a.sortCol, a.sortAsc = name, true
-			return a, a.loadCurrentCmd()
+			ctx := a.begin("sorting")
+			return a, a.loadCurrentCmd(ctx)
 		}
 	case "K":
 		if a.adHoc {
@@ -508,13 +574,17 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if name, ok := a.grid.currentColName(); ok {
 			a.sortCol, a.sortAsc = name, false
-			return a, a.loadCurrentCmd()
+			ctx := a.begin("sorting")
+			return a, a.loadCurrentCmd(ctx)
 		}
 	case "s":
 		return a, editorCmd(a.scratchSeed())
 	}
 	// After a movement, fetch the next window if the cursor neared the edge.
-	return a, a.maybeLoadMore()
+	// Evaluate the command first so its state mutation (activity/loading) lands
+	// on the model we return.
+	cmd := a.maybeLoadMore()
+	return a, cmd
 }
 
 // maybeLoadMore triggers a continuous-scroll fetch when the cursor nears the
@@ -524,7 +594,8 @@ func (a *App) maybeLoadMore() tea.Cmd {
 		return nil
 	}
 	a.grid.loading = true
-	return loadMoreCmd(a.engine, a.currentTable, a.sortCol, a.sortAsc,
+	ctx := a.begin("loading more")
+	return loadMoreCmd(ctx, a.engine, a.currentTable, a.sortCol, a.sortAsc,
 		a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
 }
 
@@ -540,8 +611,8 @@ func (a App) scratchSeed() editorSeed {
 }
 
 // loadCurrentCmd (re)loads the current table with the active sort and filters.
-func (a App) loadCurrentCmd() tea.Cmd {
-	return loadCmd(a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.grid.filterSpecs())
+func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
+	return loadCmd(ctx, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.grid.filterSpecs())
 }
 
 func (a App) gridLimit() int {
@@ -592,5 +663,18 @@ func (a App) statusLine() string {
 	if a.status != "" {
 		parts = append(parts, a.status)
 	}
-	return lipgloss.NewStyle().Faint(true).Render(" " + strings.Join(parts, " > ") + " ")
+	left := lipgloss.NewStyle().Faint(true).Render(" " + strings.Join(parts, " > ") + " ")
+	if a.activity == "" {
+		return left
+	}
+	// Top-right activity indicator: spinner + label + a hint that Esc kills it.
+	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
+	ind := activityStyle.Render(frame + " " + a.activity + " · esc ")
+	gap := a.w - lipgloss.Width(left) - lipgloss.Width(ind)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + ind
 }
+
+var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))

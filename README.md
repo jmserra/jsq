@@ -111,7 +111,7 @@ section-per-connection layout reads like INI but gets a strict parser.
 | `J` / `K` | sort current column ascending / descending |
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
-| `Esc` | clear the current column's filter |
+| `Esc` | kill the running query (while one is in flight), else clear the current column's filter |
 | `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
 | `E` | edit the current cell in `$EDITOR` — opens the generated keyed `UPDATE` with the value pre-selected (vim/nvim); `:wq` runs it, `:q!` or an empty buffer aborts |
 | `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
@@ -257,7 +257,9 @@ Two panes — a declutter-first layout with an on-demand sidebar:
 └──────────────────┴────────────────────────────────────┘
 ```
 
-- **Single-line header:** `connection > database > table`.
+- **Single-line header:** `connection > database > table`, with a top-right
+  activity indicator — a spinner and label (`running query`, `loading`, …) that
+  appears only while a DB op is in flight and offers `esc` to kill it.
 - **Sidebar is on-demand.** Hidden by default; the results pane is the star. The
   switch-table loop is `H` → `j`/`k` or `/` to find it → `Enter`: `H` brings the
   sidebar back **focused**, `Enter` loads the table and the sidebar auto-hides.
@@ -329,8 +331,13 @@ and reloads the current table with the affected count. Classification errs safe 
 only a leading `SELECT`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`/`PRAGMA`/`DESCRIBE`
 counts as a read; everything else, **including any `WITH …`**, is a mutation (a
 data-modifying CTE like `WITH … DELETE` also leads with `WITH`, and the write path
-is what enforces a `read_only` connection's refusal). An empty buffer or `:q!`
-aborts.
+is where a `read_only` connection refuses to run it). That keyword check is only
+the first line, though: a `read_only` connection is **also opened read-only at the
+database session level** (Postgres `default_transaction_read_only`, MySQL
+`transaction_read_only`, SQLite `query_only`), so anything the classifier misroutes
+to the read path yet still mutates — `EXPLAIN ANALYZE <DML>`, a volatile function
+in a `SELECT`, a write `PRAGMA` — is refused by the server itself. An empty buffer
+or `:q!` aborts.
 
 ### Query history *(roadmap)*
 

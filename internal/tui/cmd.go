@@ -13,11 +13,30 @@ import (
 	"github.com/jmserra/jsq/internal/db"
 )
 
+// spinnerInterval is the header activity spinner's frame rate.
+const spinnerInterval = 100 * time.Millisecond
+
+// tickCmd schedules the next spinner frame.
+func tickCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// dbErr maps a command's error to a message. A cancelled context (an Esc kill,
+// see App.stop) is swallowed to a nil message so it never surfaces as an error
+// screen; any other failure is a real errMsg.
+func dbErr(ctx context.Context, err error) tea.Msg {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errMsg{err}
+}
+
 // connectCmd opens the engine and lists tables, off the Update loop (§6 async rule).
-func connectCmd(dsn, name string) tea.Cmd {
+// readOnly is enforced at the DB session level too, not just by the app-layer guard.
+func connectCmd(dsn, name string, readOnly bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		eng, err := db.Open(ctx, dsn)
+		eng, err := db.Open(ctx, dsn, db.ReadOnly(readOnly))
 		if err != nil {
 			return errMsg{err}
 		}
@@ -32,20 +51,19 @@ func connectCmd(dsn, name string) tea.Cmd {
 
 // loadCmd loads the first window of a table with the active sort (J/K) and the
 // active column filters (§7.1) applied server-side.
-func loadCmd(eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool, filters []filterSpec) tea.Cmd {
+func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool, filters []filterSpec) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		ref := t.Ref()
 		pk, err := eng.PrimaryKey(ctx, ref)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		where, args := whereClause(eng, filters)
 		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d",
 			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit)
 		rs, err := eng.Query(ctx, q, args...)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		rs.Table = &ref
 		rs.PK = pk
@@ -55,20 +73,19 @@ func loadCmd(eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool,
 
 // loadMoreCmd fetches the next window (continuous scroll) via LIMIT/OFFSET,
 // preserving the active sort and filters.
-func loadMoreCmd(eng db.Engine, t db.Table, sortCol string, sortAsc bool, filters []filterSpec, offset, limit int) tea.Cmd {
+func loadMoreCmd(ctx context.Context, eng db.Engine, t db.Table, sortCol string, sortAsc bool, filters []filterSpec, offset, limit int) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		ref := t.Ref()
 		pk, err := eng.PrimaryKey(ctx, ref)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		where, args := whereClause(eng, filters)
 		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d",
 			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit, offset)
 		rs, err := eng.Query(ctx, q, args...)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return moreRowsMsg{rows: rs.Rows, full: len(rs.Rows) == limit}
 	}
@@ -77,9 +94,8 @@ func loadMoreCmd(eng db.Engine, t db.Table, sortCol string, sortAsc bool, filter
 // execEditCmd runs a quick-path keyed UPDATE (§8): SET col = val WHERE <full PK>.
 // The new value binds as a parameter; PK values bind from the edited row. Every
 // statement is keyed on the full PK — never a bare UPDATE.
-func execEditCmd(eng db.Engine, req editReq) tea.Cmd {
+func execEditCmd(ctx context.Context, eng db.Engine, req editReq) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
 		args := make([]any, 0, len(req.keys)+1)
 		set := eng.QuoteIdent(req.col) + " = " + eng.Placeholder(1)
 		args = append(args, req.val)
@@ -92,7 +108,7 @@ func execEditCmd(eng db.Engine, req editReq) tea.Cmd {
 			eng.QualifiedName(req.table), set, strings.Join(preds, " AND "))
 		n, err := eng.Exec(ctx, q, args...)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return editDoneMsg{col: req.col, val: req.val, affected: n}
 	}
@@ -205,11 +221,11 @@ func isVimFamily(editor string) bool {
 
 // execRawCmd runs a full-path statement verbatim — the user authored it in
 // $EDITOR, so it is not parameterized (unlike the keyed quick-path edit).
-func execRawCmd(eng db.Engine, query string) tea.Cmd {
+func execRawCmd(ctx context.Context, eng db.Engine, query string) tea.Cmd {
 	return func() tea.Msg {
-		n, err := eng.Exec(context.Background(), query)
+		n, err := eng.Exec(ctx, query)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return execDoneMsg{sql: query, affected: n}
 	}
@@ -218,12 +234,12 @@ func execRawCmd(eng db.Engine, query string) tea.Cmd {
 // prepareInsertCmd fetches the table's enriched columns (off the Update loop, as
 // it's a DB call) and builds the blank-INSERT seed for the o full path; the seed
 // then opens in $EDITOR via editorCmd.
-func prepareInsertCmd(eng db.Engine, t db.Table) tea.Cmd {
+func prepareInsertCmd(ctx context.Context, eng db.Engine, t db.Table) tea.Cmd {
 	return func() tea.Msg {
 		ref := t.Ref()
-		cols, err := eng.Columns(context.Background(), ref)
+		cols, err := eng.Columns(ctx, ref)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return editorReadyMsg{seed: buildInsertStmt(eng, ref, cols)}
 	}
@@ -231,11 +247,11 @@ func prepareInsertCmd(eng db.Engine, t db.Table) tea.Cmd {
 
 // runQueryCmd runs a free-form read (s/S) and returns its result set to display.
 // The result carries no table/PK provenance, so the grid renders it read-only.
-func runQueryCmd(eng db.Engine, query string) tea.Cmd {
+func runQueryCmd(ctx context.Context, eng db.Engine, query string) tea.Cmd {
 	return func() tea.Msg {
-		rs, err := eng.Query(context.Background(), query)
+		rs, err := eng.Query(ctx, query)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return queryResultMsg{rs: rs}
 	}
@@ -243,12 +259,12 @@ func runQueryCmd(eng db.Engine, query string) tea.Cmd {
 
 // prepareDuplicateCmd fetches columns and builds the p (duplicate) seed from the
 // captured row values (keyed by column name); it then opens in $EDITOR.
-func prepareDuplicateCmd(eng db.Engine, t db.Table, vals map[string]any) tea.Cmd {
+func prepareDuplicateCmd(ctx context.Context, eng db.Engine, t db.Table, vals map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		ref := t.Ref()
-		cols, err := eng.Columns(context.Background(), ref)
+		cols, err := eng.Columns(ctx, ref)
 		if err != nil {
-			return errMsg{err}
+			return dbErr(ctx, err)
 		}
 		return editorReadyMsg{seed: buildDuplicateStmt(eng, ref, cols, vals)}
 	}
