@@ -43,24 +43,28 @@ func run() error {
 		return err
 	}
 
-	var dsn, name string
-	var readOnly bool
+	var direct config.Conn
 	switch {
 	case arg == "":
 		if len(conns) == 0 {
 			return fmt.Errorf("no connections in %s and no URL/path given", cfgPath)
 		}
 	case looksLikeDSN(arg):
-		dsn = arg
+		direct = config.Conn{URL: arg}
 	default:
 		c, ok := findConn(conns, arg)
 		if !ok {
 			return fmt.Errorf("unknown connection %q; available: %s", arg, names(conns))
 		}
-		dsn, name, readOnly = c.URL, c.Name, c.ReadOnly
+		direct = c
 	}
 
-	p := tea.NewProgram(tui.New(conns, dsn, name, readOnly), tea.WithAltScreen())
+	// Whatever quits us (Esc, error screen, Ctrl-C, panic), reap any `run` helper
+	// so a port-forward never outlives jsq. The registry is populated the instant
+	// a helper starts, so this doesn't depend on the connect flow having finished.
+	defer tui.KillRunHelpers()
+
+	p := tea.NewProgram(tui.New(conns, direct), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

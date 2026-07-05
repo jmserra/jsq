@@ -36,9 +36,9 @@ type App struct {
 	screen screen
 	picker picker
 
-	directDSN string // from CLI arg; empty → use the picker
-	connName  string
-	readOnly  bool // connection refuses mutations (read_only in config)
+	connName string
+	readOnly bool        // connection refuses mutations (read_only in config)
+	pending  config.Conn // the direct/selected connection (empty URL → picker); run/wait_port live here
 
 	engine      db.Engine
 	sidebar     sidebar
@@ -69,19 +69,20 @@ type App struct {
 	spinner  int
 }
 
-// New builds the root model. If dsn != "", it connects directly; else the picker.
-// readOnly disables all mutation for a directly-connected connection (§8).
-func New(conns []config.Conn, dsn, name string, readOnly bool) App {
+// New builds the root model. If direct.URL != "", it connects to that connection
+// directly; else it shows the picker. readOnly/run/wait_port all ride along on
+// direct (§8).
+func New(conns []config.Conn, direct config.Conn) App {
 	a := App{
 		picker:      picker{conns: conns},
 		grid:        newGrid(),
-		directDSN:   dsn,
-		connName:    name,
-		readOnly:    readOnly,
+		connName:    direct.Name,
+		readOnly:    direct.ReadOnly,
+		pending:     direct,
 		showSidebar: true,
 		lastQuery:   map[db.Table]string{},
 	}
-	if dsn != "" {
+	if direct.URL != "" {
 		a.screen = screenBrowse
 		a.status = "connecting…"
 	}
@@ -89,8 +90,8 @@ func New(conns []config.Conn, dsn, name string, readOnly bool) App {
 }
 
 func (a App) Init() tea.Cmd {
-	if a.directDSN != "" {
-		return connectCmd(a.directDSN, a.connName, a.readOnly)
+	if a.pending.URL != "" {
+		return connectCmd(a.pending)
 	}
 	return nil
 }
@@ -351,11 +352,19 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			a.picker.move(-1)
 		case "enter":
+			// Ignore a second Enter while a connect is already in flight — the
+			// probe/open runs in the background with the picker still on screen, and
+			// re-triggering would start a duplicate engine (and `run` process) whose
+			// handle we'd then leak. pending.URL is empty until the first Enter.
+			if a.pending.URL != "" {
+				return a, nil
+			}
 			if c, ok := a.picker.selected(); ok {
 				a.connName = c.Name
 				a.readOnly = c.ReadOnly
+				a.pending = c
 				a.status = "connecting to " + c.Name + "…"
-				return a, connectCmd(c.URL, c.Name, c.ReadOnly)
+				return a, connectCmd(c)
 			}
 		}
 		return a, nil

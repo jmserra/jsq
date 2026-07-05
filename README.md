@@ -91,12 +91,26 @@ url = "sqlite:///path/to/notes.db"   # or just: "./notes.db"
 [prod-ro]
 url = "postgres://user@prod.example.com:5432/app"
 read_only = true              # jsq refuses all mutations on this connection
+
+[kube]
+url = "postgres://user@localhost:5432/app"
+run = "kubectl port-forward svc/db 5432:5432"  # started before connecting, killed on exit
+wait_port = "5432"            # hold until this port answers (probed 1×/sec, 30s max)
 ```
 
 Put the password in the URL. Engine is inferred from
 the URL scheme (`postgres`/`postgresql`, `mysql`, `sqlite`/`file`/bare path). The
 picker lists the section names in file order. Format is **TOML** — the
 section-per-connection layout reads like INI but gets a strict parser.
+
+Two optional per-connection keys handle tunnels. `run` is a shell command jsq
+starts before connecting and keeps alive for the whole session — its whole
+process group is terminated when you quit, so a `kubectl port-forward` (or `ssh
+-L`) never outlives jsq. `wait_port` then blocks the connect until that port
+accepts a TCP connection, probing once a second and giving up with an error
+after 30s; it takes a bare port (`"5432"` → `127.0.0.1`) or a full `host:port`.
+`wait_port` works with or without `run` — point it at a tunnel you opened
+elsewhere.
 
 ## Keybindings
 
@@ -406,9 +420,11 @@ on a connection, which disables all mutation regardless.
 
 ## Configuration
 
-- `~/.config/jsq/connections.toml` — connections (above), app-read-only.
-- Env: `$JSQ_CONFIG` (file location) and `$EDITOR`. Keybindings are compiled in;
-  a keymap override file is a possible later addition.
+- `~/.config/jsq/connections.toml` — connections (above), app-read-only. Per
+  connection: `url`, `read_only`, and the tunnel pair `run` / `wait_port`.
+- Env: `$JSQ_CONFIG` (file location) and `$EDITOR`. A connection's `run` command
+  runs under `sh -c`. Keybindings are compiled in; a keymap override file is a
+  possible later addition.
 
 ## Build & distribution
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
 )
 
@@ -31,21 +32,40 @@ func dbErr(ctx context.Context, err error) tea.Msg {
 	return errMsg{err}
 }
 
-// connectCmd opens the engine and lists tables, off the Update loop (§6 async rule).
-// readOnly is enforced at the DB session level too, not just by the app-layer guard.
-func connectCmd(dsn, name string, readOnly bool) tea.Cmd {
+// connectCmd runs the whole connect flow off the Update loop (§6 async rule):
+// start the `run` helper (if any), wait for wait_port, open the engine, list
+// tables. read_only is enforced at the DB session level too, not just by the
+// app-layer guard. The helper is registered globally the instant it starts
+// (KillRunHelpers reaps it on exit); on any failure here we kill it eagerly.
+func connectCmd(c config.Conn) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		eng, err := db.Open(ctx, dsn, db.ReadOnly(readOnly))
+		var proc *runProc
+		if c.Run != "" {
+			p, err := startRun(c.Run)
+			if err != nil {
+				return errMsg{err}
+			}
+			proc = p
+		}
+		if addr := waitAddr(c.WaitPort); addr != "" {
+			if err := waitPort(addr, proc, waitTimeout); err != nil {
+				proc.kill()
+				return errMsg{err}
+			}
+		}
+		eng, err := db.Open(ctx, c.URL, db.ReadOnly(c.ReadOnly))
 		if err != nil {
+			proc.kill()
 			return errMsg{err}
 		}
 		tables, err := eng.Tables(ctx)
 		if err != nil {
 			eng.Close()
+			proc.kill()
 			return errMsg{err}
 		}
-		return connectedMsg{engine: eng, name: name, dbName: db.DatabaseName(dsn), tables: tables}
+		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(c.URL), tables: tables}
 	}
 }
 

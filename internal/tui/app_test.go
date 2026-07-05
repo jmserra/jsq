@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
 )
 
@@ -29,7 +30,7 @@ func TestBrowseFlow(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test", false)
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 
 	// Init dispatches connectCmd; run it and feed the result back.
 	msg := app.Init()()
@@ -81,7 +82,7 @@ func TestSortUsesCurrentColumn(t *testing.T) {
 	e.Exec(ctx, `INSERT INTO users (name, email) VALUES ('Ada','a'),('Linus','b')`)
 	e.Close()
 
-	app := New(nil, path, "test", false)
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	// Load table.
@@ -125,7 +126,7 @@ func TestColumnFilter(t *testing.T) {
 	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
 	e.Close()
 
-	app := New(nil, path, "test", false)
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load users
@@ -174,7 +175,7 @@ func TestContinuousScroll(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test", false)
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -214,7 +215,7 @@ func TestSidebarFilter(t *testing.T) {
 	}
 	e.Close()
 
-	app := New(nil, path, "test", false)
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	if len(app.sidebar.tables) != 4 {
@@ -303,7 +304,7 @@ func loadTable(t *testing.T, readOnly bool, seed func(e db.Engine)) App {
 	seed(e)
 	e.Close()
 
-	app := New(nil, path, "test", readOnly)
+	app := New(nil, config.Conn{URL: path, Name: "test", ReadOnly: readOnly})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load the (only) table

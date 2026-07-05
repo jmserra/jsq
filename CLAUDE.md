@@ -26,7 +26,7 @@ don't exist yet.** What's really here:
 
 ```
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea
-internal/config/config.go   # load read-only connections.toml; Conn.DSN() injects env password
+internal/config/config.go   # load read-only connections.toml (url, read_only, run, wait_port)
 internal/db/
   db.go                     # Engine interface + Open() dispatch + shared scanQuery + DSN helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
@@ -35,6 +35,7 @@ internal/tui/
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner.
   sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
+  proc.go       # the connection `run` helper (port-forward etc.): startRun (registers in a package-level live set), waitPort, waitAddr, runProc.kill (deregisters + bounded group-kill), KillRunHelpers (exit backstop), tailBuffer. proc_unix.go/proc_other.go = process-group kill (unix) vs single-process fallback.
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
   sidebar.go    # flat filterable table list Model
   picker.go     # connection picker (bare `jsq`)
@@ -42,6 +43,22 @@ internal/tui/
   help.go       # read-only `?` keybinding cheat sheet (full-area overlay like cellview); helpItems is the hand-kept mirror of the hardcoded keymap
   util.go       # clamp()
 ```
+
+**Connect flow** (one `connectCmd(config.Conn)` in cmd.go, dispatched by `Init`
+and picker Enter): a single tea.Cmd starts the `run` helper (if any), runs the
+`wait_port` probe (`waitPort`, 30s), then opens the engine and lists tables —
+all off the Update loop. There is **no** per-process state on the model and no
+`runStartedMsg` handshake: `startRun` registers every helper in a package-level
+`liveProcs` set the instant it launches, and `main` `defer`s `KillRunHelpers()`
+to reap them on *any* quit path. That's what makes an early Ctrl-C safe — cleanup
+never depends on a bubbletea message being folded into the model first (the bug
+that a model-owned `App.runProc` had). `wait_port` works with or without `run`
+(for tunnels opened elsewhere). `runProc.kill` deregisters then kills the whole
+**process group** (unix) so a shell that forks a port-forward takes its children
+with it — and because output is pipe-captured, killing only the direct child
+would otherwise hang `Wait` on the still-open pipe. The picker Enter is guarded
+by `a.pending.URL != ""` so a second Enter during a slow connect can't spawn a
+duplicate engine/helper. `New` takes the resolved `config.Conn` (`pending`).
 
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a

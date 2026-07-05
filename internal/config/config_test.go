@@ -15,6 +15,8 @@ url = "sqlite:///tmp/a.db"
 [prod]
 url = "postgres://x"
 read_only = true
+run = "kubectl port-forward svc/db 5432:5432"
+wait_port = "5432"
 `
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -31,6 +33,9 @@ read_only = true
 	}
 	if !conns[1].ReadOnly || conns[1].URL != "postgres://x" {
 		t.Fatalf("fields wrong: %+v", conns[1])
+	}
+	if conns[1].Run != "kubectl port-forward svc/db 5432:5432" || conns[1].WaitPort != "5432" {
+		t.Fatalf("run/wait_port not parsed: %+v", conns[1])
 	}
 }
 
