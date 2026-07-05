@@ -58,8 +58,14 @@ type execDoneMsg struct {
 // queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
 type queryResultMsg struct{ rs *db.ResultSet }
 
-// errMsg carries any async failure.
+// errMsg carries any async failure that happens mid-session (shown on the
+// in-app error screen).
 type errMsg struct{ err error }
+
+// connectErrMsg is a failure during the initial connect (bad DSN, tunnel never
+// opened the port, engine wouldn't open). There's no session to fall back to, so
+// the App quits and main prints the error to stderr.
+type connectErrMsg struct{ err error }
 
 // tickMsg drives the header activity spinner; it self-perpetuates once the
 // connection is up (see the connectedMsg handler).

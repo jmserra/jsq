@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -143,6 +144,34 @@ func DatabaseName(dsn string) string {
 		base = base[:i]
 	}
 	return base
+}
+
+// HostPort returns the TCP host:port a server DSN connects to, applying the
+// scheme's default port when the URL omits it. It is "" for SQLite or any DSN
+// without a network host — used to wait for a `cmd` tunnel before connecting.
+func HostPort(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" {
+		return ""
+	}
+	port := u.Port()
+	switch u.Scheme {
+	case "postgres", "postgresql":
+		if port == "" {
+			port = "5432"
+		}
+	case "mysql":
+		if port == "" {
+			port = "3306"
+		}
+	default:
+		return ""
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // EngineOf returns "sqlite" | "postgres" | "mysql" | "" for a DSN or path.

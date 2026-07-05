@@ -33,37 +33,39 @@ func dbErr(ctx context.Context, err error) tea.Msg {
 }
 
 // connectCmd runs the whole connect flow off the Update loop (§6 async rule):
-// start the `run` helper (if any), wait for wait_port, open the engine, list
-// tables. read_only is enforced at the DB session level too, not just by the
-// app-layer guard. The helper is registered globally the instant it starts
-// (KillRunHelpers reaps it on exit); on any failure here we kill it eagerly.
+// start the `cmd` helper (if any) and wait for the URL's host:port, then open
+// the engine and list tables. read_only is enforced at the DB session level too,
+// not just by the app-layer guard. The helper is registered globally the instant
+// it starts (KillRunHelpers reaps it on exit); on any failure here we kill it.
 func connectCmd(c config.Conn) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		var proc *runProc
-		if c.Run != "" {
-			p, err := startRun(c.Run)
+		if c.Cmd != "" {
+			p, err := startRun(c.Cmd)
 			if err != nil {
-				return errMsg{err}
+				return connectErrMsg{err}
 			}
 			proc = p
-		}
-		if addr := waitAddr(c.WaitPort); addr != "" {
-			if err := waitPort(addr, proc, waitTimeout); err != nil {
-				proc.kill()
-				return errMsg{err}
+			// The helper is typically a tunnel to the URL's port — wait for it to
+			// answer before connecting (no-op for SQLite / a portless DSN).
+			if addr := db.HostPort(c.URL); addr != "" {
+				if err := waitPort(addr, proc, waitTimeout); err != nil {
+					proc.kill()
+					return connectErrMsg{err}
+				}
 			}
 		}
 		eng, err := db.Open(ctx, c.URL, db.ReadOnly(c.ReadOnly))
 		if err != nil {
 			proc.kill()
-			return errMsg{err}
+			return connectErrMsg{err}
 		}
 		tables, err := eng.Tables(ctx)
 		if err != nil {
 			eng.Close()
 			proc.kill()
-			return errMsg{err}
+			return connectErrMsg{err}
 		}
 		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(c.URL), tables: tables}
 	}

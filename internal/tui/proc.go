@@ -1,9 +1,9 @@
 package tui
 
-// A connection may carry a `run` command (config: run = "...") — a helper
+// A connection may carry a `cmd` command (config: cmd = "...") — a helper
 // process, typically a port-forward, that jsq starts before connecting, keeps
-// running for the whole session, and kills on exit. `wait_port` then holds
-// jsq at the door until that process has actually opened its listening socket.
+// running for the whole session, and kills on exit. jsq then holds at the door
+// (waitPort) until the URL's host:port actually accepts connections.
 //
 // Every started helper is registered in a package-level set the moment it
 // launches, so KillRunHelpers (deferred by main) always terminates it however
@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// waitTimeout bounds the wait_port probe: give up (and error) after this long.
+// waitTimeout bounds the pre-connect port wait: give up (and error) after this long.
 const waitTimeout = 30 * time.Second
 
 // liveProcs tracks every started run helper so KillRunHelpers can reap them all
@@ -50,6 +50,7 @@ type runProc struct {
 	cmdline string
 	out     *tailBuffer
 	done    chan struct{} // closed once the process exits (goroutine reaped it)
+	exitErr error         // set before done closes; non-nil ⇒ non-zero exit / signal
 }
 
 // startRun launches cmdline via `sh -c`, detached from our stdin so it can't
@@ -70,7 +71,7 @@ func startRun(cmdline string) (*runProc, error) {
 	liveProcs.mu.Lock()
 	liveProcs.m[p] = struct{}{}
 	liveProcs.mu.Unlock()
-	go func() { c.Wait(); close(p.done) }()
+	go func() { p.exitErr = c.Wait(); close(p.done) }()
 	return p, nil
 }
 
@@ -108,14 +109,17 @@ func (p *runProc) kill() {
 }
 
 // waitPort blocks until addr accepts a TCP connection, or until timeout, probing
-// once a second. If the run process dies first, that's reported instead (with its
-// captured output). The caller's goroutine is abandoned at process exit, so no
-// context plumbing is needed to stop it.
+// once a second. A helper that exits cleanly (e.g. `docker compose up -d`, which
+// starts a detached container and returns) is fine — we keep polling, the service
+// is coming up. Only a non-zero exit is a real crash and fails fast, with the
+// helper's captured output. On timeout, that output is included too if the helper
+// has exited. The caller's goroutine is abandoned at process exit, so no context
+// plumbing is needed to stop it.
 func waitPort(addr string, proc *runProc, timeout time.Duration) error {
 	end := time.Now().Add(timeout)
 	for {
-		if proc != nil && proc.dead() {
-			return fmt.Errorf("run %q exited before %s opened:\n%s",
+		if proc != nil && proc.dead() && proc.exitErr != nil {
+			return fmt.Errorf("run %q failed before %s opened:\n%s",
 				proc.cmdline, addr, strings.TrimSpace(proc.out.String()))
 		}
 		c, err := net.DialTimeout("tcp", addr, time.Second)
@@ -124,22 +128,14 @@ func waitPort(addr string, proc *runProc, timeout time.Duration) error {
 			return nil
 		}
 		if time.Now().After(end) {
+			if proc != nil && proc.dead() {
+				return fmt.Errorf("%s never opened; run %q output:\n%s",
+					addr, proc.cmdline, strings.TrimSpace(proc.out.String()))
+			}
 			return fmt.Errorf("%s not available after %s", addr, timeout)
 		}
 		time.Sleep(time.Second)
 	}
-}
-
-// waitAddr normalizes a wait_port value: a bare port gets 127.0.0.1, a value
-// with a colon (host:port) is used as-is.
-func waitAddr(waitPort string) string {
-	if waitPort == "" {
-		return ""
-	}
-	if strings.Contains(waitPort, ":") {
-		return waitPort
-	}
-	return "127.0.0.1:" + waitPort
 }
 
 // tailBuffer is an io.Writer that retains only the last max bytes written — a

@@ -17,12 +17,11 @@ type Conn struct {
 	URL      string `toml:"url"`
 	ReadOnly bool   `toml:"read_only"`
 
-	// Run is a shell command started before connecting and kept alive for the
-	// whole session (e.g. a port-forward), then terminated on exit. Empty → none.
-	Run string `toml:"run"`
-	// WaitPort, when set, makes jsq probe a TCP address once a second (up to 30s)
-	// before connecting — a bare port ("5432") means 127.0.0.1, or give host:port.
-	WaitPort string `toml:"wait_port"`
+	// Cmd is a shell command started before connecting and kept alive for the
+	// whole session (e.g. a port-forward), then terminated on exit. When set, jsq
+	// waits for the URL's host:port to accept connections before opening the DB
+	// (probed once a second, up to 30s). Empty → none.
+	Cmd string `toml:"cmd"`
 }
 
 // DefaultPath returns $JSQ_CONFIG or ~/.config/jsq/connections.toml.

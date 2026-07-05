@@ -38,7 +38,14 @@ type App struct {
 
 	connName string
 	readOnly bool        // connection refuses mutations (read_only in config)
-	pending  config.Conn // the direct/selected connection (empty URL → picker); run/wait_port live here
+	pending  config.Conn // the direct/selected connection (empty URL → picker); cmd lives here
+
+	// While a `cmd`-backed connection is being established, connCmd/connAddr drive
+	// the full-screen waiting view (what we ran + the port we're waiting for); both
+	// are cleared once the connect resolves. ticking guards the one spinner loop.
+	connCmd  string
+	connAddr string
+	ticking  bool
 
 	engine      db.Engine
 	sidebar     sidebar
@@ -60,7 +67,8 @@ type App struct {
 	w, h           int
 	status         string
 	postExecStatus string // shown after the reload that follows a full-path exec
-	err            error
+	err            error  // mid-session failure → in-app error screen
+	fatalErr       error  // connect failure → carried out to main, printed to stderr
 
 	// Header activity indicator (top-right): activity names the in-flight DB op
 	// (empty → nothing shown), cancel kills it (Esc), spinner is the frame index.
@@ -70,8 +78,7 @@ type App struct {
 }
 
 // New builds the root model. If direct.URL != "", it connects to that connection
-// directly; else it shows the picker. readOnly/run/wait_port all ride along on
-// direct (§8).
+// directly; else it shows the picker. readOnly/cmd all ride along on direct (§8).
 func New(conns []config.Conn, direct config.Conn) App {
 	a := App{
 		picker:      picker{conns: conns},
@@ -85,15 +92,47 @@ func New(conns []config.Conn, direct config.Conn) App {
 	if direct.URL != "" {
 		a.screen = screenBrowse
 		a.status = "connecting…"
+		a.beginConnect(direct)
 	}
 	return a
 }
 
+// FatalErr is the connect failure that quit the app, if any — main reads it from
+// the returned model and prints it to stderr.
+func (a App) FatalErr() error { return a.fatalErr }
+
 func (a App) Init() tea.Cmd {
-	if a.pending.URL != "" {
-		return connectCmd(a.pending)
+	if a.pending.URL == "" {
+		return nil
 	}
-	return nil
+	if a.connCmd != "" {
+		// New already armed the waiting view + spinner loop; animate it while
+		// connectCmd runs the cmd/wait/open in the background.
+		return tea.Batch(connectCmd(a.pending), tickCmd())
+	}
+	return connectCmd(a.pending)
+}
+
+// beginConnect arms the full-screen waiting view for a `cmd`-backed connection
+// (a no-op otherwise) and marks the spinner loop running; the caller dispatches
+// connectCmd + tickCmd. connectedMsg/errMsg clear connCmd to dismiss the view.
+func (a *App) beginConnect(c config.Conn) {
+	if c.Cmd == "" {
+		return
+	}
+	a.connCmd = c.Cmd
+	a.connAddr = db.HostPort(c.URL)
+	a.ticking = true
+}
+
+// ensureTick starts the spinner loop unless one is already running — so a
+// waiting-view connect and connectedMsg don't spin up two loops.
+func (a *App) ensureTick() tea.Cmd {
+	if a.ticking {
+		return nil
+	}
+	a.ticking = true
+	return tickCmd()
 }
 
 // begin marks a new in-flight DB op labelled for the header indicator, cancels
@@ -127,18 +166,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 
+	case connectErrMsg:
+		// No session to fall back to — quit and let main print it to stderr.
+		a.stop()
+		a.fatalErr = msg.err
+		return a, tea.Quit
+
 	case errMsg:
 		a.stop()
+		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.err = msg.err
 		return a, nil
 
 	case tickMsg:
-		if a.activity != "" {
+		if a.activity != "" || a.connCmd != "" {
 			a.spinner++
 		}
 		return a, tickCmd()
 
 	case connectedMsg:
+		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.engine = msg.engine
 		if msg.name != "" {
 			a.connName = msg.name
@@ -150,9 +197,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.focus = focusSidebar
 		a.layout()
 		a.status = ""
-		// Kick off the perpetual spinner tick; it idles invisibly (View shows
-		// nothing while a.activity is empty) and animates only during a DB op.
-		return a, tickCmd()
+		// Kick off the perpetual spinner tick (unless the waiting view already
+		// started it); it idles invisibly and animates only during a DB op.
+		return a, a.ensureTick()
 
 	case rowsMsg:
 		a.stop()
@@ -364,6 +411,10 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.readOnly = c.ReadOnly
 				a.pending = c
 				a.status = "connecting to " + c.Name + "…"
+				a.beginConnect(c)
+				if a.connCmd != "" {
+					return a, tea.Batch(connectCmd(c), tickCmd())
+				}
 				return a, connectCmd(c)
 			}
 		}
@@ -660,6 +711,9 @@ func (a App) View() string {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).
 			Render("error: "+a.err.Error()) + "\n\npress ctrl-c to quit"
 	}
+	if a.connCmd != "" {
+		return a.connectingView()
+	}
 	switch a.screen {
 	case screenPicker:
 		return lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.picker.View())
@@ -715,3 +769,22 @@ func (a App) statusLine() string {
 }
 
 var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+
+// connectingView is the full-screen loader shown while a `cmd`-backed connection
+// starts its helper and waits for the port — it names what we ran and where.
+func (a App) connectingView() string {
+	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
+	label := lipgloss.NewStyle().Faint(true)
+	head := "connecting"
+	if a.connName != "" {
+		head += " to " + a.connName
+	}
+	var b strings.Builder
+	b.WriteString("\n " + activityStyle.Render(frame) + " " + head + "\n\n")
+	b.WriteString(" " + label.Render("running") + "  " + a.connCmd + "\n")
+	if a.connAddr != "" {
+		b.WriteString(" " + label.Render("waiting") + "  " + a.connAddr + " …\n")
+	}
+	b.WriteString("\n " + label.Render("ctrl-c to abort") + "\n")
+	return b.String()
+}

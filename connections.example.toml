@@ -16,16 +16,14 @@ url = "mysql://user:secret@localhost:3306/mydb"   # password goes in the URL
 url = "postgres://user@prod.example.com:5432/app"
 read_only = true            # jsq refuses every mutation on this connection
 
-# `run` starts a helper (a tunnel) before connecting and keeps it alive for the
+# `cmd` starts a helper (a tunnel) before connecting and keeps it alive for the
 # session; its whole process group is killed on exit, so nothing outlives jsq.
-# `wait_port` then blocks the connect until that port answers — probed once a
-# second, giving up after 30s. A bare port means 127.0.0.1, or give host:port.
+# jsq then waits for the URL's host:port to answer before opening the database
+# (probed once a second, giving up after 30s), so the tunnel has time to come up.
 [kube]
 url = "postgres://user@localhost:5432/app"
-run = "kubectl port-forward svc/postgres 5432:5432"
-wait_port = "5432"
+cmd = "kubectl port-forward svc/postgres 5432:5432"
 
 [ssh]
 url = "mysql://user@localhost:3307/app"
-run = "ssh -N -L 3307:db.internal:3306 bastion.example.com"
-wait_port = "127.0.0.1:3307"
+cmd = "ssh -N -L 3307:db.internal:3306 bastion.example.com"

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
@@ -48,8 +49,28 @@ func TestWaitPortProcExits(t *testing.T) {
 	}
 	defer p.kill() // deregister from the live-helper set
 	err = waitPort(addr, p, 5*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "exited before") || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("want exited-with-output error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "failed before") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("want crash-with-output error, got %v", err)
+	}
+}
+
+// TestWaitPortDetachedCmdOK covers the `docker compose up -d` shape: the helper
+// exits cleanly (0) while the service comes up, so the port wait must succeed
+// rather than treating the exit as a failure.
+func TestWaitPortDetachedCmdOK(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	p, err := startRun("true") // exits 0 immediately, like a detached launcher
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.kill()
+	if err := waitPort(ln.Addr().String(), p, 3*time.Second); err != nil {
+		t.Fatalf("clean exit + open port should succeed, got %v", err)
 	}
 }
 
@@ -69,9 +90,10 @@ func TestRunProcKill(t *testing.T) {
 	(*runProc)(nil).kill()
 }
 
-// TestRunFlowConnects drives the whole run → wait_port → connect flow through one
-// connectCmd: it starts the `run` helper, waits for the (already-open) port, and
-// opens the engine, all before returning connectedMsg.
+// TestRunFlowConnects drives the whole cmd → connect flow through one connectCmd:
+// it starts the `cmd` helper and opens the engine before returning connectedMsg.
+// (A SQLite URL has no host:port, so no wait happens — that path is covered by
+// TestWaitPort* and db.TestHostPort.)
 func TestRunFlowConnects(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -82,28 +104,72 @@ func TestRunFlowConnects(t *testing.T) {
 	e.Exec(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY)`)
 	e.Close()
 
-	// A listener stands in for the port the `run` helper would open.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
 	defer KillRunHelpers() // reap the sleep helper this test starts
 
-	app := New(nil, config.Conn{
-		URL:      path,
-		Name:     "kube",
-		Run:      "sleep 30",
-		WaitPort: ln.Addr().String(),
-	})
+	app := New(nil, config.Conn{URL: path, Name: "kube", Cmd: "sleep 30"})
+	if app.connCmd == "" {
+		t.Fatal("waiting view should be armed for a cmd-backed connection")
+	}
 
-	msg := app.Init()()
+	// connectCmd starts the helper and opens the engine (SQLite → no port wait).
+	msg := connectCmd(app.pending)()
 	if _, ok := msg.(connectedMsg); !ok {
 		t.Fatalf("expected connectedMsg, got %T (%+v)", msg, msg)
 	}
 	app = update(t, app, msg)
 	if app.engine == nil {
 		t.Fatal("engine not set after connect")
+	}
+	if app.connCmd != "" {
+		t.Fatal("waiting view should be dismissed after connect")
+	}
+}
+
+// TestConnectingView checks the loader names the cmd we ran and the port we wait
+// for, without executing connectCmd (so no real process is spawned).
+func TestConnectingView(t *testing.T) {
+	app := New(nil, config.Conn{
+		Name: "kube",
+		URL:  "postgres://u@localhost:5432/app",
+		Cmd:  "kubectl port-forward svc/db 5432:5432",
+	})
+	app.w, app.h = 80, 24
+	v := app.View()
+	for _, want := range []string{"kube", "kubectl port-forward svc/db 5432:5432", "localhost:5432", "running", "waiting"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("connecting view missing %q:\n%s", want, v)
+		}
+	}
+	// A cmd-less connection shows no loader.
+	plain := New(nil, config.Conn{Name: "local", URL: "sqlite://./x.db"})
+	if plain.connCmd != "" {
+		t.Fatal("cmd-less connection should not arm the waiting view")
+	}
+}
+
+// TestConnectErrorQuits verifies a connect failure quits the app carrying the
+// error out (main prints it to stderr), rather than showing an in-app screen.
+func TestConnectErrorQuits(t *testing.T) {
+	app := New(nil, config.Conn{})
+	m, cmd := app.Update(connectErrMsg{err: errors.New("nope")})
+	app = m.(App)
+	if app.FatalErr() == nil || app.FatalErr().Error() != "nope" {
+		t.Fatalf("FatalErr = %v, want \"nope\"", app.FatalErr())
+	}
+	if cmd == nil {
+		t.Fatal("connect error should return a command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("connect error should quit the program")
+	}
+}
+
+// TestConnectCmdReportsConnectErr checks a failed connect surfaces as
+// connectErrMsg (here: the helper exits before its port opens).
+func TestConnectCmdReportsConnectErr(t *testing.T) {
+	msg := connectCmd(config.Conn{URL: "postgres://u@127.0.0.1:1/app", Cmd: "exit 1"})()
+	if _, ok := msg.(connectErrMsg); !ok {
+		t.Fatalf("expected connectErrMsg, got %T (%+v)", msg, msg)
 	}
 }
 
@@ -137,18 +203,5 @@ func TestPickerIgnoresDoubleEnter(t *testing.T) {
 	}
 	if _, cmd2 := app.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd2 != nil {
 		t.Fatal("second Enter while connecting must be a no-op")
-	}
-}
-
-func TestWaitAddr(t *testing.T) {
-	cases := map[string]string{
-		"":               "",
-		"5432":           "127.0.0.1:5432",
-		"db.internal:80": "db.internal:80",
-	}
-	for in, want := range cases {
-		if got := waitAddr(in); got != want {
-			t.Fatalf("waitAddr(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

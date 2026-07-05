@@ -65,8 +65,16 @@ func run() error {
 	defer tui.KillRunHelpers()
 
 	p := tea.NewProgram(tui.New(conns, direct), tea.WithAltScreen())
-	_, err = p.Run()
-	return err
+	final, err := p.Run()
+	if err != nil {
+		return err
+	}
+	// A connect failure quits the program carrying its error out here, so it
+	// prints to stderr (via main) instead of dead-ending on an in-app screen.
+	if a, ok := final.(tui.App); ok {
+		return a.FatalErr()
+	}
+	return nil
 }
 
 // looksLikeDSN treats URLs and filesystem-looking paths as ad-hoc connections;
