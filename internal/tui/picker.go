@@ -24,12 +24,12 @@ func (p *picker) selected() (config.Conn, bool) {
 
 func (p *picker) View() string {
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render("jsq - connections"))
-	b.WriteString("\n\n")
+	b.WriteString(" " + lipgloss.NewStyle().Faint(true).Render("connections"))
+	b.WriteString("\n")
 	for i, c := range p.conns {
-		line := "  " + c.Name
+		line := " " + c.Name
 		if i == p.cursor {
-			line = selStyle.Render("› " + c.Name)
+			line = selStyle.Render("›" + c.Name)
 		}
 		b.WriteString(line + "\n")
 	}
