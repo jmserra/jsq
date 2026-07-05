@@ -708,8 +708,11 @@ func (a App) gridLimit() int {
 
 func (a App) View() string {
 	if a.err != nil {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).
-			Render("error: "+a.err.Error()) + "\n\npress ctrl-c to quit"
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+		if a.w > 0 {
+			style = style.Width(a.w) // soft-wrap long errors instead of clipping
+		}
+		return style.Render("error: "+a.err.Error()) + "\n\npress ctrl-c to quit"
 	}
 	if a.connCmd != "" {
 		return a.connectingView()
@@ -781,10 +784,22 @@ func (a App) connectingView() string {
 	}
 	var b strings.Builder
 	b.WriteString("\n " + activityStyle.Render(frame) + " " + head + "\n\n")
-	b.WriteString(" " + label.Render("running") + "  " + a.connCmd + "\n")
+	// The cmd can be long; soft-wrap it (indented under the label) so it never
+	// clips off the right edge.
+	b.WriteString(" " + label.Render("running") + "  " + a.wrapIndent(a.connCmd, 10) + "\n")
 	if a.connAddr != "" {
 		b.WriteString(" " + label.Render("waiting") + "  " + a.connAddr + " …\n")
 	}
 	b.WriteString("\n " + label.Render("ctrl-c to abort") + "\n")
 	return b.String()
+}
+
+// wrapIndent soft-wraps s to the terminal width, indenting continuation lines by
+// indent spaces so they line up under a label. A no-op until the width is known.
+func (a App) wrapIndent(s string, indent int) string {
+	if a.w <= 0 || indent >= a.w {
+		return s
+	}
+	wrapped := lipgloss.NewStyle().Width(a.w - indent).Render(s)
+	return strings.ReplaceAll(wrapped, "\n", "\n"+strings.Repeat(" ", indent))
 }
