@@ -44,6 +44,7 @@ type App struct {
 	sidebar     sidebar
 	grid        grid
 	cell        cellView
+	help        help
 	focus       focus
 	showSidebar bool
 
@@ -282,6 +283,22 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return a, tea.Quit
 	}
+	// Help cheat sheet captures keys while open; any of ?/Esc/Enter/q closes it.
+	if a.help.active {
+		switch msg.String() {
+		case "?", "esc", "enter", "q":
+			a.help.active = false
+		case "j", "down":
+			a.help.scroll(1)
+		case "k", "up":
+			a.help.scroll(-1)
+		case "g":
+			a.help.off = 0
+		case "G":
+			a.help.scroll(len(helpLines))
+		}
+		return a, nil
+	}
 	// Cell viewer captures keys while open.
 	if a.cell.active {
 		switch msg.String() {
@@ -310,6 +327,13 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.showSidebar && a.focus == focusSidebar && a.sidebar.filtering {
 		return a.handleSidebarFilterKey(msg)
 	}
+	// `?` opens the help cheat sheet — from grid or sidebar, but only once the
+	// modal/typing captures above have had their say (so `?` typed into a filter
+	// stays literal).
+	if a.screen == screenBrowse && msg.String() == "?" {
+		a.help.open(a.w-leftPad, a.h-1)
+		return a, nil
+	}
 	// Esc kills an in-flight DB op (a slow query, a big load). This takes
 	// precedence over the grid's Esc (clear-filter), which only applies when
 	// nothing is running.
@@ -331,7 +355,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.connName = c.Name
 				a.readOnly = c.ReadOnly
 				a.status = "connecting to " + c.Name + "…"
-				return a, connectCmd(c.DSN(), c.Name, c.ReadOnly)
+				return a, connectCmd(c.URL, c.Name, c.ReadOnly)
 			}
 		}
 		return a, nil
@@ -637,6 +661,10 @@ func (a App) View() string {
 }
 
 func (a App) browseView() string {
+	if a.help.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.help.View())
+		return a.statusLine() + "\n" + body
+	}
 	if a.cell.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
 		return a.statusLine() + "\n" + body

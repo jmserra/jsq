@@ -39,6 +39,7 @@ internal/tui/
   sidebar.go    # flat filterable table list Model
   picker.go     # connection picker (bare `jsq`)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
+  help.go       # read-only `?` keybinding cheat sheet (full-area overlay like cellview); helpItems is the hand-kept mirror of the hardcoded keymap
   util.go       # clamp()
 ```
 

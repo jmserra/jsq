@@ -27,7 +27,6 @@ On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
 
 - **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back.
-- **`?` help overlay** — generated from the keymap.
 - **Clipboard yank** (`y`/`Y`) and a **database picker**.
 - **Dismissible errors** — a failed statement currently shows a full-screen
   error; it should surface in the status line and let you continue.
@@ -82,7 +81,6 @@ url = "postgres://user@localhost:5432/appdev?sslmode=disable"
 
 [prod]
 url = "postgres://user@prod.example.com:5432/app"
-env = "JSQ_PROD_PASSWORD"     # password injected from this env var at connect
 
 [work]
 url = "mysql://user@localhost:3306/mydb"
@@ -95,8 +93,7 @@ url = "postgres://user@prod.example.com:5432/app"
 read_only = true              # jsq refuses all mutations on this connection
 ```
 
-Put the password in the URL, or point at an env var with `env = "..."` so the
-file can live in your dotfiles without a secret in it. Engine is inferred from
+Put the password in the URL. Engine is inferred from
 the URL scheme (`postgres`/`postgresql`, `mysql`, `sqlite`/`file`/bare path). The
 picker lists the section names in file order. Format is **TOML** — the
 section-per-connection layout reads like INI but gets a strict parser.
@@ -121,6 +118,7 @@ section-per-connection layout reads like INI but gets a strict parser.
 | `H` | toggle the table sidebar (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
 | `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
+| `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
 **Filtering** is prefix-search by default (a trailing `%` is added
@@ -349,7 +347,8 @@ alike); `Ctrl-r` history picker (reads re-execute, mutations open in nvim);
 ### Modes
 
 Only **Normal** and **Filter**, plus transient overlays (cell-edit input,
-full-cell viewer, and eventually the history picker and help). There is no `:`
+full-cell viewer, the `?` help cheat sheet, and eventually the history picker).
+There is no `:`
 command mode, and no in-app SQL "insert mode" — editing SQL suspends jsq and drops
 you into `$EDITOR`.
 
@@ -408,9 +407,8 @@ on a connection, which disables all mutation regardless.
 ## Configuration
 
 - `~/.config/jsq/connections.toml` — connections (above), app-read-only.
-- Env: `$JSQ_CONFIG` (file location), `$EDITOR`, and each connection's own
-  password var (the `env = ...` key). Keybindings are compiled in; a keymap
-  override file is a possible later addition.
+- Env: `$JSQ_CONFIG` (file location) and `$EDITOR`. Keybindings are compiled in;
+  a keymap override file is a possible later addition.
 
 ## Build & distribution
 

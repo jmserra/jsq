@@ -57,7 +57,7 @@ func run() error {
 		if !ok {
 			return fmt.Errorf("unknown connection %q; available: %s", arg, names(conns))
 		}
-		dsn, name, readOnly = c.DSN(), c.Name, c.ReadOnly
+		dsn, name, readOnly = c.URL, c.Name, c.ReadOnly
 	}
 
 	p := tea.NewProgram(tui.New(conns, dsn, name, readOnly), tea.WithAltScreen())

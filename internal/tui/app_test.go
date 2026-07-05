@@ -988,6 +988,52 @@ func TestCanceledSwallowed(t *testing.T) {
 	}
 }
 
+// TestHelpOverlay drives the `?` cheat sheet: it opens over the grid, shows the
+// bindings, toggles shut, and — crucially — `?` typed into a filter stays
+// literal rather than opening help.
+func TestHelpOverlay(t *testing.T) {
+	app := loadTable(t, false, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	// `?` opens the panel; the view shows the title and a real binding.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if !app.help.active {
+		t.Fatal("`?` should open the help panel")
+	}
+	view := app.View()
+	for _, want := range []string{"Keybindings", "quick-edit", "duplicate the current row"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("help view missing %q:\n%s", want, view)
+		}
+	}
+	// The grid is hidden while help is up.
+	if strings.Contains(view, "Ada") {
+		t.Fatalf("help panel should replace the grid:\n%s", view)
+	}
+
+	// `?` again toggles it shut, back to the grid.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if app.help.active {
+		t.Fatal("`?` should close the help panel")
+	}
+	if !strings.Contains(app.View(), "Ada") {
+		t.Fatal("closing help should restore the grid")
+	}
+
+	// `?` typed into a column filter is literal — it must not open help.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if app.help.active {
+		t.Fatal("`?` while typing a filter must stay literal, not open help")
+	}
+	if app.grid.filterVal != "?" {
+		t.Fatalf("filter should contain the literal ?, got %q", app.grid.filterVal)
+	}
+}
+
 func TestIsReadSQL(t *testing.T) {
 	reads := []string{"SELECT 1", "  select * from t", "-- note\nSELECT 1", "PRAGMA x",
 		"EXPLAIN SELECT 1", "SHOW TABLES", "VALUES (1)", "TABLE users"}

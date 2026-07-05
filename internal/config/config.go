@@ -5,7 +5,6 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 
@@ -16,7 +15,6 @@ import (
 type Conn struct {
 	Name     string `toml:"-"`
 	URL      string `toml:"url"`
-	Env      string `toml:"env"`
 	ReadOnly bool   `toml:"read_only"`
 }
 
@@ -59,25 +57,4 @@ func Load(path string) ([]Conn, error) {
 		conns = append(conns, c)
 	}
 	return conns, nil
-}
-
-// DSN returns the connection URL with the password injected from the env var
-// (the `env = ...` key) when the URL itself carries no password.
-func (c Conn) DSN() string {
-	if c.Env == "" {
-		return c.URL
-	}
-	pw := os.Getenv(c.Env)
-	if pw == "" {
-		return c.URL
-	}
-	u, err := url.Parse(c.URL)
-	if err != nil || u.User == nil {
-		return c.URL
-	}
-	if _, has := u.User.Password(); has {
-		return c.URL
-	}
-	u.User = url.UserPassword(u.User.Username(), pw)
-	return u.String()
 }
