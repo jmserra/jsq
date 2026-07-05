@@ -49,6 +49,7 @@ var helpItems = []helpItem{
 	{key: "Esc", desc: "kill a running query, else clear the filter"},
 	{head: "Inspect"},
 	{key: "Enter", desc: "view the full cell value"},
+	{key: "f", desc: "follow the foreign key on this column"},
 	{head: "Edit"},
 	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now)"},
 	{key: "E", desc: "edit cell in $EDITOR"},

@@ -38,6 +38,15 @@ type Column struct {
 	Unique        bool
 }
 
+// ForeignKey is one foreign-key constraint: the local Columns reference
+// RefTable's RefColumns (parallel slices — one entry per column, so a composite
+// key has len>1). Used to follow a value to the row it points at.
+type ForeignKey struct {
+	Columns    []string
+	RefTable   TableRef
+	RefColumns []string
+}
+
 // ResultSet is a query result. A nil Rows element is SQL NULL.
 type ResultSet struct {
 	Cols  []string
@@ -51,6 +60,7 @@ type Engine interface {
 	Tables(ctx context.Context) ([]Table, error)
 	Columns(ctx context.Context, t TableRef) ([]Column, error)
 	PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
+	ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error)
 	Query(ctx context.Context, query string, args ...any) (*ResultSet, error)
 	Exec(ctx context.Context, query string, args ...any) (int64, error)
 	Databases(ctx context.Context) ([]string, error) // deferred picker; may be nil

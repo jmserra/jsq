@@ -71,16 +71,61 @@ func connectCmd(c config.Conn) tea.Cmd {
 	}
 }
 
-// loadCmd loads the first window of a table with the active sort (J/K) and the
-// active column filters (§7.1) applied server-side.
-func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool, filters []filterSpec) tea.Cmd {
+// eqPred is an equality predicate applied to a load in addition to the column
+// filters — a base filter that carries a followed foreign key (refCol = value).
+type eqPred struct {
+	col string
+	val any
+}
+
+// followFKCmd resolves the foreign key on column col of table t and returns the
+// referenced table plus the equality predicates that select the pointed-at row
+// (built from the current row's values, so composite keys work). If col isn't
+// part of any FK, or a needed value is NULL, it returns a noticeMsg instead.
+func followFKCmd(ctx context.Context, eng db.Engine, t db.TableRef, col string, row map[string]any) tea.Cmd {
+	return func() tea.Msg {
+		fks, err := eng.ForeignKeys(ctx, t)
+		if err != nil {
+			return dbErr(ctx, err)
+		}
+		for _, fk := range fks {
+			if !contains(fk.Columns, col) {
+				continue
+			}
+			preds := make([]eqPred, 0, len(fk.Columns))
+			for i, local := range fk.Columns {
+				v := row[local]
+				if v == nil {
+					return noticeMsg{fmt.Sprintf("cannot follow: %s is NULL", local)}
+				}
+				preds = append(preds, eqPred{col: fk.RefColumns[i], val: v})
+			}
+			note := fmt.Sprintf("%s = %v", fk.RefColumns[0], row[fk.Columns[0]])
+			return followReadyMsg{refTable: fk.RefTable, preds: preds, note: note}
+		}
+		return noticeMsg{fmt.Sprintf("no foreign key on %s", col)}
+	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// loadCmd loads the first window of a table with the active sort (J/K), any base
+// predicates (a followed FK), and the active column filters (§7.1), server-side.
+func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec) tea.Cmd {
 	return func() tea.Msg {
 		ref := t.Ref()
 		pk, err := eng.PrimaryKey(ctx, ref)
 		if err != nil {
 			return dbErr(ctx, err)
 		}
-		where, args := whereClause(eng, filters)
+		where, args := whereClause(eng, base, filters)
 		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d",
 			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit)
 		rs, err := eng.Query(ctx, q, args...)
@@ -95,14 +140,14 @@ func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol 
 
 // loadMoreCmd fetches the next window (continuous scroll) via LIMIT/OFFSET,
 // preserving the active sort and filters.
-func loadMoreCmd(ctx context.Context, eng db.Engine, t db.Table, sortCol string, sortAsc bool, filters []filterSpec, offset, limit int) tea.Cmd {
+func loadMoreCmd(ctx context.Context, eng db.Engine, t db.Table, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec, offset, limit int) tea.Cmd {
 	return func() tea.Msg {
 		ref := t.Ref()
 		pk, err := eng.PrimaryKey(ctx, ref)
 		if err != nil {
 			return dbErr(ctx, err)
 		}
-		where, args := whereClause(eng, filters)
+		where, args := whereClause(eng, base, filters)
 		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d",
 			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit, offset)
 		rs, err := eng.Query(ctx, q, args...)
@@ -292,17 +337,26 @@ func prepareDuplicateCmd(ctx context.Context, eng db.Engine, t db.Table, vals ma
 	}
 }
 
-// whereClause builds "WHERE p1 AND p2 …" from the column filters (stacking AND),
-// binding each pattern as a parameter via the engine's FilterPredicate.
-func whereClause(eng db.Engine, filters []filterSpec) (string, []any) {
-	if len(filters) == 0 {
+// whereClause builds "WHERE p1 AND p2 …" from the base equality predicates (a
+// followed FK) followed by the column filters, stacking AND. Base predicates bind
+// as exact `col = $i`; filters bind their pattern via FilterPredicate. Parameter
+// indexes are shared and 1-based across both.
+func whereClause(eng db.Engine, base []eqPred, filters []filterSpec) (string, []any) {
+	if len(base) == 0 && len(filters) == 0 {
 		return "", nil
 	}
-	preds := make([]string, 0, len(filters))
-	args := make([]any, 0, len(filters))
-	for i, f := range filters {
-		preds = append(preds, eng.FilterPredicate(eng.QuoteIdent(f.col), i+1))
+	preds := make([]string, 0, len(base)+len(filters))
+	args := make([]any, 0, len(base)+len(filters))
+	i := 1
+	for _, b := range base {
+		preds = append(preds, eng.QuoteIdent(b.col)+" = "+eng.Placeholder(i))
+		args = append(args, b.val)
+		i++
+	}
+	for _, f := range filters {
+		preds = append(preds, eng.FilterPredicate(eng.QuoteIdent(f.col), i))
 		args = append(args, f.pattern)
+		i++
 	}
 	return " WHERE " + strings.Join(preds, " AND "), args
 }

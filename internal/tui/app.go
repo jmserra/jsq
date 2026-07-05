@@ -56,6 +56,8 @@ type App struct {
 	showSidebar bool
 
 	currentTable db.Table
+	basePreds    []eqPred // followed-FK equality filter, AND-ed into every load until the table changes
+	baseNote     string   // human form of basePreds, shown in the status line
 	sortCol      string
 	sortAsc      bool
 	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
@@ -201,6 +203,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// started it); it idles invisibly and animates only during a DB op.
 		return a, a.ensureTick()
 
+	case noticeMsg:
+		a.stop()
+		a.status = msg.text
+		return a, nil
+
+	case followReadyMsg:
+		// Open the referenced table filtered to the pointed-at row. It stays a real
+		// single table (editable, sortable); basePreds ride along until the table
+		// changes. A clean top-left cursor, like selectTable.
+		a.currentTable = db.Table{Schema: msg.refTable.Schema, Name: msg.refTable.Name}
+		a.basePreds = msg.preds
+		a.baseNote = msg.note
+		a.sortCol, a.sortAsc = "", true
+		a.resetGrid = true
+		a.grid.clearFilters()
+		ctx := a.begin("loading " + msg.refTable.Name)
+		a.status = "loading " + msg.refTable.Name + "…"
+		return a, a.loadCurrentCmd(ctx)
+
 	case rowsMsg:
 		a.stop()
 		a.grid.setResult(msg.rs)
@@ -221,6 +242,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.focus = focusGrid
 		a.layout()
 		a.status = msg.table.Name
+		if a.baseNote != "" { // a followed-FK view: show the predicate
+			a.status = msg.table.Name + " · " + a.baseNote
+		}
 		// A reload triggered by a full-path exec keeps its confirmation visible.
 		if a.postExecStatus != "" {
 			a.status = a.postExecStatus
@@ -500,8 +524,9 @@ func (a App) handleSidebarFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // filters, and auto-hides the sidebar (handled on rowsMsg).
 func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 	a.currentTable = t
-	a.sortCol, a.sortAsc = "", true // reset to default (PK desc) on new table
-	a.resetGrid = true              // new table → cursor to top-left
+	a.basePreds, a.baseNote = nil, "" // a fresh table from the sidebar is unfiltered
+	a.sortCol, a.sortAsc = "", true   // reset to default (PK desc) on new table
+	a.resetGrid = true                // new table → cursor to top-left
 	a.grid.clearFilters()
 	ctx := a.begin("loading " + t.Name)
 	a.status = "loading " + t.Name + "…"
@@ -637,6 +662,20 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, prepareDuplicateCmd(ctx, a.engine, a.currentTable, vals)
 		}
 		return a, nil
+	case "f":
+		// Follow the foreign key on the cursor's column to the row it points at.
+		if a.adHoc {
+			a.status = "follow unavailable on a query result"
+			return a, nil
+		}
+		col, ok := a.grid.currentColName()
+		row, ok2 := a.grid.currentRowMap()
+		if !ok || !ok2 {
+			return a, nil
+		}
+		ctx := a.begin("following " + col)
+		a.status = "following " + col + "…"
+		return a, followFKCmd(ctx, a.engine, a.currentTable.Ref(), col, row)
 	case "enter":
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
@@ -680,7 +719,7 @@ func (a *App) maybeLoadMore() tea.Cmd {
 	a.grid.loading = true
 	ctx := a.begin("loading more")
 	return loadMoreCmd(ctx, a.engine, a.currentTable, a.sortCol, a.sortAsc,
-		a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
+		a.basePreds, a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
 }
 
 // scratchSeed is the prefill for s: this table's last scratch query if one was
@@ -694,9 +733,10 @@ func (a App) scratchSeed() editorSeed {
 	return editorSeed{sql: sql, remember: a.currentTable}
 }
 
-// loadCurrentCmd (re)loads the current table with the active sort and filters.
+// loadCurrentCmd (re)loads the current table with the active sort, any followed-FK
+// base predicate, and the column filters.
 func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
-	return loadCmd(ctx, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.grid.filterSpecs())
+	return loadCmd(ctx, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
 }
 
 func (a App) gridLimit() int {

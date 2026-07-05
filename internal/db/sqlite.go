@@ -219,6 +219,73 @@ func (e *sqliteEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, er
 	return pk, rows.Err()
 }
 
+// ForeignKeys reads FK constraints via PRAGMA foreign_key_list, grouping the
+// per-column rows by constraint id. A NULL "to" (a `REFERENCES parent` without an
+// explicit column) means the parent's primary key, resolved here.
+func (e *sqliteEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error) {
+	rows, err := e.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", e.QuoteIdent(t.Name)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byID := map[int]*ForeignKey{}
+	var order []int
+	for rows.Next() {
+		var id, seq int
+		var refTable, from, onUpd, onDel, match string
+		var to sql.NullString
+		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpd, &onDel, &match); err != nil {
+			return nil, err
+		}
+		fk := byID[id]
+		if fk == nil {
+			fk = &ForeignKey{RefTable: TableRef{Name: refTable}}
+			byID[id] = fk
+			order = append(order, id)
+		}
+		fk.Columns = append(fk.Columns, from)
+		fk.RefColumns = append(fk.RefColumns, to.String) // "" → resolve to PK below
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ForeignKey, 0, len(order))
+	for _, id := range order {
+		fk := byID[id]
+		if err := e.resolveImplicitPK(ctx, fk); err != nil {
+			return nil, err
+		}
+		out = append(out, *fk)
+	}
+	return out, nil
+}
+
+// resolveImplicitPK fills any blank RefColumns (a column-less REFERENCES) from the
+// referenced table's primary key, positionally.
+func (e *sqliteEngine) resolveImplicitPK(ctx context.Context, fk *ForeignKey) error {
+	blank := false
+	for _, c := range fk.RefColumns {
+		if c == "" {
+			blank = true
+		}
+	}
+	if !blank {
+		return nil
+	}
+	pk, err := e.PrimaryKey(ctx, fk.RefTable)
+	if err != nil {
+		return err
+	}
+	for i := range fk.RefColumns {
+		if fk.RefColumns[i] == "" && i < len(pk) {
+			fk.RefColumns[i] = pk[i]
+		}
+	}
+	return nil
+}
+
 func (e *sqliteEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
 	return scanQuery(ctx, e.db, query, args...)
 }

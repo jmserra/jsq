@@ -28,7 +28,7 @@ don't exist yet.** What's really here:
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea
 internal/config/config.go   # load read-only connections.toml (url, read_only, cmd)
 internal/db/
-  db.go                     # Engine interface + Open() dispatch + shared scanQuery + DSN helpers
+  db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
   app.go        # root App Model: screen/focus, ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
@@ -66,6 +66,17 @@ the one spinner tick loop (`ticking`/`ensureTick` guard against a second loop);
 guarded by `a.pending.URL != ""` so a second Enter during a slow connect can't
 spawn a duplicate engine/helper. `New` takes the resolved `config.Conn`
 (`pending`).
+
+**Follow foreign keys** (`f`): `followFKCmd` calls `Engine.ForeignKeys(table)`
+(per-engine: sqlite `PRAGMA foreign_key_list`, pg `pg_constraint`+`unnest`, mysql
+`key_column_usage`), finds the FK covering the cursor column, and builds `eqPred`s
+`refCol = <row value>` from the current row (composite-key aware) → `followReadyMsg`.
+The handler opens the referenced table as a normal editable/sortable single table
+with those preds stored in `App.basePreds` (human form in `baseNote`, shown in the
+status). `basePreds` are AND-ed into every load via `whereClause`/`loadCmd`/
+`loadMoreCmd` and cleared by `selectTable` (a fresh sidebar pick). NULL cells and
+non-FK columns return a `noticeMsg`. Note grid cell values are driver-typed
+(sqlite ints come back `int64`, not string) — fine as bound params.
 
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a

@@ -474,7 +474,16 @@ func (g *grid) rowKeys() ([]keyPred, bool) {
 // currentRowValues returns the row under the cursor keyed by column name, for the
 // p full-path duplicate. ok is false when the grid isn't editable or has no row.
 func (g *grid) currentRowValues() (map[string]any, bool) {
-	if !g.editable() || g.cursorR >= len(g.visible) {
+	if !g.editable() {
+		return nil, false
+	}
+	return g.currentRowMap()
+}
+
+// currentRowMap returns the cursor row as a column→value map, with no editability
+// requirement — used to follow a foreign key from any table.
+func (g *grid) currentRowMap() (map[string]any, bool) {
+	if g.cursorR >= len(g.visible) {
 		return nil, false
 	}
 	row := g.rows[g.visible[g.cursorR]]

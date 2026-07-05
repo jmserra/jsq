@@ -172,6 +172,47 @@ func (e *myEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 	return pk, nil
 }
 
+// ForeignKeys reads FK constraints from key_column_usage (rows carrying a
+// referenced_table_name), grouped by constraint name and ordered within a
+// composite key by ordinal_position. Single-DB, so the ref table has no schema.
+func (e *myEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error) {
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT constraint_name, column_name, referenced_table_name, referenced_column_name
+		FROM information_schema.key_column_usage
+		WHERE table_schema = DATABASE() AND table_name = ?
+		  AND referenced_table_name IS NOT NULL
+		ORDER BY constraint_name, ordinal_position`, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byName := map[string]*ForeignKey{}
+	var order []string
+	for rows.Next() {
+		var name, col, refTable, refCol string
+		if err := rows.Scan(&name, &col, &refTable, &refCol); err != nil {
+			return nil, err
+		}
+		fk := byName[name]
+		if fk == nil {
+			fk = &ForeignKey{RefTable: TableRef{Name: refTable}}
+			byName[name] = fk
+			order = append(order, name)
+		}
+		fk.Columns = append(fk.Columns, col)
+		fk.RefColumns = append(fk.RefColumns, refCol)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]ForeignKey, 0, len(order))
+	for _, name := range order {
+		out = append(out, *byName[name])
+	}
+	return out, nil
+}
+
 func (e *myEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
 	return scanQuery(ctx, e.db, query, args...)
 }

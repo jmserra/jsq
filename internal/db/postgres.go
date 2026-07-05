@@ -215,6 +215,57 @@ func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 	return pk, rows.Err()
 }
 
+// ForeignKeys reads FK constraints from pg_catalog, walking each constraint's
+// parallel (conkey, confkey) column arrays by subscript so composite keys keep
+// their column order.
+func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error) {
+	schema := t.Schema
+	if schema == "" {
+		schema = "public"
+	}
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT con.conname, att.attname, nsp2.nspname, cl2.relname, att2.attname
+		FROM pg_constraint con
+		JOIN pg_class cl       ON cl.oid = con.conrelid
+		JOIN pg_namespace nsp  ON nsp.oid = cl.relnamespace
+		JOIN pg_class cl2      ON cl2.oid = con.confrelid
+		JOIN pg_namespace nsp2 ON nsp2.oid = cl2.relnamespace
+		JOIN generate_subscripts(con.conkey, 1) AS s(i) ON true
+		JOIN pg_attribute att  ON att.attrelid = con.conrelid  AND att.attnum = con.conkey[s.i]
+		JOIN pg_attribute att2 ON att2.attrelid = con.confrelid AND att2.attnum = con.confkey[s.i]
+		WHERE con.contype = 'f' AND nsp.nspname = $1 AND cl.relname = $2
+		ORDER BY con.conname, s.i`, schema, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byName := map[string]*ForeignKey{}
+	var order []string
+	for rows.Next() {
+		var name, col, refSchema, refTable, refCol string
+		if err := rows.Scan(&name, &col, &refSchema, &refTable, &refCol); err != nil {
+			return nil, err
+		}
+		fk := byName[name]
+		if fk == nil {
+			fk = &ForeignKey{RefTable: TableRef{Schema: refSchema, Name: refTable}}
+			byName[name] = fk
+			order = append(order, name)
+		}
+		fk.Columns = append(fk.Columns, col)
+		fk.RefColumns = append(fk.RefColumns, refCol)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]ForeignKey, 0, len(order))
+	for _, name := range order {
+		out = append(out, *byName[name])
+	}
+	return out, nil
+}
+
 func (e *pgEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
 	return scanQuery(ctx, e.db, query, args...)
 }
