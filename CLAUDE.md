@@ -78,6 +78,14 @@ status). `basePreds` are AND-ed into every load via `whereClause`/`loadCmd`/
 non-FK columns return a `noticeMsg`. Note grid cell values are driver-typed
 (sqlite ints come back `int64`, not string) — fine as bound params.
 
+**Jumplist** (`Ctrl-O` back / `Ctrl-I` forward, vim-style): a `viewState` is
+`{table, basePreds, baseNote, sort}` (column filters not captured). `pushJump`
+snapshots the current view before every navigation (follow FK, sidebar pick),
+clearing the forward stack; `jump(back)` moves between the two stacks; `loadView`
+is the shared restore-and-reload used by `selectTable`, follow, and jumps. Caveat:
+most terminals send `Ctrl-I` as `Tab` (jsq's focus-cycle key), so forward only
+works where the terminal distinguishes them; `Ctrl-O` is always unambiguous.
+
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a
 temp file and spawns `$EDITOR` via `tea.ExecProcess`. `E` and `D` build their seed

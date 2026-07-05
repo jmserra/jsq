@@ -86,6 +86,68 @@ func TestFollowForeignKey(t *testing.T) {
 	}
 }
 
+// TestJumplistBackForward follows a FK, then walks back (Ctrl-O) and forward.
+func TestJumplistBackForward(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fk.db")
+	e, _ := db.Open(ctx, path)
+	for _, stmt := range []string{
+		`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT)`,
+		`INSERT INTO authors (id, name) VALUES (1, 'Ada'), (2, 'Linus')`,
+		`CREATE TABLE books (id INTEGER PRIMARY KEY, author_id INTEGER REFERENCES authors(id))`,
+		`INSERT INTO books (id, author_id) VALUES (1, 2)`,
+	} {
+		if _, err := e.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "t"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	// Land on books, then follow author_id → authors (id = 2).
+	m, cmd := app.selectTable(db.Table{Name: "books"})
+	app = update(t, m.(App), cmd())
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	app = m.(App)
+	m, cmd = app.Update(cmd()) // followReadyMsg
+	app = m.(App)
+	app = update(t, app, cmd()) // rowsMsg
+	if app.currentTable.Name != "authors" || app.baseNote == "" {
+		t.Fatalf("expected filtered authors, got %q note=%q", app.currentTable.Name, app.baseNote)
+	}
+
+	// Ctrl-O → back to books (unfiltered).
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("Ctrl-O should reload the previous view")
+	}
+	app = update(t, app, cmd())
+	if app.currentTable.Name != "books" || app.baseNote != "" || len(app.basePreds) != 0 {
+		t.Fatalf("back should land on unfiltered books, got %q note=%q", app.currentTable.Name, app.baseNote)
+	}
+
+	// Forward → authors filtered again.
+	m, cmd = app.jump(false)
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("forward should reload the followed view")
+	}
+	app = update(t, app, cmd())
+	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 {
+		t.Fatalf("forward should restore filtered authors, got %q preds=%v", app.currentTable.Name, app.basePreds)
+	}
+
+	// Nothing further forward.
+	if _, c := app.jump(false); c != nil {
+		t.Fatal("no forward view should remain")
+	}
+}
+
 // TestFollowNoForeignKey confirms following a non-FK column just notices.
 func TestFollowNoForeignKey(t *testing.T) {
 	ctx := context.Background()

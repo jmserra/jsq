@@ -50,6 +50,7 @@ var helpItems = []helpItem{
 	{head: "Inspect"},
 	{key: "Enter", desc: "view the full cell value"},
 	{key: "f", desc: "follow the foreign key on this column"},
+	{key: "Ctrl-o / Ctrl-i", desc: "jump back / forward (Ctrl-i needs terminal support)"},
 	{head: "Edit"},
 	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now)"},
 	{key: "E", desc: "edit cell in $EDITOR"},

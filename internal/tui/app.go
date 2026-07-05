@@ -60,8 +60,15 @@ type App struct {
 	baseNote     string   // human form of basePreds, shown in the status line
 	sortCol      string
 	sortAsc      bool
-	resetGrid    bool // reset cursor on next rows load (new table, not a re-sort)
-	adHoc        bool // grid shows a free-form (s) query result, not a table
+
+	// Jumplist (vim Ctrl-O / Ctrl-I): each navigation (follow FK, pick a table)
+	// pushes the current view onto jumpBack and clears jumpFwd; back/forward walk
+	// the two stacks. A view is {table, FK-filter, sort} — column filters aren't
+	// captured.
+	jumpBack  []viewState
+	jumpFwd   []viewState
+	resetGrid bool // reset cursor on next rows load (new table, not a re-sort)
+	adHoc     bool // grid shows a free-form (s) query result, not a table
 
 	lastQuery map[db.Table]string // per-table last scratch (s) query, for the edit loop
 
@@ -211,16 +218,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case followReadyMsg:
 		// Open the referenced table filtered to the pointed-at row. It stays a real
 		// single table (editable, sortable); basePreds ride along until the table
-		// changes. A clean top-left cursor, like selectTable.
-		a.currentTable = db.Table{Schema: msg.refTable.Schema, Name: msg.refTable.Name}
-		a.basePreds = msg.preds
-		a.baseNote = msg.note
-		a.sortCol, a.sortAsc = "", true
-		a.resetGrid = true
-		a.grid.clearFilters()
-		ctx := a.begin("loading " + msg.refTable.Name)
-		a.status = "loading " + msg.refTable.Name + "…"
-		return a, a.loadCurrentCmd(ctx)
+		// changes. Record a jump so Ctrl-O returns here.
+		a.pushJump()
+		app, cmd := a.loadView(viewState{
+			table:     db.Table{Schema: msg.refTable.Schema, Name: msg.refTable.Name},
+			basePreds: msg.preds,
+			baseNote:  msg.note,
+			sortAsc:   true,
+		}, "loading "+msg.refTable.Name)
+		return app, cmd
 
 	case rowsMsg:
 		a.stop()
@@ -446,6 +452,10 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case screenBrowse:
 		switch msg.String() {
+		case "ctrl+o": // jumplist back (vim Ctrl-O)
+			return a.jump(true)
+		case "ctrl+i": // jumplist forward — note: many terminals send this as Tab
+			return a.jump(false)
 		case "H":
 			a.showSidebar = !a.showSidebar
 			if a.showSidebar {
@@ -520,17 +530,78 @@ func (a App) handleSidebarFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// viewState is a jumplist entry: enough to reload a table exactly as it was
+// (bar column filters, which aren't captured).
+type viewState struct {
+	table     db.Table
+	basePreds []eqPred
+	baseNote  string
+	sortCol   string
+	sortAsc   bool
+}
+
+func (a App) currentView() viewState {
+	return viewState{
+		table:     a.currentTable,
+		basePreds: a.basePreds,
+		baseNote:  a.baseNote,
+		sortCol:   a.sortCol,
+		sortAsc:   a.sortAsc,
+	}
+}
+
+// pushJump records the current view before a navigation, and drops the forward
+// history (a new jump starts a new branch). A no-op before the first table.
+func (a *App) pushJump() {
+	if a.currentTable.Name == "" {
+		return
+	}
+	a.jumpBack = append(a.jumpBack, a.currentView())
+	if len(a.jumpBack) > 100 { // keep the list bounded
+		a.jumpBack = a.jumpBack[len(a.jumpBack)-100:]
+	}
+	a.jumpFwd = nil
+}
+
+// loadView switches to v and reloads it (default cursor, cleared column filters).
+// Shared by selectTable, follow, and the jumplist.
+func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
+	a.currentTable = v.table
+	a.basePreds = v.basePreds
+	a.baseNote = v.baseNote
+	a.sortCol, a.sortAsc = v.sortCol, v.sortAsc
+	a.resetGrid = true
+	a.grid.clearFilters()
+	ctx := a.begin(label)
+	a.status = label + "…"
+	return a, a.loadCurrentCmd(ctx)
+}
+
+// jump walks the jumplist: back=true is Ctrl-O, else Ctrl-I. The current view is
+// pushed onto the opposite stack so the move is reversible.
+func (a App) jump(back bool) (tea.Model, tea.Cmd) {
+	from, to := &a.jumpBack, &a.jumpFwd
+	if !back {
+		from, to = &a.jumpFwd, &a.jumpBack
+	}
+	if len(*from) == 0 {
+		a.status = "no view to go " + map[bool]string{true: "back", false: "forward"}[back] + " to"
+		return a, nil
+	}
+	*to = append(*to, a.currentView())
+	v := (*from)[len(*from)-1]
+	*from = (*from)[:len(*from)-1]
+	app, cmd := a.loadView(v, "loading "+v.table.Name)
+	return app, cmd
+}
+
 // selectTable loads the given table into the grid with default sort and no
 // filters, and auto-hides the sidebar (handled on rowsMsg).
 func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
-	a.currentTable = t
-	a.basePreds, a.baseNote = nil, "" // a fresh table from the sidebar is unfiltered
-	a.sortCol, a.sortAsc = "", true   // reset to default (PK desc) on new table
-	a.resetGrid = true                // new table → cursor to top-left
-	a.grid.clearFilters()
-	ctx := a.begin("loading " + t.Name)
-	a.status = "loading " + t.Name + "…"
-	return a, a.loadCurrentCmd(ctx)
+	a.pushJump() // sidebar pick is a jump
+	// a fresh table from the sidebar is unfiltered, default (PK desc) sort.
+	app, cmd := a.loadView(viewState{table: t, sortAsc: true}, "loading "+t.Name)
+	return app, cmd
 }
 
 // handleEditKey routes keys while a cell is being edited (§8 quick path). Enter

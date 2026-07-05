@@ -121,6 +121,7 @@ omits it).
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
 | `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row) |
+| `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort). `Ctrl-i` only works in terminals that distinguish it from `Tab` |
 | `Esc` | kill the running query (while one is in flight), else clear the current column's filter |
 | `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
 | `E` | edit the current cell in `$EDITOR` — opens the generated keyed `UPDATE` with the value pre-selected (vim/nvim); `:wq` runs it, `:q!` or an empty buffer aborts |
