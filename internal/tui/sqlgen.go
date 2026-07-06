@@ -67,6 +67,20 @@ type editorSeed struct {
 	remember db.Table
 }
 
+// previewEditSQL renders the quick-path (e) UPDATE with its values inlined, for
+// the safe-mode confirmation overlay only. The statement that actually runs
+// (execEditCmd) binds the same values as parameters — this is display text, not
+// what's executed (cf. invariant 5).
+func previewEditSQL(eng db.Engine, req editReq) string {
+	preds := make([]string, len(req.keys))
+	for i, k := range req.keys {
+		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
+	}
+	return fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s",
+		eng.QualifiedName(req.table), eng.QuoteIdent(req.col), sqlLiteral(req.val),
+		strings.Join(preds, " AND "))
+}
+
 // buildUpdateStmt is the E full-path starting point (the editing model in
 // README): a full-PK-keyed UPDATE with the current value inlined at the end of
 // the SET line so the editor can drop you straight onto it. To set NULL, change

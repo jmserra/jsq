@@ -14,6 +14,7 @@ url = "mysql://user:secret@localhost:3306/mydb"   # password goes in the URL
 
 [prod]
 url = "postgres://user@prod.example.com:5432/app"
+safe = true                 # confirm (y/n) every mutation before it runs
 
 # `cmd` starts a helper (a tunnel) before connecting and keeps it alive for the
 # session; its whole process group is killed on exit, so nothing outlives jsq.

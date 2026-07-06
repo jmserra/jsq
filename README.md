@@ -81,6 +81,7 @@ url = "postgres://user@localhost:5432/appdev?sslmode=disable"
 
 [prod]
 url = "postgres://user@prod.example.com:5432/app"
+safe = true              # confirm (y/n) every mutation before it runs
 
 [work]
 url = "mysql://user@localhost:3306/mydb"
@@ -105,6 +106,11 @@ tunnel needs a moment to come up, jsq then waits for the URL's host:port to
 accept a TCP connection before opening the database — probing once a second and
 giving up with an error after 30s (the port defaults to 5432/3306 when the URL
 omits it).
+
+`safe = true` (default `false`) makes jsq pop a confirmation before it runs **any**
+mutation on that connection — a `y`/`n` overlay naming the target connection and
+database and showing the exact SQL. Only `y` runs it; any other key cancels. Reads
+are never gated. Use it on the connections where a stray keystroke would hurt.
 
 ## Keybindings
 
@@ -415,7 +421,7 @@ resolved a primary key. Otherwise edit keys are inert (status line says why).
 ## Configuration
 
 - `~/.config/jsq/connections.toml` — connections (above), app-read-only. Per
-  connection: `url` and the tunnel command `cmd`.
+  connection: `url`, the tunnel command `cmd`, and `safe` (confirm mutations).
 - Env: `$JSQ_CONFIG` (file location) and `$EDITOR`. A connection's `cmd` runs
   under `sh -c`. Keybindings are compiled in; a keymap override file is a
   possible later addition.

@@ -26,7 +26,7 @@ don't exist yet.** What's really here:
 
 ```
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea
-internal/config/config.go   # load connections.toml, read-only (url, cmd)
+internal/config/config.go   # load connections.toml, read-only (url, cmd, safe)
 internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
@@ -40,6 +40,7 @@ internal/tui/
   sidebar.go    # full-screen filterable list Model (type-to-filter, no `/`), laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓ = ∓1, ←→ = ∓rows). Used for both the table list (screenTables) and the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`); `label` is the search placeholder. (Type name is still `sidebar`.)
   picker.go     # connection picker (bare `jsq` at startup, and `c` mid-session)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
+  confirm.go    # safe-mode (connection safe=true) "run this mutation?" y/n overlay
   help.go       # read-only `?` keybinding cheat sheet (full-area overlay like cellview); helpItems is the hand-kept mirror of the hardcoded keymap
   util.go       # clamp()
 ```
@@ -128,6 +129,17 @@ editable, and J/K/`/` are guarded off since they'd re-query the table); a
 the view reloads. Note WITH counts as a write. This is the deliberate
 exception to invariant 5 — full-path SQL is user-authored and inlined
 (`sqlLiteral`), not parameter-bound.
+
+**Safe mode** (`App.safe`, from `config.Conn.Safe`, cached like the old
+`readOnly` was — set alongside `connName` on every connection switch): when the
+active connection has `safe=true`, both mutation dispatch points — the quick-path
+`e` (`execEditCmd`) and the full-path write (`execRawCmd`) — first route through
+`App.askMutation`, which arms `confirm.go`'s `confirmView` overlay (connection +
+database + the SQL) instead of running. The `confirm` guard at the top of
+`handleKey` runs the held command on `y` (any other key cancels). The quick-path
+preview is `previewEditSQL` (values inlined for display only — the statement that
+runs still parameter-binds them; not an invariant-5 exception). Reads are never
+gated. New mutation paths must funnel through `askMutation` when `a.safe`.
 
 `s` (`App.scratchSeed`) prefills the `selectTemplate` for the current table, or
 `App.lastQuery[table]` if one was run — the seed's `remember` field (the table)

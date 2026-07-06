@@ -15,6 +15,7 @@ url = "sqlite:///tmp/a.db"
 [prod]
 url = "postgres://x"
 cmd = "kubectl port-forward svc/db 5432:5432"
+safe = true
 `
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -34,6 +35,12 @@ cmd = "kubectl port-forward svc/db 5432:5432"
 	}
 	if conns[1].Cmd != "kubectl port-forward svc/db 5432:5432" {
 		t.Fatalf("cmd not parsed: %+v", conns[1])
+	}
+	if !conns[1].Safe {
+		t.Fatalf("safe not parsed: %+v", conns[1])
+	}
+	if conns[0].Safe {
+		t.Fatalf("safe should default to false: %+v", conns[0])
 	}
 }
 

@@ -29,6 +29,7 @@ type App struct {
 	picker picker
 
 	connName   string
+	safe       bool            // connection confirms every mutation (safe in config)
 	pending    config.Conn     // the direct/selected connection (empty URL → picker); cmd lives here
 	tunneled   map[string]bool // connections whose `cmd` tunnel is already up (don't re-run it)
 	connecting bool            // a connect is in flight (guards a double-select on the picker)
@@ -46,6 +47,7 @@ type App struct {
 	grid    grid
 	cell    cellView
 	help    help
+	confirm confirmView // safe-mode "run this mutation?" overlay
 
 	currentTable db.Table
 	basePreds    []eqPred // followed-FK equality filter, AND-ed into every load until the table changes
@@ -87,6 +89,7 @@ func New(conns []config.Conn, direct config.Conn) App {
 		picker:    picker{conns: conns},
 		grid:      newGrid(),
 		connName:  direct.Name,
+		safe:      direct.Safe,
 		pending:   direct,
 		lastQuery: map[db.Table]string{},
 		viewIdx:   -1,
@@ -286,15 +289,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.remember.Name != "" {
 			a.lastQuery[msg.remember] = msg.sql
 		}
-		// A read (s) shows its rows; a mutation runs via Exec.
+		// A read (s) shows its rows; a mutation runs via Exec — and on a safe
+		// connection it's held for a y/n confirmation first.
 		if isReadSQL(msg.sql) {
 			ctx := a.begin("running query")
 			a.status = "running query…"
 			return a, runQueryCmd(ctx, a.engine, msg.sql)
 		}
+		sql := msg.sql
+		if a.safe {
+			return a.askMutation(sql, "running",
+				func(ctx context.Context) tea.Cmd { return execRawCmd(ctx, a.engine, sql) })
+		}
 		ctx := a.begin("running")
 		a.status = "running…"
-		return a, execRawCmd(ctx, a.engine, msg.sql)
+		return a, execRawCmd(ctx, a.engine, sql)
 
 	case editorAbortedMsg:
 		a.stop()
@@ -346,6 +355,20 @@ func (a *App) layout() {
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return a, tea.Quit
+	}
+	// Safe-mode confirmation captures every key: only 'y' runs the pending
+	// mutation, anything else cancels it.
+	if a.confirm.active {
+		if msg.String() == "y" {
+			run, label := a.confirm.run, a.confirm.label
+			a.confirm.active = false
+			ctx := a.begin(label)
+			a.status = label + "…"
+			return a, run(ctx)
+		}
+		a.confirm.active = false
+		a.status = "cancelled"
+		return a, nil
 	}
 	// Help cheat sheet captures keys while open; any of ?/Esc/Enter/q closes it.
 	if a.help.active {
@@ -497,7 +520,7 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.syncCurrent() // capture the current view before changing identity
-	a.connName, a.pending = c.Name, c
+	a.connName, a.safe, a.pending = c.Name, c.Safe, c
 	a.connecting = true
 	a.status = "connecting to " + c.Name + "…"
 	if a.engine == nil { // initial connect (startup): connectCmd, quits on failure
@@ -713,7 +736,7 @@ func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
 		if v.db != "" {
 			dsn = db.WithDatabase(c.URL, v.db)
 		}
-		a.connName, a.pending = c.Name, c
+		a.connName, a.safe, a.pending = c.Name, c.Safe, c
 		vv := v
 		a.pendingView = &vv
 		start := !a.tunneled[c.Name]
@@ -823,6 +846,15 @@ func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 	return a.navigate(viewState{conn: a.connName, db: a.dbName, table: t, sortAsc: true}, "loading "+t.Name)
 }
 
+// askMutation arms the safe-mode confirmation overlay (connection safe=true) for
+// a pending mutation: it shows sql on the current connection/database, and run
+// dispatches the exec command only if the user confirms with 'y'.
+func (a App) askMutation(sql, label string, run func(context.Context) tea.Cmd) (tea.Model, tea.Cmd) {
+	a.confirm.ask(a.connName, a.dbName, sql, label, run, a.w-leftPad, a.h-1)
+	a.status = "confirm — run this statement? (y = yes)"
+	return a, nil
+}
+
 // handleEditKey routes keys while a cell is being edited (§8 quick path). Enter
 // builds the keyed UPDATE and runs it immediately; Esc cancels. A bare Enter
 // with no typing is a no-op (commitEdit returns ok=false), so a NULL cell can't
@@ -831,6 +863,10 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
 		if req, ok := a.grid.commitEdit(); ok {
+			if a.safe {
+				return a.askMutation(previewEditSQL(a.engine, req), "saving",
+					func(ctx context.Context) tea.Cmd { return execEditCmd(ctx, a.engine, req) })
+			}
 			ctx := a.begin("saving")
 			a.status = "saving…"
 			return a, execEditCmd(ctx, a.engine, req)
@@ -1041,6 +1077,10 @@ func (a App) View() string {
 }
 
 func (a App) browseView() string {
+	if a.confirm.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.confirm.View())
+		return a.statusLine() + "\n" + body
+	}
 	if a.help.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.help.View())
 		return a.statusLine() + "\n" + body

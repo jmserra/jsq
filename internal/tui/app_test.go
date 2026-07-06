@@ -283,6 +283,12 @@ func TestSidebarFilter(t *testing.T) {
 // loadTable is the shared setup: open a fresh sqlite db, run schema/seed, and
 // drive the model up to a loaded grid.
 func loadTable(t *testing.T, seed func(e db.Engine)) App {
+	return loadTableConn(t, config.Conn{Name: "test"}, seed)
+}
+
+// loadTableConn is loadTable with a caller-supplied connection (its URL is filled
+// in), so tests can flip flags like safe.
+func loadTableConn(t *testing.T, conn config.Conn, seed func(e db.Engine)) App {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -293,7 +299,8 @@ func loadTable(t *testing.T, seed func(e db.Engine)) App {
 	seed(e)
 	e.Close()
 
-	app := New(nil, config.Conn{URL: path, Name: "test"})
+	conn.URL = path
+	app := New(nil, conn)
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load the (only) table
@@ -362,6 +369,142 @@ func TestQuickEditCell(t *testing.T) {
 	}
 	if len(rs.Rows) != 1 || rs.Rows[0][0] != "Grace" {
 		t.Fatalf("db row = %+v, want name Grace", rs.Rows)
+	}
+}
+
+// safeUsers seeds a two-row users table for the safe-mode tests.
+func safeUsers(e db.Engine) {
+	ctx := context.Background()
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (id, name) VALUES (1,'Ada'),(2,'Linus')`)
+}
+
+// TestSafeConfirmQuickEdit verifies that on a safe=true connection a quick-path
+// edit is held behind the confirmation overlay, then runs when confirmed with 'y'.
+func TestSafeConfirmQuickEdit(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	// Row 0 is id=2 (Linus, PK desc). Edit "name" → "Grace" → Enter.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "Grace")
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	// Enter arms the overlay instead of running: no command, nothing changed yet.
+	if cmd != nil {
+		t.Fatal("safe mode must not run the UPDATE before confirmation")
+	}
+	if !app.confirm.active {
+		t.Fatal("safe mode should open the confirmation overlay")
+	}
+	view := app.View()
+	for _, want := range []string{"prod", "UPDATE", "Grace"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("confirm overlay missing %q:\n%s", want, view)
+		}
+	}
+	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 2`)
+	if rs.Rows[0][0] != "Linus" {
+		t.Fatalf("row must be untouched before confirming, got %v", rs.Rows[0][0])
+	}
+
+	// 'y' runs it.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = m.(App)
+	if app.confirm.active {
+		t.Fatal("'y' should dismiss the overlay")
+	}
+	if cmd == nil {
+		t.Fatal("'y' should dispatch the UPDATE")
+	}
+	app = update(t, app, cmd())
+	rs, _ = app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 2`)
+	if rs.Rows[0][0] != "Grace" {
+		t.Fatalf("db row after confirm = %v, want Grace", rs.Rows[0][0])
+	}
+}
+
+// TestSafeCancelQuickEdit verifies any non-'y' key cancels the mutation and
+// leaves the row untouched.
+func TestSafeCancelQuickEdit(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "Grace")
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
+	if !app.confirm.active {
+		t.Fatal("expected the confirmation overlay")
+	}
+
+	// 'n' (any non-'y' key) cancels.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	app = m.(App)
+	if app.confirm.active {
+		t.Fatal("a non-'y' key should dismiss the overlay")
+	}
+	if cmd != nil {
+		t.Fatal("cancelling must not run the UPDATE")
+	}
+	if !strings.Contains(app.status, "cancel") {
+		t.Fatalf("status should note the cancellation, got %q", app.status)
+	}
+	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 2`)
+	if rs.Rows[0][0] != "Linus" {
+		t.Fatalf("cancelled edit must not change the row, got %v", rs.Rows[0][0])
+	}
+}
+
+// TestSafeConfirmFullPath verifies a full-path (editor-authored) mutation is also
+// gated by the confirmation overlay on a safe connection.
+func TestSafeConfirmFullPath(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	m, cmd := app.Update(editorSubmitMsg{sql: `UPDATE users SET name = 'X' WHERE id = 1;`})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("safe mode must hold a full-path mutation for confirmation")
+	}
+	if !app.confirm.active {
+		t.Fatal("expected the confirmation overlay for a full-path mutation")
+	}
+
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("'y' should run the full-path mutation")
+	}
+	if _, ok := cmd().(execDoneMsg); !ok {
+		t.Fatal("confirming a mutation should exec it")
+	}
+	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 1`)
+	if rs.Rows[0][0] != "X" {
+		t.Fatalf("db row after confirm = %v, want X", rs.Rows[0][0])
+	}
+}
+
+// TestSafeReadRunsWithoutConfirm verifies a safe connection still runs free-form
+// reads directly — only mutations are gated.
+func TestSafeReadRunsWithoutConfirm(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	m, cmd := app.Update(editorSubmitMsg{sql: `SELECT * FROM users;`})
+	app = m.(App)
+	if app.confirm.active {
+		t.Fatal("a read must not trigger the confirmation overlay")
+	}
+	if cmd == nil {
+		t.Fatal("a read should run immediately")
+	}
+	if _, ok := cmd().(queryResultMsg); !ok {
+		t.Fatal("a read submit should produce a query result")
 	}
 }
 
