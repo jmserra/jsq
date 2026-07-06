@@ -58,18 +58,6 @@ type execDoneMsg struct {
 // queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
 type queryResultMsg struct{ rs *db.ResultSet }
 
-// followReadyMsg carries a resolved foreign key: the referenced table and the
-// equality predicates that select the pointed-at row, plus a human note.
-type followReadyMsg struct {
-	refTable db.TableRef
-	preds    []eqPred
-	note     string
-}
-
-// noticeMsg is a transient status message (e.g. "no foreign key on col") with no
-// state change beyond the status line.
-type noticeMsg struct{ text string }
-
 // errMsg carries any async failure that happens mid-session (shown on the
 // in-app error screen).
 type errMsg struct{ err error }

@@ -78,44 +78,6 @@ type eqPred struct {
 	val any
 }
 
-// followFKCmd resolves the foreign key on column col of table t and returns the
-// referenced table plus the equality predicates that select the pointed-at row
-// (built from the current row's values, so composite keys work). If col isn't
-// part of any FK, or a needed value is NULL, it returns a noticeMsg instead.
-func followFKCmd(ctx context.Context, eng db.Engine, t db.TableRef, col string, row map[string]any) tea.Cmd {
-	return func() tea.Msg {
-		fks, err := eng.ForeignKeys(ctx, t)
-		if err != nil {
-			return dbErr(ctx, err)
-		}
-		for _, fk := range fks {
-			if !contains(fk.Columns, col) {
-				continue
-			}
-			preds := make([]eqPred, 0, len(fk.Columns))
-			for i, local := range fk.Columns {
-				v := row[local]
-				if v == nil {
-					return noticeMsg{fmt.Sprintf("cannot follow: %s is NULL", local)}
-				}
-				preds = append(preds, eqPred{col: fk.RefColumns[i], val: v})
-			}
-			note := fmt.Sprintf("%s = %v", fk.RefColumns[0], row[fk.Columns[0]])
-			return followReadyMsg{refTable: fk.RefTable, preds: preds, note: note}
-		}
-		return noticeMsg{fmt.Sprintf("no foreign key on %s", col)}
-	}
-}
-
-func contains(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 // loadCmd loads the first window of a table with the active sort (J/K), any base
 // predicates (a followed FK), and the active column filters (§7.1), server-side.
 func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec) tea.Cmd {
@@ -134,6 +96,9 @@ func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol 
 		}
 		rs.Table = &ref
 		rs.PK = pk
+		// FKs drive the header marker and in-place follow (f). Best-effort — a
+		// failure here just means no marker / no follow, never a failed load.
+		rs.FKs, _ = eng.ForeignKeys(ctx, ref)
 		return rowsMsg{table: ref, rs: rs, full: len(rs.Rows) == limit}
 	}
 }

@@ -210,24 +210,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// started it); it idles invisibly and animates only during a DB op.
 		return a, a.ensureTick()
 
-	case noticeMsg:
-		a.stop()
-		a.status = msg.text
-		return a, nil
-
-	case followReadyMsg:
-		// Open the referenced table filtered to the pointed-at row. It stays a real
-		// single table (editable, sortable); basePreds ride along until the table
-		// changes. Record a jump so Ctrl-O returns here.
-		a.pushJump()
-		app, cmd := a.loadView(viewState{
-			table:     db.Table{Schema: msg.refTable.Schema, Name: msg.refTable.Name},
-			basePreds: msg.preds,
-			baseNote:  msg.note,
-			sortAsc:   true,
-		}, "loading "+msg.refTable.Name)
-		return app, cmd
-
 	case rowsMsg:
 		a.stop()
 		a.grid.setResult(msg.rs)
@@ -595,6 +577,43 @@ func (a App) jump(back bool) (tea.Model, tea.Cmd) {
 	return app, cmd
 }
 
+// follow navigates the foreign key on the cursor's column to the row it points
+// at. Resolution is in-memory (the FKs were fetched at load, on the grid) — the
+// only DB work is loadView's reload, so no engine call happens in Update.
+func (a App) follow() (tea.Model, tea.Cmd) {
+	if a.adHoc {
+		a.status = "follow unavailable on a query result"
+		return a, nil
+	}
+	col, ok := a.grid.currentColName()
+	row, ok2 := a.grid.currentRowMap()
+	if !ok || !ok2 {
+		return a, nil
+	}
+	fk, found := a.grid.fkFor(col)
+	if !found {
+		a.status = "no foreign key on " + col
+		return a, nil
+	}
+	preds := make([]eqPred, 0, len(fk.Columns))
+	for i, local := range fk.Columns {
+		v := row[local]
+		if v == nil {
+			a.status = "cannot follow: " + local + " is NULL"
+			return a, nil
+		}
+		preds = append(preds, eqPred{col: fk.RefColumns[i], val: v})
+	}
+	a.pushJump() // record a jump so Ctrl-O returns here
+	note := fmt.Sprintf("%s = %v", fk.RefColumns[0], row[fk.Columns[0]])
+	return a.loadView(viewState{
+		table:     db.Table{Schema: fk.RefTable.Schema, Name: fk.RefTable.Name},
+		basePreds: preds,
+		baseNote:  note,
+		sortAsc:   true,
+	}, "loading "+fk.RefTable.Name)
+}
+
 // selectTable loads the given table into the grid with default sort and no
 // filters, and auto-hides the sidebar (handled on rowsMsg).
 func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
@@ -734,19 +753,7 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "f":
-		// Follow the foreign key on the cursor's column to the row it points at.
-		if a.adHoc {
-			a.status = "follow unavailable on a query result"
-			return a, nil
-		}
-		col, ok := a.grid.currentColName()
-		row, ok2 := a.grid.currentRowMap()
-		if !ok || !ok2 {
-			return a, nil
-		}
-		ctx := a.begin("following " + col)
-		a.status = "following " + col + "…"
-		return a, followFKCmd(ctx, a.engine, a.currentTable.Ref(), col, row)
+		return a.follow()
 	case "enter":
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)

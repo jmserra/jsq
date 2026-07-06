@@ -51,8 +51,9 @@ type ForeignKey struct {
 type ResultSet struct {
 	Cols  []string
 	Rows  [][]any
-	Table *TableRef // set when the query was a plain single-table select
-	PK    []string  // PK column names, when known
+	Table *TableRef    // set when the query was a plain single-table select
+	PK    []string     // PK column names, when known
+	FKs   []ForeignKey // foreign keys on the table: header marker + in-place follow
 }
 
 // Engine is the one abstraction the TUI talks to.

@@ -48,27 +48,19 @@ func TestFollowForeignKey(t *testing.T) {
 		t.Fatalf("expected column 1 to be author_id, got %q", got)
 	}
 
-	// Move the cursor onto author_id and follow.
+	// Move the cursor onto author_id and follow. Resolution is synchronous (FKs
+	// came with the load), so f navigates immediately and returns the reload cmd.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	app = m.(App)
 	if cmd == nil {
-		t.Fatal("f should dispatch a follow command")
+		t.Fatal("f should dispatch a reload command")
 	}
-
-	// followFKCmd → followReadyMsg → loadCurrentCmd → rowsMsg.
-	msg := cmd()
-	ready, ok := msg.(followReadyMsg)
-	if !ok {
-		t.Fatalf("expected followReadyMsg, got %T (%+v)", msg, msg)
+	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 ||
+		app.basePreds[0].col != "id" || fmt.Sprint(app.basePreds[0].val) != "2" {
+		t.Fatalf("unexpected follow target: table=%q preds=%+v", app.currentTable.Name, app.basePreds)
 	}
-	if ready.refTable.Name != "authors" || len(ready.preds) != 1 ||
-		ready.preds[0].col != "id" || fmt.Sprint(ready.preds[0].val) != "2" {
-		t.Fatalf("unexpected follow target: %+v", ready)
-	}
-	m, cmd = app.Update(ready)
-	app = m.(App)
-	app = update(t, app, cmd())
+	app = update(t, app, cmd()) // rowsMsg
 
 	// The grid now shows authors, filtered to id = 2 (Linus only).
 	if app.currentTable.Name != "authors" {
@@ -113,8 +105,6 @@ func TestJumplistBackForward(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	app = m.(App)
-	m, cmd = app.Update(cmd()) // followReadyMsg
-	app = m.(App)
 	app = update(t, app, cmd()) // rowsMsg
 	if app.currentTable.Name != "authors" || app.baseNote == "" {
 		t.Fatalf("expected filtered authors, got %q note=%q", app.currentTable.Name, app.baseNote)
@@ -148,6 +138,48 @@ func TestJumplistBackForward(t *testing.T) {
 	}
 }
 
+// TestFKColumnMarker checks the header flags FK columns and only those.
+func TestFKColumnMarker(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fk.db")
+	e, _ := db.Open(ctx, path)
+	for _, s := range []string{
+		`CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT)`,
+		`INSERT INTO authors (id, name) VALUES (1, 'Ada')`,
+		`CREATE TABLE books (id INTEGER PRIMARY KEY,
+		   author_id INTEGER REFERENCES authors(id), title TEXT)`,
+		`INSERT INTO books (id, author_id, title) VALUES (1, 1, 'X')`,
+	} {
+		if _, err := e.Exec(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "t"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m, cmd := app.selectTable(db.Table{Name: "books"})
+	app = update(t, m.(App), cmd())
+
+	fk := map[string]bool{}
+	for _, c := range app.grid.cols {
+		fk[c.name] = c.fk
+	}
+	if !fk["author_id"] || fk["id"] || fk["title"] {
+		t.Fatalf("only author_id should be marked FK: %+v", fk)
+	}
+	if h := app.grid.renderHeader(); !strings.Contains(h, "author_id"+fkMarker) {
+		t.Fatalf("header missing FK marker on author_id:\n%s", h)
+	}
+	// A non-FK table shows no markers.
+	m, cmd = app.selectTable(db.Table{Name: "authors"})
+	app = update(t, m.(App), cmd())
+	if strings.Contains(app.grid.renderHeader(), fkMarker) {
+		t.Fatalf("authors header should carry no FK marker:\n%s", app.grid.renderHeader())
+	}
+}
+
 // TestFollowNoForeignKey confirms following a non-FK column just notices.
 func TestFollowNoForeignKey(t *testing.T) {
 	ctx := context.Background()
@@ -165,10 +197,15 @@ func TestFollowNoForeignKey(t *testing.T) {
 	app = m.(App)
 	app = update(t, app, cmd())
 
-	// Cursor on the "name" column, which has no FK.
+	// Cursor on the "name" column, which has no FK: f is a no-op with a notice
+	// in the status and no navigation.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
-	if _, ok := cmd().(noticeMsg); !ok {
-		t.Fatal("following a non-FK column should return a noticeMsg")
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("following a non-FK column should not reload")
+	}
+	if !strings.Contains(app.status, "no foreign key") {
+		t.Fatalf("expected a no-FK notice, got %q", app.status)
 	}
 }

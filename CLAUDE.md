@@ -67,16 +67,19 @@ guarded by `a.pending.URL != ""` so a second Enter during a slow connect can't
 spawn a duplicate engine/helper. `New` takes the resolved `config.Conn`
 (`pending`).
 
-**Follow foreign keys** (`f`): `followFKCmd` calls `Engine.ForeignKeys(table)`
-(per-engine: sqlite `PRAGMA foreign_key_list`, pg `pg_constraint`+`unnest`, mysql
-`key_column_usage`), finds the FK covering the cursor column, and builds `eqPred`s
-`refCol = <row value>` from the current row (composite-key aware) → `followReadyMsg`.
-The handler opens the referenced table as a normal editable/sortable single table
-with those preds stored in `App.basePreds` (human form in `baseNote`, shown in the
-status). `basePreds` are AND-ed into every load via `whereClause`/`loadCmd`/
-`loadMoreCmd` and cleared by `selectTable` (a fresh sidebar pick). NULL cells and
-non-FK columns return a `noticeMsg`. Note grid cell values are driver-typed
-(sqlite ints come back `int64`, not string) — fine as bound params.
+**Follow foreign keys** (`f`, `App.follow`): resolution is **in-memory** — the
+FKs come with the load (`loadCmd` best-effort-fetches `Engine.ForeignKeys` into
+`ResultSet.FKs`, per-engine: sqlite `PRAGMA foreign_key_list`, pg
+`pg_constraint`+`generate_subscripts`, mysql `key_column_usage`; `grid` keeps
+them and `grid.fkFor(col)` looks up the covering FK). `follow` builds `eqPred`s
+`refCol = <row value>` from the current row (composite-key aware) and navigates
+**synchronously** (no engine call in Update — the only DB work is `loadView`'s
+reload). The referenced table opens as a normal editable/sortable single table
+with those preds in `App.basePreds` (human form in `baseNote`, shown in status),
+AND-ed into every load via `whereClause`/`loadCmd`/`loadMoreCmd` and cleared by
+`selectTable`. NULL cells / non-FK columns just set a status line. FK columns are
+flagged in the header with `fkMarker` (`→`). Note grid cell values are
+driver-typed (sqlite ints come back `int64`, not string) — fine as bound params.
 
 **Jumplist** (`Ctrl-O` back / `Ctrl-I` forward, vim-style): a `viewState` is
 `{table, basePreds, baseNote, sort}` (column filters not captured). `pushJump`

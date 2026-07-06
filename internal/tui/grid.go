@@ -28,7 +28,11 @@ var (
 type column struct {
 	name  string
 	width int
+	fk    bool // part of a foreign key → header carries the fkMarker
 }
+
+// fkMarker is the one-char suffix flagging a foreign-key column in the header.
+const fkMarker = "→"
 
 // filterSpec is one committed column filter, for building the server WHERE.
 type filterSpec struct{ col, pattern string }
@@ -49,7 +53,8 @@ type grid struct {
 	sortCol string
 	sortAsc bool
 
-	pk []string // PK column names (from the ResultSet), for keyed edits (§8)
+	pk  []string        // PK column names (from the ResultSet), for keyed edits (§8)
+	fks []db.ForeignKey // foreign keys on the current table (header marker + follow)
 
 	filters   map[int]string // colIndex → committed LIKE pattern (server-side)
 	filtering int            // colIndex being edited, or -1
@@ -95,9 +100,20 @@ func (g *grid) setResult(rs *db.ResultSet) {
 		g.table = db.TableRef{} // ad-hoc query result: no provenance → not editable
 	}
 	g.pk = rs.PK
+	g.fks = rs.FKs
+	isFK := map[string]bool{}
+	for _, fk := range g.fks {
+		for _, c := range fk.Columns {
+			isFK[c] = true
+		}
+	}
 	g.cols = make([]column, len(rs.Cols))
 	for i, name := range rs.Cols {
-		g.cols[i] = column{name: name, width: colWidthFor(name, rs.Rows, i)}
+		w := colWidthFor(name, rs.Rows, i)
+		if isFK[name] {
+			w += runewidth.StringWidth(fkMarker) // room for the marker
+		}
+		g.cols[i] = column{name: name, width: w, fk: isFK[name]}
 	}
 	g.rebuildVisible()
 	// Preserve cursor position across a re-sort/re-filter; clamp to bounds.
@@ -480,6 +496,19 @@ func (g *grid) currentRowValues() (map[string]any, bool) {
 	return g.currentRowMap()
 }
 
+// fkFor returns the foreign key that column col is part of, if any (from the
+// FKs fetched at load time — no query on follow).
+func (g *grid) fkFor(col string) (db.ForeignKey, bool) {
+	for _, fk := range g.fks {
+		for _, c := range fk.Columns {
+			if c == col {
+				return fk, true
+			}
+		}
+	}
+	return db.ForeignKey{}, false
+}
+
 // currentRowMap returns the cursor row as a column→value map, with no editability
 // requirement — used to follow a foreign key from any table.
 func (g *grid) currentRowMap() (map[string]any, bool) {
@@ -568,6 +597,8 @@ func (g *grid) renderHeader() string {
 			if pat, ok := g.filters[c]; ok {
 				cell = "⌕" + pat
 				style = filterStyle
+			} else if g.cols[c].fk {
+				cell += fkMarker // e.g. author_id→
 			}
 			if g.sortCol != "" && g.cols[c].name == g.sortCol {
 				if g.sortAsc {
