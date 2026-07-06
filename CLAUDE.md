@@ -147,6 +147,11 @@ rides through `editorCmd`→`editorSubmitMsg`, and the submit handler stores the
 back into `lastQuery` (even on error) so the next `s` on that table continues the
 edit-run loop. Only `s` sets `remember`; E/o/D/p leave it zero.
 
+`r` (`App.reloadView`) re-runs the current view: a table reload is just
+`loadCurrentCmd` (keeps sort, `basePreds`, column filters, and cursor — `setResult`
+re-clamps it); an adHoc result re-runs `App.adHocQuery`, the SQL stashed from the
+last `queryResultMsg` (now carries its `sql`). No-op before anything is loaded.
+
 Note: many `.go` comments still carry `§N` section refs that pointed at the old
 DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
 

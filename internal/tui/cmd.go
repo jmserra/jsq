@@ -331,7 +331,7 @@ func runQueryCmd(ctx context.Context, eng db.Engine, query string) tea.Cmd {
 		if err != nil {
 			return dbErr(ctx, err)
 		}
-		return queryResultMsg{rs: rs}
+		return queryResultMsg{rs: rs, sql: query}
 	}
 }
 

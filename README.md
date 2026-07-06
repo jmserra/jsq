@@ -132,6 +132,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
+| `r` | reload the current view — re-runs the table load (keeping sort, filters, and cursor) or the ad-hoc query behind an `s` result |
 | `t` | go to the table list (a full-screen page) |
 | `T` | go to the database list — jump to another database on the same connection |
 | `c` | open the connection picker — switch to (or open) another connection; its `cmd` tunnel is reused if already up |

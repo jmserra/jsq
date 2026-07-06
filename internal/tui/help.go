@@ -60,6 +60,7 @@ var helpItems = []helpItem{
 	{key: "p", desc: "duplicate the current row"},
 	{head: "SQL"},
 	{key: "s", desc: "free-form SQL in $EDITOR"},
+	{key: "r", desc: "reload the current table / query view"},
 	{head: "Navigate"},
 	{key: "t", desc: "go to the table list (type to filter, enter opens)"},
 	{key: "T", desc: "go to the database list (jump to another database)"},

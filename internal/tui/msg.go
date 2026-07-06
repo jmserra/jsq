@@ -56,7 +56,11 @@ type execDoneMsg struct {
 }
 
 // queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
-type queryResultMsg struct{ rs *db.ResultSet }
+// sql is the query that produced them, kept so `r` can re-run it.
+type queryResultMsg struct {
+	rs  *db.ResultSet
+	sql string
+}
 
 // databasesMsg carries the databases available on the current connection (T).
 type databasesMsg struct{ names []string }

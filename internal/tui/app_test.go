@@ -1155,6 +1155,72 @@ func TestScratchQuery(t *testing.T) {
 	}
 }
 
+// TestReloadTable verifies `r` re-runs the current table load, picking up rows
+// written out-of-band since the first load.
+func TestReloadTable(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	if len(app.grid.rows) != 1 {
+		t.Fatalf("initial load = %d rows, want 1", len(app.grid.rows))
+	}
+
+	// A row appears from elsewhere; the grid doesn't know yet.
+	if _, err := app.engine.Exec(context.Background(), `INSERT INTO users (name) VALUES ('Grace')`); err != nil {
+		t.Fatal(err)
+	}
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`r` should dispatch a reload")
+	}
+	app = update(t, app, cmd())
+	if len(app.grid.rows) != 2 {
+		t.Fatalf("after reload = %d rows, want 2", len(app.grid.rows))
+	}
+	if !strings.Contains(app.View(), "Grace") {
+		t.Fatalf("reloaded view should include the new row:\n%s", app.View())
+	}
+}
+
+// TestReloadQuery verifies `r` re-runs the ad-hoc query behind an s/S result.
+func TestReloadQuery(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	// Show an ad-hoc query result.
+	m, cmd := app.Update(editorSubmitMsg{sql: "SELECT name FROM users ORDER BY id;"})
+	app = m.(App)
+	app = update(t, app, cmd())
+	if !app.adHoc || len(app.grid.rows) != 1 {
+		t.Fatalf("query result: adHoc=%v rows=%d", app.adHoc, len(app.grid.rows))
+	}
+
+	// Another row lands, then reload re-runs the same query.
+	if _, err := app.engine.Exec(context.Background(), `INSERT INTO users (name) VALUES ('Grace')`); err != nil {
+		t.Fatal(err)
+	}
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`r` should re-run the ad-hoc query")
+	}
+	msg := cmd()
+	if _, ok := msg.(queryResultMsg); !ok {
+		t.Fatalf("reload of an ad-hoc view should produce a queryResultMsg, got %T", msg)
+	}
+	app = update(t, app, msg)
+	if !app.adHoc || len(app.grid.rows) != 2 {
+		t.Fatalf("after query reload: adHoc=%v rows=%d, want adHoc + 2 rows", app.adHoc, len(app.grid.rows))
+	}
+}
+
 // TestScratchRemembersLastQuery covers the edit-run-edit loop: s prefills the
 // SELECT template first, then your last query on that table, keyed per table.
 func TestScratchRemembersLastQuery(t *testing.T) {

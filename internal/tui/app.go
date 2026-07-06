@@ -66,7 +66,8 @@ type App struct {
 	resetGrid   bool       // reset cursor on next rows load (new table, not a re-sort)
 	adHoc       bool       // grid shows a free-form (s) query result, not a table
 
-	lastQuery map[db.Table]string // per-table last scratch (s) query, for the edit loop
+	lastQuery  map[db.Table]string // per-table last scratch (s) query, for the edit loop
+	adHocQuery string              // SQL behind the current adHoc result, so `r` can re-run it
 
 	dbName         string
 	w, h           int
@@ -319,6 +320,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.grid.loading = false
 		a.grid.reset()
 		a.adHoc = true
+		a.adHocQuery = msg.sql
 		a.screen = screenBrowse
 		a.layout()
 		a.status = fmt.Sprintf("query — %d row(s)", len(msg.rs.Rows))
@@ -1006,6 +1008,8 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "s":
 		return a, editorCmd(a.scratchSeed())
+	case "r":
+		return a.reloadView()
 	}
 	// After a movement, fetch the next window if the cursor neared the edge.
 	// Evaluate the command first so its state mutation (activity/loading) lands
@@ -1041,6 +1045,26 @@ func (a App) scratchSeed() editorSeed {
 // base predicate, and the column filters.
 func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
 	return loadCmd(ctx, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
+}
+
+// reloadView re-runs the current view (`r`): a table reload keeps the sort,
+// followed-FK predicate, column filters, and cursor; an adHoc result re-runs its
+// query. A no-op when there's nothing loaded yet.
+func (a App) reloadView() (tea.Model, tea.Cmd) {
+	if a.adHoc {
+		if a.adHocQuery == "" {
+			return a, nil
+		}
+		ctx := a.begin("reloading")
+		a.status = "reloading…"
+		return a, runQueryCmd(ctx, a.engine, a.adHocQuery)
+	}
+	if a.currentTable.Name == "" {
+		return a, nil
+	}
+	ctx := a.begin("reloading")
+	a.status = "reloading…"
+	return a, a.loadCurrentCmd(ctx)
 }
 
 func (a App) gridLimit() int {
