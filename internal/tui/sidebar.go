@@ -20,6 +20,7 @@ type sidebar struct {
 	w, h    int
 
 	filterVal string // current filter text (empty → whole list)
+	label     string // placeholder shown in the search prompt ("tables" / "databases")
 }
 
 func (s *sidebar) setTables(t []db.Table) {
@@ -112,7 +113,11 @@ func (s *sidebar) clearFilter() {
 func (s *sidebar) View() string {
 	var b strings.Builder
 	// Search prompt: always shown — the list filters as you type, no `/` needed.
+	// Empty → the label as a placeholder, so you can tell tables from databases.
 	txt := "⌕" + s.filterVal + "▏"
+	if s.filterVal == "" && s.label != "" {
+		txt = "⌕ " + s.label
+	}
 	b.WriteString(filterStyle.Render(runewidth.Truncate(txt, s.w, "…")))
 	b.WriteByte('\n')
 

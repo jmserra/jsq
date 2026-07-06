@@ -58,6 +58,9 @@ type execDoneMsg struct {
 // queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
 type queryResultMsg struct{ rs *db.ResultSet }
 
+// databasesMsg carries the databases available on the current connection (T).
+type databasesMsg struct{ names []string }
+
 // errMsg carries any async failure that happens mid-session (shown on the
 // in-app error screen).
 type errMsg struct{ err error }

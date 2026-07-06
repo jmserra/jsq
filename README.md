@@ -131,9 +131,11 @@ omits it).
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
 | `t` | go to the table list (a full-screen page) |
+| `T` | go to the database list — jump to another database on the same connection |
+| `c` | open the connection picker — switch to (or open) another connection; its `cmd` tunnel is reused if already up |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
-| *(table list)* type | filter the list as you type — no `/` needed |
-| *(table list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move; `Enter` opens the table; `Esc` clears the filter, then returns to the grid |
+| *(table / database list)* type | filter the list as you type — no `/` needed |
+| *(table / database list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move; `Enter` opens; `Esc` clears the filter, then goes back |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
@@ -280,6 +282,9 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
   database's tables and you just start typing to narrow it (`↑`/`↓` or
   `Ctrl-p`/`Ctrl-n` to move). Names are schema-qualified (`sales.orders`) only
   for non-default schemas; `public` tables show bare names.
+- **`T` jumps databases.** The same type-to-filter page, but over the databases
+  on the connection; `Enter` reopens the engine pointed at that database (the
+  `cmd` tunnel stays up) and drops you on its table list.
 - **Single result pane, no tabs.** Each query replaces what's shown.
 
 ### Results grid (fixed-width)

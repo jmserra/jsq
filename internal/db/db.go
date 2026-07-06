@@ -185,6 +185,22 @@ func HostPort(dsn string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// WithDatabase returns dsn pointing at a different database on the same server
+// (host, credentials and query params preserved) — used to jump databases. For
+// SQLite (a database is a file) it returns dsn unchanged.
+func WithDatabase(dsn, dbname string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Scheme == "" {
+		return dsn
+	}
+	switch u.Scheme {
+	case "postgres", "postgresql", "mysql":
+		u.Path = "/" + dbname
+		return u.String()
+	}
+	return dsn
+}
+
 // EngineOf returns "sqlite" | "postgres" | "mysql" | "" for a DSN or path.
 func EngineOf(dsn string) string {
 	if u, err := url.Parse(dsn); err == nil && u.Scheme != "" {

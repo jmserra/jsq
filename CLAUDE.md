@@ -31,14 +31,14 @@ internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
-  app.go        # root App Model. Three screens: screenPicker (bare `jsq`), screenTables (full-screen table list), screenBrowse (grid). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
+  app.go        # root App Model. Screens: screenPicker (bare `jsq`), screenTables (full-screen table list, `t`), screenDatabases (database list, `T` → switchDBCmd reopens the engine on another db), screenBrowse (grid). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner.
   sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   proc.go       # the connection `cmd` helper (port-forward etc.): startRun (registers in a package-level live set), waitPort, runProc.kill (deregisters + bounded group-kill), KillRunHelpers (exit backstop), tailBuffer. proc_unix.go/proc_other.go = process-group kill (unix) vs single-process fallback. The wait address comes from db.HostPort(url).
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget
-  sidebar.go    # full-screen table-list Model (screenTables): type-to-filter, no `/`. (Type name is still `sidebar`.)
-  picker.go     # connection picker (bare `jsq`)
+  sidebar.go    # full-screen filterable list Model (type-to-filter, no `/`). Used for both the table list (screenTables) and the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`); `label` is the search placeholder. (Type name is still `sidebar`.)
+  picker.go     # connection picker (bare `jsq` at startup, and `c` mid-session)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
   help.go       # read-only `?` keybinding cheat sheet (full-area overlay like cellview); helpItems is the hand-kept mirror of the hardcoded keymap
   util.go       # clamp()
@@ -81,18 +81,29 @@ AND-ed into every load via `whereClause`/`loadCmd`/`loadMoreCmd` and cleared by
 flagged in the header with `fkMarker` (`→`). Note grid cell values are
 driver-typed (sqlite ints come back `int64`, not string) — fine as bound params.
 
-**Jumplist**: `App.views` is the visited-view list (oldest→newest) with
-`viewIdx` the current one; a `viewState` is `{table, basePreds, baseNote, sort}`
-(column filters not captured). Every navigation goes through `navigate`, which
-`syncCurrent`s the live view into `views[viewIdx]`, truncates the forward tail,
-appends, and calls `loadView` (the shared restore-and-reload, also used by
-`selectTable` and `follow`). `Ctrl-O` is `jumpBy(-1)`; the `` ` `` overlay
-(`jumpView`, like `cellView`) is a picker over `views` — `jumpTo(i)` on Enter.
-Forward is `jumpBy(+1)`, reachable two ways: `Ctrl-I` (only where the terminal
-distinguishes it) **and** `Tab` while the sidebar is hidden — because on bubbletea
-v1 terminals send `Ctrl-I` as `Tab`, and Tab is otherwise a no-op while browsing
-the grid (it only cycles focus when the sidebar is up). The `` ` `` picker is the
-fully terminal-proof way to reach any view.
+**Connections & databases**: `c` opens the picker mid-session (`connectTo`), `T`
+the database list, `t` the table list. Switching connection/database reconnects
+the engine via `openEngineCmd` (closes the old engine, opens a fresh one on the
+target DSN, `db.WithDatabase` for a db swap). Multiple connections stay "open"
+because their `cmd` tunnels persist in `liveProcs` for the whole session;
+`App.tunneled[name]` records which have started theirs so a re-select doesn't
+re-run the `cmd` (openEngineCmd's `startTunnel`). `connectTo` reuses the current
+connection (no-op → its tables), else reconnects. Initial connect still uses
+`connectCmd` (quits on failure); mid-session `openEngineCmd` uses `errMsg`.
+
+**Jumplist**: one **session-wide** list (`App.views`, oldest→newest, `viewIdx` =
+current); a `viewState` is `{conn, db, table, basePreds, baseNote, sort}` (column
+filters not captured). It **spans connections and databases** — each view records
+its `conn`+`db`, and a jump elsewhere reconnects first: `jumpBy`/`jumpTo` route
+through `goToView`, which (on a conn or db mismatch) stashes `App.pendingView` and
+dispatches `openEngineCmd`; `connectedMsg` then loads `pendingView` (the grid)
+instead of the table list. So `connectedMsg` must **not** reset `views` — only the
+live table state. Same-place jumps just `loadView`. `navigate` (selectTable/follow)
+`syncCurrent`s, truncates the forward tail, appends. `Ctrl-O`=`jumpBy(-1)`;
+forward `jumpBy(+1)` is `Ctrl-I` (where the terminal distinguishes it from `Tab`)
+or `Tab` while browsing the grid (Tab there was a no-op; terminals send `Ctrl-I`
+as `Tab` on bubbletea v1). The `` ` `` picker (`jumpView`, db-qualified labels) is
+the terminal-proof way to reach any view.
 
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a

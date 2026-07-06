@@ -15,9 +15,10 @@ import (
 type screen int
 
 const (
-	screenPicker screen = iota // connection picker (bare `jsq`)
-	screenBrowse               // the results grid
-	screenTables               // the full-screen table list
+	screenPicker    screen = iota // connection picker (bare `jsq`)
+	screenBrowse                  // the results grid
+	screenTables                  // the full-screen table list
+	screenDatabases               // the full-screen database list (T)
 )
 
 const leftPad = 1 // 1-char blank margin before the table list / grid
@@ -27,9 +28,11 @@ type App struct {
 	screen screen
 	picker picker
 
-	connName string
-	readOnly bool        // connection refuses mutations (read_only in config)
-	pending  config.Conn // the direct/selected connection (empty URL → picker); cmd lives here
+	connName   string
+	readOnly   bool            // connection refuses mutations (read_only in config)
+	pending    config.Conn     // the direct/selected connection (empty URL → picker); cmd lives here
+	tunneled   map[string]bool // connections whose `cmd` tunnel is already up (don't re-run it)
+	connecting bool            // a connect is in flight (guards a double-select on the picker)
 
 	// While a `cmd`-backed connection is being established, connCmd/connAddr drive
 	// the full-screen waiting view (what we ran + the port we're waiting for); both
@@ -40,6 +43,7 @@ type App struct {
 
 	engine  db.Engine
 	sidebar sidebar // the full-screen table list (screenTables)
+	dbs     sidebar // the full-screen database list (screenDatabases; items are db.Table{Name: db})
 	grid    grid
 	cell    cellView
 	help    help
@@ -50,15 +54,16 @@ type App struct {
 	sortCol      string
 	sortAsc      bool
 
-	// Jumplist: visited views oldest→newest with viewIdx marking the current one.
-	// Ctrl-O/Ctrl-I step it; the ` picker jumps to any entry. A new navigation
-	// truncates the forward tail and appends. A view is {table, FK-filter, sort}
-	// (column filters aren't captured).
-	views     []viewState
-	viewIdx   int      // index of the current view; -1 before the first
-	jumps     jumpView // the `-key jumplist picker overlay
-	resetGrid bool     // reset cursor on next rows load (new table, not a re-sort)
-	adHoc     bool     // grid shows a free-form (s) query result, not a table
+	// Jumplist: one session-wide list of visited views (oldest→newest, viewIdx =
+	// current). Ctrl-O/Ctrl-I step it; the ` picker jumps to any entry. It spans
+	// databases — each view records its db and a jump reconnects if needed. A view
+	// is {db, table, FK-filter, sort} (column filters aren't captured).
+	views       []viewState
+	viewIdx     int        // index of the current view; -1 before the first
+	jumps       jumpView   // the `-key jumplist picker overlay
+	pendingView *viewState // set for a cross-database jump: load it once reconnected
+	resetGrid   bool       // reset cursor on next rows load (new table, not a re-sort)
+	adHoc       bool       // grid shows a free-form (s) query result, not a table
 
 	lastQuery map[db.Table]string // per-table last scratch (s) query, for the edit loop
 
@@ -87,6 +92,9 @@ func New(conns []config.Conn, direct config.Conn) App {
 		pending:   direct,
 		lastQuery: map[db.Table]string{},
 		viewIdx:   -1,
+		sidebar:   sidebar{label: "tables"},
+		dbs:       sidebar{label: "databases"},
+		tunneled:  map[string]bool{},
 	}
 	if direct.URL != "" {
 		a.screen = screenBrowse
@@ -174,6 +182,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		a.stop()
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
+		a.connecting = false
 		a.err = msg.err
 		return a, nil
 
@@ -185,18 +194,44 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case connectedMsg:
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
+		a.connecting = false
 		a.engine = msg.engine
 		if msg.name != "" {
 			a.connName = msg.name
 		}
+		a.tunneled[a.connName] = true // its cmd (if any) is now running — reuse it
 		a.dbName = msg.dbName
 		a.sidebar.setTables(msg.tables)
-		a.screen = screenTables // land on the table list
+		// The jumplist is session-wide (spans databases) — do NOT reset it. Clear
+		// only the live table state; a jump restores it via pendingView below.
+		a.currentTable = db.Table{}
+		a.basePreds, a.baseNote = nil, ""
 		a.layout()
+		if a.pendingView != nil { // a cross-database jump: load that view, not the list
+			v := *a.pendingView
+			a.pendingView = nil
+			return a.loadView(v, "loading "+v.table.Name)
+		}
+		a.screen = screenTables // otherwise land on the table list
 		a.status = ""
 		// Kick off the perpetual spinner tick (unless the waiting view already
 		// started it); it idles invisibly and animates only during a DB op.
 		return a, a.ensureTick()
+
+	case databasesMsg:
+		a.stop()
+		if len(msg.names) == 0 {
+			a.status = "no other databases on this connection"
+			return a, nil
+		}
+		tabs := make([]db.Table, len(msg.names))
+		for i, n := range msg.names {
+			tabs[i] = db.Table{Name: n}
+		}
+		a.dbs.setTables(tabs)
+		a.screen = screenDatabases
+		a.layout()
+		return a, nil
 
 	case rowsMsg:
 		a.stop()
@@ -310,9 +345,10 @@ func (a *App) layout() {
 	if avail < 1 {
 		avail = 1
 	}
-	// Grid and table list each own the whole body (separate full-screen pages).
+	// Grid and the two lists each own the whole body (separate full-screen pages).
 	a.grid.setSize(avail, bodyH)
 	a.sidebar.w, a.sidebar.h = avail, bodyH
+	a.dbs.w, a.dbs.h = avail, bodyH
 }
 
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -410,30 +446,27 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.picker.move(1)
 		case "k", "up":
 			a.picker.move(-1)
+		case "esc":
+			if a.engine != nil { // opened mid-session (c) → back to where we were
+				a.screen = screenBrowse
+				a.layout()
+			}
 		case "enter":
-			// Ignore a second Enter while a connect is already in flight — the
-			// probe/open runs in the background with the picker still on screen, and
-			// re-triggering would start a duplicate engine (and `run` process) whose
-			// handle we'd then leak. pending.URL is empty until the first Enter.
-			if a.pending.URL != "" {
+			// Ignore a second Enter while a connect is already in flight.
+			if a.connecting {
 				return a, nil
 			}
 			if c, ok := a.picker.selected(); ok {
-				a.connName = c.Name
-				a.readOnly = c.ReadOnly
-				a.pending = c
-				a.status = "connecting to " + c.Name + "…"
-				a.beginConnect(c)
-				if a.connCmd != "" {
-					return a, tea.Batch(connectCmd(c), tickCmd())
-				}
-				return a, connectCmd(c)
+				return a.connectTo(c)
 			}
 		}
 		return a, nil
 
 	case screenTables:
 		return a.handleTablesKey(msg)
+
+	case screenDatabases:
+		return a.handleDatabasesKey(msg)
 
 	case screenBrowse:
 		switch msg.String() {
@@ -445,10 +478,101 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.screen = screenTables
 			a.layout()
 			return a, nil
+		case "T": // go to the database list
+			return a.openDatabases()
+		case "c": // open the connection picker
+			if len(a.picker.conns) == 0 {
+				a.status = "no configured connections"
+				return a, nil
+			}
+			a.syncCurrent()
+			a.screen = screenPicker
+			return a, nil
 		}
 		return a.handleGridKey(msg)
 	}
 	return a, nil
+}
+
+// connectTo connects to the selected connection: reusing it if it's the current
+// one, opening the engine directly if its tunnel is already up (no re-run of the
+// `cmd`), or running the full connect (tunnel + wait) the first time. The initial
+// connect (no engine yet) quits on failure; a mid-session switch does not.
+func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
+	if a.engine != nil && c.Name == a.connName {
+		a.screen = screenTables // already here → just show its tables
+		a.layout()
+		return a, nil
+	}
+	a.syncCurrent() // capture the current view before changing identity
+	a.connName, a.readOnly, a.pending = c.Name, c.ReadOnly, c
+	a.connecting = true
+	a.status = "connecting to " + c.Name + "…"
+	if a.engine == nil { // initial connect (startup): connectCmd, quits on failure
+		a.beginConnect(c)
+		if a.connCmd != "" {
+			return a, tea.Batch(connectCmd(c), tickCmd())
+		}
+		return a, connectCmd(c)
+	}
+	// Mid-session switch: reuse the tunnel if it's already up.
+	start := !a.tunneled[c.Name]
+	if start && c.Cmd != "" {
+		a.beginConnect(c) // loader while the tunnel comes up
+	}
+	return a, openEngineCmd(a.engine, c, c.URL, start)
+}
+
+// openDatabases fetches the connection's databases and shows the picker.
+func (a App) openDatabases() (tea.Model, tea.Cmd) {
+	ctx := a.begin("loading databases")
+	a.status = "loading databases…"
+	return a, databasesCmd(ctx, a.engine)
+}
+
+// handleDatabasesKey drives the full-screen database list: typing filters, Enter
+// switches to that database, Esc clears the filter then returns to the table list.
+func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		if t, ok := a.dbs.selected(); ok {
+			return a.switchDatabase(t.Name)
+		}
+		return a, nil
+	case tea.KeyEsc:
+		if a.dbs.hasFilter() {
+			a.dbs.clearFilter()
+			return a, nil
+		}
+		a.screen = screenTables // no filter → back to the table list
+		a.layout()
+		return a, nil
+	case tea.KeyUp, tea.KeyCtrlP:
+		a.dbs.move(-1)
+	case tea.KeyDown, tea.KeyCtrlN:
+		a.dbs.move(1)
+	case tea.KeyBackspace:
+		a.dbs.filterBackspace()
+	case tea.KeySpace:
+		a.dbs.filterInput(" ")
+	case tea.KeyRunes:
+		a.dbs.filterInput(string(msg.Runes))
+	}
+	return a, nil
+}
+
+// switchDatabase reconnects the engine to name on the same server and reloads.
+func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
+	if name == a.dbName { // already here → just go back to its tables
+		a.screen = screenTables
+		a.layout()
+		return a, nil
+	}
+	a.syncCurrent() // save the current view into the session jumplist before leaving
+	dsn := db.WithDatabase(a.pending.URL, name)
+	a.pending.URL = dsn // so a later T swaps from the new database
+	a.status = "connecting to " + name + "…"
+	return a, openEngineCmd(a.engine, config.Conn{Name: a.connName, ReadOnly: a.readOnly}, dsn, false)
 }
 
 // handleTablesKey drives the full-screen table list: typing narrows it (no `/`),
@@ -479,14 +603,22 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeySpace:
 		a.sidebar.filterInput(" ")
 	case tea.KeyRunes:
+		// T jumps to the database list; a lowercase t still filters (matching is
+		// case-insensitive, so nothing is lost by not typing a literal T).
+		if string(msg.Runes) == "T" {
+			return a.openDatabases()
+		}
 		a.sidebar.filterInput(string(msg.Runes))
 	}
 	return a, nil
 }
 
 // viewState is a jumplist entry: enough to reload a table exactly as it was
-// (bar column filters, which aren't captured).
+// (bar column filters, which aren't captured). db is the database it lives in, so
+// the one session-wide jumplist can span databases — a jump reconnects if needed.
 type viewState struct {
+	conn      string // connection name (so the jumplist can span connections)
+	db        string
 	table     db.Table
 	basePreds []eqPred
 	baseNote  string
@@ -496,6 +628,8 @@ type viewState struct {
 
 func (a App) currentView() viewState {
 	return viewState{
+		conn:      a.connName,
+		db:        a.dbName,
 		table:     a.currentTable,
 		basePreds: a.basePreds,
 		baseNote:  a.baseNote,
@@ -504,9 +638,20 @@ func (a App) currentView() viewState {
 	}
 }
 
-// label is the jumplist picker's one-line description of a view.
+// label is the jumplist picker's one-line description of a view, qualified like
+// the header: conn > db > table · note.
 func (v viewState) label() string {
+	var parts []string
+	if v.conn != "" {
+		parts = append(parts, v.conn)
+	}
+	if v.db != "" {
+		parts = append(parts, v.db)
+	}
 	s := v.table.Name
+	if len(parts) > 0 {
+		s = strings.Join(parts, " > ") + " > " + s
+	}
 	if v.baseNote != "" {
 		s += " · " + v.baseNote
 	}
@@ -514,8 +659,12 @@ func (v viewState) label() string {
 }
 
 // syncCurrent refreshes the current entry with the live view (so a sort made
-// after arriving is remembered) before any jumplist move.
+// after arriving is remembered) before any jumplist move. A no-op on a list
+// screen, where there is no live table view to capture.
 func (a *App) syncCurrent() {
+	if a.currentTable.Name == "" {
+		return
+	}
 	if a.viewIdx >= 0 && a.viewIdx < len(a.views) {
 		a.views[a.viewIdx] = a.currentView()
 	}
@@ -547,7 +696,52 @@ func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.viewIdx = ni
-	return a.loadView(a.views[ni], "loading "+a.views[ni].table.Name)
+	return a.goToView(a.views[ni])
+}
+
+// goToView loads v, first reconnecting to another connection or database if v
+// lives elsewhere. The jumplist pointer (viewIdx) has already been set by the
+// caller. pendingView makes connectedMsg load the view rather than the table list.
+func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
+	if v.conn != "" && v.conn != a.connName { // cross-connection jump
+		c, ok := a.findConn(v.conn)
+		if !ok {
+			a.status = "connection " + v.conn + " is not available"
+			return a, nil
+		}
+		dsn := c.URL
+		if v.db != "" {
+			dsn = db.WithDatabase(c.URL, v.db)
+		}
+		a.connName, a.readOnly, a.pending = c.Name, c.ReadOnly, c
+		vv := v
+		a.pendingView = &vv
+		start := !a.tunneled[c.Name]
+		a.status = "connecting to " + c.Name + "…"
+		if start && c.Cmd != "" {
+			a.beginConnect(c) // show the loader while the tunnel comes up
+		}
+		return a, openEngineCmd(a.engine, c, dsn, start)
+	}
+	if v.db != "" && v.db != a.dbName { // same connection, different database
+		dsn := db.WithDatabase(a.pending.URL, v.db)
+		a.pending.URL = dsn
+		vv := v
+		a.pendingView = &vv
+		a.status = "connecting to " + v.db + "…"
+		return a, openEngineCmd(a.engine, config.Conn{Name: a.connName, ReadOnly: a.readOnly}, dsn, false)
+	}
+	return a.loadView(v, "loading "+v.table.Name)
+}
+
+// findConn looks up a configured connection by name.
+func (a App) findConn(name string) (config.Conn, bool) {
+	for _, c := range a.picker.conns {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return config.Conn{}, false
 }
 
 // jumpEntries is the picker's label list, current view synced in first.
@@ -567,7 +761,7 @@ func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.viewIdx = i
-	return a.loadView(a.views[i], "loading "+a.views[i].table.Name)
+	return a.goToView(a.views[i])
 }
 
 // loadView switches to v and reloads it (default cursor, cleared column filters).
@@ -613,6 +807,8 @@ func (a App) follow() (tea.Model, tea.Cmd) {
 	}
 	note := fmt.Sprintf("%s = %v", fk.RefColumns[0], row[fk.Columns[0]])
 	return a.navigate(viewState{
+		conn:      a.connName,
+		db:        a.dbName,
 		table:     db.Table{Schema: fk.RefTable.Schema, Name: fk.RefTable.Name},
 		basePreds: preds,
 		baseNote:  note,
@@ -624,7 +820,7 @@ func (a App) follow() (tea.Model, tea.Cmd) {
 // filters, and auto-hides the sidebar (handled on rowsMsg).
 func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 	// a fresh table from the sidebar is unfiltered, default (PK desc) sort.
-	return a.navigate(viewState{table: t, sortAsc: true}, "loading "+t.Name)
+	return a.navigate(viewState{conn: a.connName, db: a.dbName, table: t, sortAsc: true}, "loading "+t.Name)
 }
 
 // handleEditKey routes keys while a cell is being edited (§8 quick path). Enter
@@ -844,6 +1040,9 @@ func (a App) View() string {
 		return lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.picker.View())
 	case screenTables:
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.sidebar.View())
+		return a.statusLine() + "\n" + body
+	case screenDatabases:
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.dbs.View())
 		return a.statusLine() + "\n" + body
 	case screenBrowse:
 		return a.browseView()

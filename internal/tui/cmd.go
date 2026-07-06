@@ -103,6 +103,53 @@ func loadCmd(ctx context.Context, eng db.Engine, t db.Table, limit int, sortCol 
 	}
 }
 
+// databasesCmd lists the databases on the current connection (for the T picker).
+func databasesCmd(ctx context.Context, eng db.Engine) tea.Cmd {
+	return func() tea.Msg {
+		names, err := eng.Databases(ctx)
+		if err != nil {
+			return dbErr(ctx, err)
+		}
+		return databasesMsg{names: names}
+	}
+}
+
+// openEngineCmd is the mid-session (re)connect: optionally start c's `cmd` tunnel
+// (only the first time for a connection — startTunnel), open a fresh engine on
+// dsn, list its tables, then close the old engine. Used for both database switches
+// (startTunnel=false, same connection) and connection switches. A failure is a
+// mid-session errMsg — the old engine stays usable until the new one is ready.
+func openEngineCmd(old db.Engine, c config.Conn, dsn string, startTunnel bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if startTunnel && c.Cmd != "" {
+			p, err := startRun(c.Cmd)
+			if err != nil {
+				return errMsg{err}
+			}
+			if addr := db.HostPort(dsn); addr != "" {
+				if err := waitPort(addr, p, waitTimeout); err != nil {
+					p.kill()
+					return errMsg{err}
+				}
+			}
+		}
+		eng, err := db.Open(ctx, dsn, db.ReadOnly(c.ReadOnly))
+		if err != nil {
+			return errMsg{err}
+		}
+		tables, err := eng.Tables(ctx)
+		if err != nil {
+			eng.Close()
+			return errMsg{err}
+		}
+		if old != nil {
+			old.Close()
+		}
+		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(dsn), tables: tables}
+	}
+}
+
 // loadMoreCmd fetches the next window (continuous scroll) via LIMIT/OFFSET,
 // preserving the active sort and filters.
 func loadMoreCmd(ctx context.Context, eng db.Engine, t db.Table, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec, offset, limit int) tea.Cmd {
