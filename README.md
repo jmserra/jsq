@@ -135,7 +135,7 @@ omits it).
 | `c` | open the connection picker — switch to (or open) another connection; its `cmd` tunnel is reused if already up |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
 | *(table / database list)* type | filter the list as you type — no `/` needed |
-| *(table / database list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move; `Enter` opens; `Esc` clears the filter, then goes back |
+| *(table / database list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` jump columns); `Enter` opens; `Esc` clears the filter, then goes back |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 

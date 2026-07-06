@@ -38,8 +38,15 @@ func tableLabel(t db.Table) string {
 	return t.Name
 }
 
+// The list lays out in a column-major grid — items fill down each column then
+// across, so ↑/↓ (index ∓1) move naturally within a column and ←/→ (index ∓rows)
+// jump columns. Columns are sized to the widest visible name so nothing is cut;
+// `off` is the first visible column (horizontal scroll for very long lists).
+
+const listColGap = 2 // spaces between grid columns
+
 // rebuildVisible narrows `visible` to tables whose label matches the filter.
-// Empty filter shows all tables.
+// Empty filter shows all tables. Callers reset cursor/off before calling.
 func (s *sidebar) rebuildVisible() {
 	s.visible = s.visible[:0]
 	pat := searchPattern(s.filterVal)
@@ -50,31 +57,56 @@ func (s *sidebar) rebuildVisible() {
 		}
 	}
 	s.cursor = clamp(s.cursor, 0, len(s.visible)-1)
-	if s.off > s.cursor {
-		s.off = s.cursor
-	}
 }
 
 // hasFilter reports whether a filter is narrowing the list.
 func (s *sidebar) hasFilter() bool { return s.filterVal != "" }
 
-// listHeight is the rows available for the list — one line is always taken by the
-// search prompt at the top.
-func (s *sidebar) listHeight() int {
+// rows is the grid height — one line is always taken by the search prompt.
+func (s *sidebar) rows() int {
 	if s.h > 1 {
 		return s.h - 1
 	}
 	return 1
 }
 
+// cellWidth is a grid cell's width: the widest visible label + the 1-char cursor
+// marker, capped at the screen width.
+func (s *sidebar) cellWidth() int {
+	m := 0
+	for _, i := range s.visible {
+		if w := runewidth.StringWidth(tableLabel(s.tables[i])); w > m {
+			m = w
+		}
+	}
+	w := m + 1
+	if s.w > 0 && w > s.w {
+		w = s.w
+	}
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// gridCols is how many columns fit across the screen.
+func (s *sidebar) gridCols() int {
+	if n := (s.w + listColGap) / (s.cellWidth() + listColGap); n > 1 {
+		return n
+	}
+	return 1
+}
+
 func (s *sidebar) move(d int) {
 	s.cursor = clamp(s.cursor+d, 0, len(s.visible)-1)
-	h := s.listHeight()
-	if s.cursor < s.off {
-		s.off = s.cursor
+	// Keep the cursor's column within the visible window (horizontal scroll).
+	col := s.cursor / s.rows()
+	nc := s.gridCols()
+	if col < s.off {
+		s.off = col
 	}
-	if h > 0 && s.cursor >= s.off+h {
-		s.off = s.cursor - h + 1
+	if col >= s.off+nc {
+		s.off = col - nc + 1
 	}
 }
 
@@ -107,6 +139,7 @@ func (s *sidebar) filterBackspace() {
 // clearFilter drops the filter and restores the full list.
 func (s *sidebar) clearFilter() {
 	s.filterVal = ""
+	s.cursor, s.off = 0, 0
 	s.rebuildVisible()
 }
 
@@ -122,19 +155,31 @@ func (s *sidebar) View() string {
 	b.WriteByte('\n')
 
 	if len(s.visible) == 0 {
-		b.WriteString(lipgloss.NewStyle().Faint(true).Render(" no tables match"))
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(" no matches"))
 		return b.String()
 	}
-	h := s.listHeight()
-	for i := s.off; i < s.off+h && i < len(s.visible); i++ {
-		name := tableLabel(s.tables[s.visible[i]])
-		line := " " + name
-		if i == s.cursor {
-			line = selStyle.Render("›" + name)
-		}
-		b.WriteString(line)
-		if i < s.off+h-1 && i < len(s.visible)-1 {
+	nr, nc, cw := s.rows(), s.gridCols(), s.cellWidth()
+	for r := 0; r < nr; r++ {
+		if r > 0 {
 			b.WriteByte('\n')
+		}
+		for c := s.off; c < s.off+nc; c++ {
+			idx := c*nr + r
+			if idx >= len(s.visible) {
+				continue
+			}
+			prefix := " "
+			if idx == s.cursor {
+				prefix = "›"
+			}
+			cell := runewidth.FillRight(runewidth.Truncate(prefix+tableLabel(s.tables[s.visible[idx]]), cw, "…"), cw)
+			if idx == s.cursor {
+				cell = selStyle.Render(cell)
+			}
+			b.WriteString(cell)
+			if c < s.off+nc-1 {
+				b.WriteString(strings.Repeat(" ", listColGap))
+			}
 		}
 	}
 	return b.String()

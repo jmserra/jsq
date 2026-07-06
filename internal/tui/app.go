@@ -551,6 +551,10 @@ func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.dbs.move(-1)
 	case tea.KeyDown, tea.KeyCtrlN:
 		a.dbs.move(1)
+	case tea.KeyLeft:
+		a.dbs.move(-a.dbs.rows())
+	case tea.KeyRight:
+		a.dbs.move(a.dbs.rows())
 	case tea.KeyBackspace:
 		a.dbs.filterBackspace()
 	case tea.KeySpace:
@@ -598,6 +602,10 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.sidebar.move(-1)
 	case tea.KeyDown, tea.KeyCtrlN:
 		a.sidebar.move(1)
+	case tea.KeyLeft:
+		a.sidebar.move(-a.sidebar.rows()) // previous column
+	case tea.KeyRight:
+		a.sidebar.move(a.sidebar.rows()) // next column
 	case tea.KeyBackspace:
 		a.sidebar.filterBackspace()
 	case tea.KeySpace:
