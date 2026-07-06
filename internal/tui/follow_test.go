@@ -144,8 +144,8 @@ func TestJumplistBackForward(t *testing.T) {
 	if app.currentTable.Name != "books" {
 		t.Fatalf("setup: expected books, got %q", app.currentTable.Name)
 	}
-	if app.showSidebar {
-		t.Fatal("sidebar should be hidden while browsing")
+	if app.screen != screenBrowse {
+		t.Fatal("should be on the grid screen while browsing")
 	}
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyTab})
 	app = m.(App)

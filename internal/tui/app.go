@@ -15,21 +15,12 @@ import (
 type screen int
 
 const (
-	screenPicker screen = iota
-	screenBrowse
+	screenPicker screen = iota // connection picker (bare `jsq`)
+	screenBrowse               // the results grid
+	screenTables               // the full-screen table list
 )
 
-type focus int
-
-const (
-	focusSidebar focus = iota
-	focusGrid
-)
-
-const (
-	sidebarWidth = 24
-	leftPad      = 1 // 1-char blank margin before the table list / grid
-)
+const leftPad = 1 // 1-char blank margin before the table list / grid
 
 // App is the root bubbletea Model.
 type App struct {
@@ -47,13 +38,11 @@ type App struct {
 	connAddr string
 	ticking  bool
 
-	engine      db.Engine
-	sidebar     sidebar
-	grid        grid
-	cell        cellView
-	help        help
-	focus       focus
-	showSidebar bool
+	engine  db.Engine
+	sidebar sidebar // the full-screen table list (screenTables)
+	grid    grid
+	cell    cellView
+	help    help
 
 	currentTable db.Table
 	basePreds    []eqPred // followed-FK equality filter, AND-ed into every load until the table changes
@@ -91,14 +80,13 @@ type App struct {
 // directly; else it shows the picker. readOnly/cmd all ride along on direct (§8).
 func New(conns []config.Conn, direct config.Conn) App {
 	a := App{
-		picker:      picker{conns: conns},
-		grid:        newGrid(),
-		connName:    direct.Name,
-		readOnly:    direct.ReadOnly,
-		pending:     direct,
-		showSidebar: true,
-		lastQuery:   map[db.Table]string{},
-		viewIdx:     -1,
+		picker:    picker{conns: conns},
+		grid:      newGrid(),
+		connName:  direct.Name,
+		readOnly:  direct.ReadOnly,
+		pending:   direct,
+		lastQuery: map[db.Table]string{},
+		viewIdx:   -1,
 	}
 	if direct.URL != "" {
 		a.screen = screenBrowse
@@ -203,9 +191,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.dbName = msg.dbName
 		a.sidebar.setTables(msg.tables)
-		a.screen = screenBrowse
-		a.showSidebar = true
-		a.focus = focusSidebar
+		a.screen = screenTables // land on the table list
 		a.layout()
 		a.status = ""
 		// Kick off the perpetual spinner tick (unless the waiting view already
@@ -228,8 +214,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.resetGrid = false
 		}
 		a.adHoc = false // a table load leaves any prior s/S result behind
-		a.showSidebar = false
-		a.focus = focusGrid
+		a.screen = screenBrowse
 		a.layout()
 		a.status = msg.table.Name
 		if a.baseNote != "" { // a followed-FK view: show the predicate
@@ -298,8 +283,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.grid.loading = false
 		a.grid.reset()
 		a.adHoc = true
-		a.showSidebar = false
-		a.focus = focusGrid
+		a.screen = screenBrowse
 		a.layout()
 		a.status = fmt.Sprintf("query — %d row(s)", len(msg.rs.Rows))
 		return a, nil
@@ -318,9 +302,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) layout() {
-	if a.screen != screenBrowse {
-		return
-	}
 	bodyH := a.h - 1 // status line
 	if bodyH < 1 {
 		bodyH = 1
@@ -329,16 +310,9 @@ func (a *App) layout() {
 	if avail < 1 {
 		avail = 1
 	}
-	gridW := avail
-	if a.showSidebar {
-		gridW = avail - sidebarWidth
-		a.sidebar.w = sidebarWidth - 1
-		a.sidebar.h = bodyH
-	}
-	if gridW < 1 {
-		gridW = 1
-	}
-	a.grid.setSize(gridW, bodyH)
+	// Grid and table list each own the whole body (separate full-screen pages).
+	a.grid.setSize(avail, bodyH)
+	a.sidebar.w, a.sidebar.h = avail, bodyH
 }
 
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -404,10 +378,6 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.grid.filtering >= 0 {
 		return a.handleFilterKey(msg)
 	}
-	// While typing a table-list filter, keys go to that input.
-	if a.screen == screenBrowse && a.showSidebar && a.focus == focusSidebar && a.sidebar.filtering {
-		return a.handleSidebarFilterKey(msg)
-	}
 	// `?` opens the help cheat sheet — from grid or sidebar, but only once the
 	// modal/typing captures above have had their say (so `?` typed into a filter
 	// stays literal).
@@ -462,85 +432,50 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case screenTables:
+		return a.handleTablesKey(msg)
+
 	case screenBrowse:
 		switch msg.String() {
 		case "ctrl+o": // jumplist back (vim Ctrl-O)
 			return a.jumpBy(-1)
-		case "ctrl+i": // jumplist forward — note: many terminals send this as Tab
+		case "ctrl+i", "tab": // jumplist forward — terminals send Ctrl-I as Tab
 			return a.jumpBy(1)
-		case "t":
-			// Toggle the table list, focusing it when shown.
-			a.showSidebar = !a.showSidebar
-			if a.showSidebar {
-				a.focus = focusSidebar
-			} else {
-				a.focus = focusGrid
-			}
+		case "t": // go to the table list
+			a.screen = screenTables
 			a.layout()
 			return a, nil
-		case "tab":
-			// With the sidebar up, Tab cycles focus. While browsing the grid
-			// (sidebar hidden) it steps the jumplist forward — this is also where a
-			// kitty-style Ctrl-I lands, since terminals send it as Tab.
-			if a.showSidebar {
-				if a.focus == focusSidebar {
-					a.focus = focusGrid
-				} else {
-					a.focus = focusSidebar
-				}
-				return a, nil
-			}
-			return a.jumpBy(1)
-		}
-		if a.showSidebar && a.focus == focusSidebar {
-			return a.handleSidebarKey(msg)
 		}
 		return a.handleGridKey(msg)
 	}
 	return a, nil
 }
 
-func (a App) handleSidebarKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "j", "down":
-		a.sidebar.move(1)
-	case "k", "up":
-		a.sidebar.move(-1)
-	case "g":
-		a.sidebar.top()
-	case "G":
-		a.sidebar.bottom()
-	case "/":
-		a.sidebar.startFilter()
-	case "esc":
-		a.sidebar.clearFilter()
-	case "enter":
+// handleTablesKey drives the full-screen table list: typing narrows it (no `/`),
+// arrows / Ctrl-N/P move, Enter opens, Esc clears the filter or returns to the grid.
+func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
 		if t, ok := a.sidebar.selected(); ok {
 			return a.selectTable(t)
 		}
-	}
-	return a, nil
-}
-
-// handleSidebarFilterKey routes keys while the table-list filter is being typed
-// (§7). Purely client-side — narrowing the already-loaded table names, no
-// server round-trip. Enter loads the highlighted table; Esc cancels the filter.
-func (a App) handleSidebarFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEnter:
-		t, ok := a.sidebar.selected()
-		a.sidebar.commitFilter() // keep the pattern active for when H returns here
-		if ok {
-			return a.selectTable(t)
-		}
+		return a, nil
 	case tea.KeyEsc:
-		a.sidebar.clearFilter()
+		if a.sidebar.hasFilter() {
+			a.sidebar.clearFilter()
+			return a, nil
+		}
+		if a.currentTable.Name != "" { // no filter → back to the grid we came from
+			a.screen = screenBrowse
+			a.layout()
+		}
+		return a, nil
+	case tea.KeyUp, tea.KeyCtrlP:
+		a.sidebar.move(-1)
+	case tea.KeyDown, tea.KeyCtrlN:
+		a.sidebar.move(1)
 	case tea.KeyBackspace:
 		a.sidebar.filterBackspace()
-	case tea.KeyDown:
-		a.sidebar.move(1)
-	case tea.KeyUp:
-		a.sidebar.move(-1)
 	case tea.KeySpace:
 		a.sidebar.filterInput(" ")
 	case tea.KeyRunes:
@@ -907,6 +842,9 @@ func (a App) View() string {
 	switch a.screen {
 	case screenPicker:
 		return lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.picker.View())
+	case screenTables:
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.sidebar.View())
+		return a.statusLine() + "\n" + body
 	case screenBrowse:
 		return a.browseView()
 	}
@@ -926,12 +864,7 @@ func (a App) browseView() string {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.jumps.View())
 		return a.statusLine() + "\n" + body
 	}
-	body := a.grid.View()
-	if a.showSidebar {
-		sb := lipgloss.NewStyle().Width(sidebarWidth).Render(a.sidebar.View(a.focus == focusSidebar))
-		body = lipgloss.JoinHorizontal(lipgloss.Top, sb, a.grid.View())
-	}
-	body = lipgloss.NewStyle().PaddingLeft(leftPad).Render(body)
+	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.grid.View())
 	return a.statusLine() + "\n" + body
 }
 

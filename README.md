@@ -130,9 +130,10 @@ omits it).
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
-| `t` | toggle the table list (focuses it; auto-hides on select) |
-| `Enter` (sidebar) | open the selected table |
-| `Tab` | while browsing the grid, step the jumplist **forward** (this is where a `Ctrl-i` lands); with the sidebar open, cycle focus between sidebar and grid |
+| `t` | go to the table list (a full-screen page) |
+| `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
+| *(table list)* type | filter the list as you type — no `/` needed |
+| *(table list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move; `Enter` opens the table; `Esc` clears the filter, then returns to the grid |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
@@ -258,28 +259,27 @@ KEY` rowid alias.
 
 ### Layout
 
-Two panes — a declutter-first layout with an on-demand sidebar:
+Two full-screen pages — a declutter-first layout, one buffer at a time:
 
 ```
- local > appdev > users
-┌ tables (toggle)  ┬─────────── results ───────────────┐
-│ users            │  id  name        email            │
-│ orders           │  1   Ada         ada@x.io          │
-│ line_items       │  2   Linus       linus@x.io        │
-│ …                │  …                                 │
-└──────────────────┴────────────────────────────────────┘
+ local > appdev
+ ⌕ord▏
+›orders
+ order_items
 ```
 
 - **Single-line header:** `connection > database > table`, with a top-right
   activity indicator — a spinner and label (`running query`, `loading`, …) that
   appears only while a DB op is in flight and offers `esc` to kill it.
-- **Sidebar is on-demand.** Hidden by default; the results pane is the star. The
-  switch-table loop is `t` → `j`/`k` or `/` to find it → `Enter`: `t` brings the
-  sidebar back **focused**, `Enter` loads the table and the sidebar auto-hides.
-- **Flat, filterable table list — no tree.** jsq opens straight into the database
-  named by the connection; the sidebar is a single flat list of that database's
-  tables, and `/` filters it. Names are schema-qualified (`sales.orders`) only for
-  non-default schemas; `public` tables show bare names.
+- **The table list is its own page.** After connecting you land on it; `t`
+  returns to it from the grid, `Enter` opens a table (switching to the grid),
+  `Esc` goes back. It fills the screen — the results pane isn't cluttered by a
+  permanent sidebar.
+- **Flat, type-to-filter table list — no tree, no `/`.** jsq opens straight into
+  the database named by the connection; the list is a single flat list of that
+  database's tables and you just start typing to narrow it (`↑`/`↓` or
+  `Ctrl-p`/`Ctrl-n` to move). Names are schema-qualified (`sales.orders`) only
+  for non-default schemas; `public` tables show bare names.
 - **Single result pane, no tabs.** Each query replaces what's shown.
 
 ### Results grid (fixed-width)

@@ -8,9 +8,10 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// sidebar is the flat, filterable table list (§7). `/` filters it in place as
-// you type — a purely client-side narrowing of the already-loaded table names
-// (no server round-trip, unlike the grid's two-phase column filter §7.1).
+// sidebar is the full-screen table-list buffer (its own screen, screenTables).
+// There is no explicit filter mode: typing narrows the list as you go (same LIKE
+// semantics as the grid column filter §7.1 — trailing % implied, case-insensitive),
+// a purely client-side narrowing of the already-loaded names.
 type sidebar struct {
 	tables  []db.Table
 	visible []int // display order → tables index (filter view)
@@ -18,13 +19,12 @@ type sidebar struct {
 	off     int
 	w, h    int
 
-	filtering bool   // `/` filter is being typed
-	filterVal string // in-progress filter text
+	filterVal string // current filter text (empty → whole list)
 }
 
 func (s *sidebar) setTables(t []db.Table) {
 	s.tables, s.cursor, s.off = t, 0, 0
-	s.filtering, s.filterVal = false, ""
+	s.filterVal = ""
 	s.rebuildVisible()
 }
 
@@ -37,9 +37,7 @@ func tableLabel(t db.Table) string {
 	return t.Name
 }
 
-// rebuildVisible narrows `visible` to tables whose label matches the filter,
-// using the same LIKE semantics as the grid column filter (§7.1): a trailing %
-// is implied (prefix match), % and _ are wildcards, always case-insensitive.
+// rebuildVisible narrows `visible` to tables whose label matches the filter.
 // Empty filter shows all tables.
 func (s *sidebar) rebuildVisible() {
 	s.visible = s.visible[:0]
@@ -56,17 +54,16 @@ func (s *sidebar) rebuildVisible() {
 	}
 }
 
-// hasFilter reports an active filter — either being typed or committed and
-// still narrowing the list.
-func (s *sidebar) hasFilter() bool { return s.filtering || s.filterVal != "" }
+// hasFilter reports whether a filter is narrowing the list.
+func (s *sidebar) hasFilter() bool { return s.filterVal != "" }
 
-// listHeight is the rows available for the list — one line is taken by the
-// filter prompt whenever a filter is shown.
+// listHeight is the rows available for the list — one line is always taken by the
+// search prompt at the top.
 func (s *sidebar) listHeight() int {
-	if s.hasFilter() && s.h > 0 {
+	if s.h > 1 {
 		return s.h - 1
 	}
-	return s.h
+	return 1
 }
 
 func (s *sidebar) move(d int) {
@@ -90,14 +87,7 @@ func (s *sidebar) selected() (db.Table, bool) {
 	return db.Table{}, false
 }
 
-// --- filtering (§7) ---
-
-// startFilter enters filter-typing mode, keeping any active pattern so you can
-// refine it (like the grid, §7.1).
-func (s *sidebar) startFilter() {
-	s.filtering = true
-	s.rebuildVisible()
-}
+// --- filtering (type to narrow) ---
 
 func (s *sidebar) filterInput(str string) {
 	s.filterVal += str
@@ -113,41 +103,31 @@ func (s *sidebar) filterBackspace() {
 	}
 }
 
-// commitFilter stops typing but keeps the pattern active, so the narrowed list
-// survives loading a table and returning to it with H.
-func (s *sidebar) commitFilter() { s.filtering = false }
-
-// clearFilter drops the active filter entirely and restores the full list.
+// clearFilter drops the filter and restores the full list.
 func (s *sidebar) clearFilter() {
-	s.filtering, s.filterVal = false, ""
+	s.filterVal = ""
 	s.rebuildVisible()
 }
 
-func (s *sidebar) View(focused bool) string {
+func (s *sidebar) View() string {
 	var b strings.Builder
-	if s.hasFilter() {
-		txt := "⌕" + s.filterVal
-		if s.filtering {
-			txt += "▏" // cursor bar only while typing
-		}
-		prompt := runewidth.FillRight(runewidth.Truncate(txt, s.w, "…"), s.w)
-		b.WriteString(filterStyle.Render(prompt))
-		b.WriteByte('\n')
+	// Search prompt: always shown — the list filters as you type, no `/` needed.
+	txt := "⌕" + s.filterVal + "▏"
+	b.WriteString(filterStyle.Render(runewidth.Truncate(txt, s.w, "…")))
+	b.WriteByte('\n')
+
+	if len(s.visible) == 0 {
+		b.WriteString(lipgloss.NewStyle().Faint(true).Render(" no tables match"))
+		return b.String()
 	}
 	h := s.listHeight()
 	for i := s.off; i < s.off+h && i < len(s.visible); i++ {
 		name := tableLabel(s.tables[s.visible[i]])
-		name = runewidth.Truncate(name, s.w, "…")
-		name = runewidth.FillRight(name, s.w)
-
+		line := " " + name
 		if i == s.cursor {
-			if focused {
-				name = selStyle.Render(name)
-			} else {
-				name = lipgloss.NewStyle().Bold(true).Render(name)
-			}
+			line = selStyle.Render("›" + name)
 		}
-		b.WriteString(name)
+		b.WriteString(line)
 		if i < s.off+h-1 && i < len(s.visible)-1 {
 			b.WriteByte('\n')
 		}

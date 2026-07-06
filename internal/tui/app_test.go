@@ -58,8 +58,8 @@ func TestBrowseFlow(t *testing.T) {
 			t.Fatalf("grid view missing %q:\n%s", want, view)
 		}
 	}
-	if app.showSidebar {
-		t.Fatal("sidebar should auto-hide after selecting a table")
+	if app.screen != screenBrowse {
+		t.Fatal("selecting a table should switch to the grid screen")
 	}
 }
 
@@ -199,8 +199,8 @@ func TestContinuousScroll(t *testing.T) {
 	}
 }
 
-// TestSidebarFilter drives the table-list filter (§7): `/` narrows the list as
-// you type, arrows move within matches, and Enter loads the highlighted table.
+// TestSidebarFilter drives the full-screen table list: typing narrows it (no
+// `/`), arrows move within matches, and Enter loads the highlighted table.
 func TestSidebarFilter(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -218,15 +218,14 @@ func TestSidebarFilter(t *testing.T) {
 	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if app.screen != screenTables {
+		t.Fatalf("should land on the table list, got screen %d", app.screen)
+	}
 	if len(app.sidebar.tables) != 4 {
-		t.Fatalf("sidebar should list 4 tables, got %d", len(app.sidebar.tables))
+		t.Fatalf("table list should have 4 tables, got %d", len(app.sidebar.tables))
 	}
 
-	// `/` enters filter mode; typing "order" narrows to orders + order_items.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	if !app.sidebar.filtering {
-		t.Fatal("`/` should enter filter mode")
-	}
+	// Typing narrows immediately — no `/`. "order" → orders + order_items.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("order")})
 	if len(app.sidebar.visible) != 2 {
 		t.Fatalf("filter %q matched %d tables, want 2", "order", len(app.sidebar.visible))
@@ -235,7 +234,7 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatalf("cursor should sit on first match order_items, got %q", t0.Name)
 	}
 
-	// Backspace re-widens the match set; a non-matching filter empties it.
+	// Backspace re-widens the match set.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	if len(app.sidebar.visible) != 2 { // "orde" still matches both
 		t.Fatalf("after backspace, matched %d, want 2", len(app.sidebar.visible))
@@ -250,44 +249,34 @@ func TestSidebarFilter(t *testing.T) {
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd == nil {
-		t.Fatal("Enter in filter mode should load the highlighted table")
-	}
-	if app.sidebar.filtering {
-		t.Fatal("Enter should leave filter mode")
+		t.Fatal("Enter should load the highlighted table")
 	}
 	app = update(t, app, cmd())
 	if app.status != "orders" {
 		t.Fatalf("loaded table = %q, want orders", app.status)
 	}
-	if app.showSidebar {
-		t.Fatal("sidebar should auto-hide after loading a table")
+	if app.screen != screenBrowse {
+		t.Fatal("loading a table should switch to the grid screen")
 	}
 
-	// Reopening the sidebar keeps the filter active (narrowed, no longer typing).
+	// t returns to the table list, keeping the filter narrowed.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	if app.sidebar.filtering {
-		t.Fatal("reopened sidebar should not be in typing mode")
+	if app.screen != screenTables {
+		t.Fatal("t should return to the table list")
 	}
 	if len(app.sidebar.visible) != 2 {
-		t.Fatalf("reopened sidebar should keep the %q filter (2 matches), got %d", "orde", len(app.sidebar.visible))
+		t.Fatalf("table list should keep the %q filter (2 matches), got %d", "orde", len(app.sidebar.visible))
 	}
-	// Esc in normal nav clears the active filter and restores the full list.
+	// Esc clears the active filter and restores the full list.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
 	if app.sidebar.hasFilter() || len(app.sidebar.visible) != 4 {
-		t.Fatalf("Esc should clear the active filter; hasFilter=%v visible=%d",
+		t.Fatalf("Esc should clear the filter; hasFilter=%v visible=%d",
 			app.sidebar.hasFilter(), len(app.sidebar.visible))
 	}
-
-	// Esc cancels an in-progress filter without loading anything.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("prod")})
-	if len(app.sidebar.visible) != 1 {
-		t.Fatalf("filter %q matched %d, want 1", "prod", len(app.sidebar.visible))
-	}
+	// Esc again (no filter) returns to the grid.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
-	if app.sidebar.filtering || len(app.sidebar.visible) != 4 {
-		t.Fatalf("Esc should cancel filter and restore all 4 tables, filtering=%v visible=%d",
-			app.sidebar.filtering, len(app.sidebar.visible))
+	if app.screen != screenBrowse {
+		t.Fatal("Esc with no filter should return to the grid")
 	}
 }
 
