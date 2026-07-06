@@ -26,7 +26,7 @@ don't exist yet.** What's really here:
 
 ```
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea
-internal/config/config.go   # load read-only connections.toml (url, read_only, cmd)
+internal/config/config.go   # load connections.toml, read-only (url, cmd)
 internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
@@ -125,9 +125,8 @@ the SQL (`isReadSQL`): a **read** (`s` SELECT-likes) runs via `runQueryCmd` →
 `queryResultMsg`, shown in the grid with `adHoc=true` (no table provenance → not
 editable, and J/K/`/` are guarded off since they'd re-query the table); a
 **write** (E/o/D/p, or an `s` mutation) runs **verbatim** via `execRawCmd`, then
-the view reloads. Note WITH counts as a write, and the write branch is where the
-`read_only` guard for free-form `s` mutations lives. This is the deliberate
-exception to invariant 6 — full-path SQL is user-authored and inlined
+the view reloads. Note WITH counts as a write. This is the deliberate
+exception to invariant 5 — full-path SQL is user-authored and inlined
 (`sqlLiteral`), not parameter-bound.
 
 `s` (`App.scratchSeed`) prefills the `selectTemplate` for the current table, or
@@ -148,10 +147,8 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
    After exec, warn loudly if affected != 1 (see `editDoneMsg` in `app.go`).
 3. **Editability** (`grid.editable()`): single-table select + resolved PK + every
    PK column present in the result. Otherwise edit keys are inert.
-4. **`read_only` gates before editability.** Any new edit key (`E`/`o`/`D`/`p`)
-   must check `a.readOnly` first, like the `"e"` handler does.
-5. **jsq only ever reads `connections.toml`.** No write path. Keep it so.
-6. **Bind values as parameters** (`Placeholder(i)` + args) — filter patterns,
+4. **jsq only ever reads `connections.toml`.** No write path. Keep it so.
+5. **Bind values as parameters** (`Placeholder(i)` + args) — filter patterns,
    quick-path edit values, PK predicates. Only identifiers are interpolated, via
    `QuoteIdent`. **Sole exception:** the `$EDITOR` full path runs user-authored
    SQL verbatim (values inlined by `sqlLiteral`) — that's the documented model,

@@ -14,8 +14,8 @@ type myEngine struct {
 	db *sql.DB
 }
 
-func openMySQL(ctx context.Context, rawurl string, readOnly bool) (Engine, error) {
-	dsn, err := mysqlDSN(rawurl, readOnly)
+func openMySQL(ctx context.Context, rawurl string) (Engine, error) {
+	dsn, err := mysqlDSN(rawurl)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func openMySQL(ctx context.Context, rawurl string, readOnly bool) (Engine, error
 
 // mysqlDSN converts a mysql:// URL into the go-sql-driver DSN, using the
 // driver's own Config so passwords/params are escaped correctly.
-func mysqlDSN(rawurl string, readOnly bool) (string, error) {
+func mysqlDSN(rawurl string) (string, error) {
 	u, err := url.Parse(rawurl)
 	if err != nil {
 		return "", err
@@ -59,16 +59,6 @@ func mysqlDSN(rawurl string, readOnly bool) (string, error) {
 		for k := range q {
 			cfg.Params[k] = q.Get(k)
 		}
-	}
-	if readOnly {
-		if cfg.Params == nil {
-			cfg.Params = map[string]string{}
-		}
-		// go-sql-driver sends unrecognized params as `SET SESSION <var>=<val>` on
-		// each new connection, so this makes every transaction on the pool
-		// read-only and the server rejects writes the keyword guard would miss.
-		// (transaction_read_only: MySQL 5.7.20+/8.0; older MariaDB lacks it.)
-		cfg.Params["transaction_read_only"] = "ON"
 	}
 	return cfg.FormatDSN(), nil
 }

@@ -34,8 +34,7 @@ func dbErr(ctx context.Context, err error) tea.Msg {
 
 // connectCmd runs the whole connect flow off the Update loop (§6 async rule):
 // start the `cmd` helper (if any) and wait for the URL's host:port, then open
-// the engine and list tables. read_only is enforced at the DB session level too,
-// not just by the app-layer guard. The helper is registered globally the instant
+// the engine and list tables. The helper is registered globally the instant
 // it starts (KillRunHelpers reaps it on exit); on any failure here we kill it.
 func connectCmd(c config.Conn) tea.Cmd {
 	return func() tea.Msg {
@@ -56,7 +55,7 @@ func connectCmd(c config.Conn) tea.Cmd {
 				}
 			}
 		}
-		eng, err := db.Open(ctx, c.URL, db.ReadOnly(c.ReadOnly))
+		eng, err := db.Open(ctx, c.URL)
 		if err != nil {
 			proc.kill()
 			return connectErrMsg{err}
@@ -134,7 +133,7 @@ func openEngineCmd(old db.Engine, c config.Conn, dsn string, startTunnel bool) t
 				}
 			}
 		}
-		eng, err := db.Open(ctx, dsn, db.ReadOnly(c.ReadOnly))
+		eng, err := db.Open(ctx, dsn)
 		if err != nil {
 			return errMsg{err}
 		}

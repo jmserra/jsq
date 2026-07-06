@@ -29,7 +29,6 @@ type App struct {
 	picker picker
 
 	connName   string
-	readOnly   bool            // connection refuses mutations (read_only in config)
 	pending    config.Conn     // the direct/selected connection (empty URL → picker); cmd lives here
 	tunneled   map[string]bool // connections whose `cmd` tunnel is already up (don't re-run it)
 	connecting bool            // a connect is in flight (guards a double-select on the picker)
@@ -82,13 +81,12 @@ type App struct {
 }
 
 // New builds the root model. If direct.URL != "", it connects to that connection
-// directly; else it shows the picker. readOnly/cmd all ride along on direct (§8).
+// directly; else it shows the picker. cmd rides along on direct (§8).
 func New(conns []config.Conn, direct config.Conn) App {
 	a := App{
 		picker:    picker{conns: conns},
 		grid:      newGrid(),
 		connName:  direct.Name,
-		readOnly:  direct.ReadOnly,
 		pending:   direct,
 		lastQuery: map[db.Table]string{},
 		viewIdx:   -1,
@@ -288,17 +286,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.remember.Name != "" {
 			a.lastQuery[msg.remember] = msg.sql
 		}
-		// A read (s) shows its rows; a mutation runs via Exec — and is refused on a
-		// read-only connection (the s mutation guard; E/o/D/p are already blocked
-		// at the key).
+		// A read (s) shows its rows; a mutation runs via Exec.
 		if isReadSQL(msg.sql) {
 			ctx := a.begin("running query")
 			a.status = "running query…"
 			return a, runQueryCmd(ctx, a.engine, msg.sql)
-		}
-		if a.readOnly {
-			a.status = "read-only connection — statement not run"
-			return a, nil
 		}
 		ctx := a.begin("running")
 		a.status = "running…"
@@ -505,7 +497,7 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.syncCurrent() // capture the current view before changing identity
-	a.connName, a.readOnly, a.pending = c.Name, c.ReadOnly, c
+	a.connName, a.pending = c.Name, c
 	a.connecting = true
 	a.status = "connecting to " + c.Name + "…"
 	if a.engine == nil { // initial connect (startup): connectCmd, quits on failure
@@ -576,7 +568,7 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 	dsn := db.WithDatabase(a.pending.URL, name)
 	a.pending.URL = dsn // so a later T swaps from the new database
 	a.status = "connecting to " + name + "…"
-	return a, openEngineCmd(a.engine, config.Conn{Name: a.connName, ReadOnly: a.readOnly}, dsn, false)
+	return a, openEngineCmd(a.engine, config.Conn{Name: a.connName}, dsn, false)
 }
 
 // handleTablesKey drives the full-screen table list: typing narrows it (no `/`),
@@ -721,7 +713,7 @@ func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
 		if v.db != "" {
 			dsn = db.WithDatabase(c.URL, v.db)
 		}
-		a.connName, a.readOnly, a.pending = c.Name, c.ReadOnly, c
+		a.connName, a.pending = c.Name, c
 		vv := v
 		a.pendingView = &vv
 		start := !a.tunneled[c.Name]
@@ -737,7 +729,7 @@ func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
 		vv := v
 		a.pendingView = &vv
 		a.status = "connecting to " + v.db + "…"
-		return a, openEngineCmd(a.engine, config.Conn{Name: a.connName, ReadOnly: a.readOnly}, dsn, false)
+		return a, openEngineCmd(a.engine, config.Conn{Name: a.connName}, dsn, false)
 	}
 	return a.loadView(v, "loading "+v.table.Name)
 }
@@ -912,27 +904,21 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, a.loadCurrentCmd(ctx)
 		}
 	case "e":
-		if a.readOnly {
-			a.status = "read-only connection — editing disabled"
-		} else if !a.grid.editable() {
+		if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if a.grid.startEdit() {
 			a.status = "editing " + a.grid.cols[a.grid.editC].name + " — Enter saves, Esc cancels"
 		}
 		return a, nil
 	case "E":
-		if a.readOnly {
-			a.status = "read-only connection — editing disabled"
-		} else if !a.grid.editable() {
+		if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if col, val, keys, ok := a.grid.fullEditTarget(); ok {
 			return a, editorCmd(buildUpdateStmt(a.engine, a.grid.table, col, val, keys))
 		}
 		return a, nil
 	case "o":
-		if a.readOnly {
-			a.status = "read-only connection — editing disabled"
-		} else if !a.grid.editable() {
+		if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else {
 			ctx := a.begin("preparing insert")
@@ -941,18 +927,14 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "D":
-		if a.readOnly {
-			a.status = "read-only connection — editing disabled"
-		} else if !a.grid.editable() {
+		if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if keys, ok := a.grid.rowKeys(); ok {
 			return a, editorCmd(buildDeleteStmt(a.engine, a.grid.table, keys))
 		}
 		return a, nil
 	case "p":
-		if a.readOnly {
-			a.status = "read-only connection — editing disabled"
-		} else if !a.grid.editable() {
+		if !a.grid.editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if vals, ok := a.grid.currentRowValues(); ok {
 			ctx := a.begin("preparing duplicate")

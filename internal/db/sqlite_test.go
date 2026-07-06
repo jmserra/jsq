@@ -26,45 +26,6 @@ func mustExec(t *testing.T, e Engine, q string) {
 	}
 }
 
-func TestSQLiteReadOnlyEnforced(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "ro.db")
-
-	// Seed the file with a read-write connection.
-	rw, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustExec(t, rw, `CREATE TABLE t (id INTEGER PRIMARY KEY, n TEXT)`)
-	mustExec(t, rw, `INSERT INTO t (n) VALUES ('a')`)
-	rw.Close()
-
-	ro, err := Open(ctx, path, ReadOnly(true))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ro.Close()
-
-	// Reads still work.
-	rs, err := ro.Query(ctx, "SELECT id, n FROM t")
-	if err != nil {
-		t.Fatalf("read on read-only conn: %v", err)
-	}
-	if len(rs.Rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rs.Rows))
-	}
-
-	// Writes are refused by the engine itself, even though the app-layer guard is
-	// bypassed here (Exec is called directly). This is the backstop for statements
-	// the keyword classifier would misroute (EXPLAIN ANALYZE <DML>, write PRAGMAs…).
-	if _, err := ro.Exec(ctx, `INSERT INTO t (n) VALUES ('b')`); err == nil {
-		t.Fatal("INSERT succeeded on a read-only connection; want it refused")
-	}
-	if _, err := ro.Exec(ctx, `UPDATE t SET n = 'z'`); err == nil {
-		t.Fatal("UPDATE succeeded on a read-only connection; want it refused")
-	}
-}
-
 func TestSQLiteColumnsUnique(t *testing.T) {
 	ctx := context.Background()
 	e, err := Open(ctx, filepath.Join(t.TempDir(), "u.db"))

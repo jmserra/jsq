@@ -88,10 +88,6 @@ url = "mysql://user@localhost:3306/mydb"
 [notes]
 url = "sqlite:///path/to/notes.db"   # or just: "./notes.db"
 
-[prod-ro]
-url = "postgres://user@prod.example.com:5432/app"
-read_only = true              # jsq refuses all mutations on this connection
-
 [kube]
 url = "postgres://user@localhost:5432/app"
 cmd = "kubectl port-forward svc/db 5432:5432"  # started before connecting, killed on exit
@@ -146,7 +142,7 @@ is continuous** — reaching the loaded edge fetches the next window; there are 
 pages. The grid opens sorted by primary key, newest first.
 
 **Editing** with `e` is available only when the grid came from a single-table
-select with a resolved primary key, and the connection isn't `read_only`. The
+select with a resolved primary key. The
 `UPDATE` is always keyed on the full primary key and runs immediately; the status
 line reports what changed. A bare `Enter` that changed nothing (including an
 untouched `NULL` cell) does nothing — so you can't blank a value by accident. For
@@ -348,14 +344,8 @@ table provenance, so sort/filter/scroll don't apply), a **write** runs via `Exec
 and reloads the current table with the affected count. Classification errs safe —
 only a leading `SELECT`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`/`PRAGMA`/`DESCRIBE`
 counts as a read; everything else, **including any `WITH …`**, is a mutation (a
-data-modifying CTE like `WITH … DELETE` also leads with `WITH`, and the write path
-is where a `read_only` connection refuses to run it). That keyword check is only
-the first line, though: a `read_only` connection is **also opened read-only at the
-database session level** (Postgres `default_transaction_read_only`, MySQL
-`transaction_read_only`, SQLite `query_only`), so anything the classifier misroutes
-to the read path yet still mutates — `EXPLAIN ANALYZE <DML>`, a volatile function
-in a `SELECT`, a write `PRAGMA` — is refused by the server itself. An empty buffer
-or `:q!` aborts.
+data-modifying CTE like `WITH … DELETE` also leads with `WITH`, so it routes to
+the write path). An empty buffer or `:q!` aborts.
 
 ### Query history *(roadmap)*
 
@@ -383,8 +373,6 @@ batching, no staged diff, no commit step. Each statement autocommits.
 
 A grid is editable **only** when its rows came from a single-table select and jsq
 resolved a primary key. Otherwise edit keys are inert (status line says why).
-**Connections are editable by default** — the sole opt-out is `read_only = true`
-on a connection, which disables all mutation regardless.
 
 ### Two-speed editing
 
@@ -427,7 +415,7 @@ on a connection, which disables all mutation regardless.
 ## Configuration
 
 - `~/.config/jsq/connections.toml` — connections (above), app-read-only. Per
-  connection: `url`, `read_only`, and the tunnel command `cmd`.
+  connection: `url` and the tunnel command `cmd`.
 - Env: `$JSQ_CONFIG` (file location) and `$EDITOR`. A connection's `cmd` runs
   under `sh -c`. Keybindings are compiled in; a keymap override file is a
   possible later addition.

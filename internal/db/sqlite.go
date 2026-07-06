@@ -13,20 +13,9 @@ type sqliteEngine struct {
 	db *sql.DB
 }
 
-func openSQLite(ctx context.Context, dsn string, readOnly bool) (Engine, error) {
+func openSQLite(ctx context.Context, dsn string) (Engine, error) {
 	path := sqlitePath(dsn)
-	conn := path
-	if readOnly {
-		// query_only rejects any write (INSERT/UPDATE/DELETE/DDL) with
-		// SQLITE_READONLY. modernc runs _pragma on every new pooled connection,
-		// so the whole engine is read-only regardless of pool size.
-		sep := "?"
-		if strings.Contains(conn, "?") {
-			sep = "&"
-		}
-		conn += sep + "_pragma=query_only(1)"
-	}
-	sdb, err := sql.Open("sqlite", conn)
+	sdb, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}

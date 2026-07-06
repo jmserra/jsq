@@ -282,7 +282,7 @@ func TestSidebarFilter(t *testing.T) {
 
 // loadTable is the shared setup: open a fresh sqlite db, run schema/seed, and
 // drive the model up to a loaded grid.
-func loadTable(t *testing.T, readOnly bool, seed func(e db.Engine)) App {
+func loadTable(t *testing.T, seed func(e db.Engine)) App {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -293,7 +293,7 @@ func loadTable(t *testing.T, readOnly bool, seed func(e db.Engine)) App {
 	seed(e)
 	e.Close()
 
-	app := New(nil, config.Conn{URL: path, Name: "test", ReadOnly: readOnly})
+	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load the (only) table
@@ -314,7 +314,7 @@ func typeRunes(t *testing.T, app App, s string) App {
 // value → Enter runs the keyed UPDATE, the grid reflects it, and the DB is
 // actually changed.
 func TestQuickEditCell(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
@@ -365,27 +365,10 @@ func TestQuickEditCell(t *testing.T) {
 	}
 }
 
-// TestQuickEditReadOnly verifies a read-only connection refuses the edit key.
-func TestQuickEditReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if app.grid.editing {
-		t.Fatal("read-only connection must not enter edit mode")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
-	}
-}
-
 // TestQuickEditUntouchedNullNoop guards §8: a bare Enter on an untouched NULL
 // cell is a no-op — it must not blank the value to an empty string.
 func TestQuickEditUntouchedNullNoop(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (id, name) VALUES (1, NULL)`)
@@ -416,7 +399,7 @@ func TestQuickEditUntouchedNullNoop(t *testing.T) {
 // runs it verbatim and reloads the grid to reflect the change. The $EDITOR spawn
 // lives in editorCmd and isn't driven here (no editor in tests).
 func TestFullEditRunsEditedSQL(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
@@ -486,25 +469,6 @@ func TestFullEditRunsEditedSQL(t *testing.T) {
 	}
 	if !strings.Contains(app.status, "cancel") {
 		t.Fatalf("status should note the cancel, got %q", app.status)
-	}
-}
-
-// TestFullEditReadOnly verifies E is refused on a read-only connection and never
-// opens an editor.
-func TestFullEditReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("read-only E must not open an editor")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
 	}
 }
 
@@ -683,7 +647,7 @@ func TestBuildInsertStmt(t *testing.T) {
 // TestBlankInsert drives the o full path at the message boundary: o fetches
 // columns and yields a seed, and submitting a filled INSERT runs it and reloads.
 func TestBlankInsert(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
@@ -718,23 +682,6 @@ func TestBlankInsert(t *testing.T) {
 	// Default PK-descending order puts the new (id=2) row on top of the reload.
 	if len(app.grid.rows) != 2 {
 		t.Fatalf("grid should show 2 rows after insert, got %d", len(app.grid.rows))
-	}
-}
-
-// TestBlankInsertReadOnly verifies o is refused on a read-only connection.
-func TestBlankInsertReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("read-only o must not prepare an insert")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
 	}
 }
 
@@ -780,7 +727,7 @@ func TestBuildDuplicateStmt(t *testing.T) {
 // TestDuplicateRow drives the p full path: p captures the current row, fetches
 // columns, and yields a pre-filled INSERT; submitting it clones the row.
 func TestDuplicateRow(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name, email) VALUES ('Ada','ada@x.io')`)
@@ -821,27 +768,10 @@ func TestDuplicateRow(t *testing.T) {
 	}
 }
 
-// TestDuplicateReadOnly verifies p is refused on a read-only connection.
-func TestDuplicateReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("read-only p must not prepare a duplicate")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
-	}
-}
-
 // TestDeleteRow drives the D full path: D yields a PK-keyed DELETE, and
 // submitting it (as if :wq) removes the row and reloads.
 func TestDeleteRow(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
@@ -896,28 +826,11 @@ func TestBuildDeleteComposite(t *testing.T) {
 	}
 }
 
-// TestDeleteReadOnly verifies D is refused on a read-only connection.
-func TestDeleteReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("read-only D must not open an editor")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
-	}
-}
-
 // TestActivityIndicator drives the header activity indicator + Esc-cancel: a DB
 // op sets an in-flight label the header shows, the spinner ticks, and Esc kills
 // the op (clearing the label) without surfacing an error.
 func TestActivityIndicator(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
@@ -982,7 +895,7 @@ func TestCanceledSwallowed(t *testing.T) {
 // bindings, toggles shut, and — crucially — `?` typed into a filter stays
 // literal rather than opening help.
 func TestHelpOverlay(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
@@ -1054,7 +967,7 @@ func TestSelectTemplate(t *testing.T) {
 // TestScratchQuery drives the s read path: submitting a SELECT runs it and shows
 // the rows as a read-only (non-editable, non-sortable) result pane.
 func TestScratchQuery(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
@@ -1099,43 +1012,10 @@ func TestScratchQuery(t *testing.T) {
 	}
 }
 
-// TestScratchMutationReadOnly verifies a read-only connection refuses a free-form
-// mutation but still runs a free-form read.
-func TestScratchMutationReadOnly(t *testing.T) {
-	app := loadTable(t, true, func(e db.Engine) {
-		ctx := context.Background()
-		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
-		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
-	})
-
-	m, cmd := app.Update(editorSubmitMsg{sql: `INSERT INTO users (name) VALUES ('X');`})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("read-only must refuse a free-form mutation")
-	}
-	if !strings.Contains(app.status, "read-only") {
-		t.Fatalf("status should explain the refusal, got %q", app.status)
-	}
-	rs, _ := app.engine.Query(context.Background(), `SELECT count(*) FROM users`)
-	if rs.Rows[0][0] != int64(1) {
-		t.Fatalf("mutation must not have run; row count = %v", rs.Rows[0][0])
-	}
-
-	// A read is still allowed.
-	m, cmd = app.Update(editorSubmitMsg{sql: `SELECT * FROM users;`})
-	app = m.(App)
-	if cmd == nil {
-		t.Fatal("a read should run even on a read-only connection")
-	}
-	if _, ok := cmd().(queryResultMsg); !ok {
-		t.Fatalf("a read submit should produce a query result")
-	}
-}
-
 // TestScratchRemembersLastQuery covers the edit-run-edit loop: s prefills the
 // SELECT template first, then your last query on that table, keyed per table.
 func TestScratchRemembersLastQuery(t *testing.T) {
-	app := loadTable(t, false, func(e db.Engine) {
+	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)

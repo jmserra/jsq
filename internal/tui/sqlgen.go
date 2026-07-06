@@ -232,8 +232,7 @@ func leadingKeyword(sql string) string {
 // isReadSQL reports whether a free-form statement (s/S) is a read that should
 // display its rows, vs a mutation that runs via Exec. Errs safe: only plainly
 // read-only leading verbs count — notably WITH does not, since a data-modifying
-// CTE (WITH … DELETE) also leads with WITH, and routing it to the read path would
-// bypass the read_only guard.
+// CTE (WITH … DELETE) also leads with WITH, and it must route to the write path.
 func isReadSQL(sql string) bool {
 	switch leadingKeyword(sql) {
 	case "SELECT", "VALUES", "TABLE", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE", "DESC":

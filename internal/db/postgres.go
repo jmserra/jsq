@@ -14,17 +14,10 @@ type pgEngine struct {
 	db *sql.DB
 }
 
-func openPostgres(ctx context.Context, dsn string, readOnly bool) (Engine, error) {
+func openPostgres(ctx context.Context, dsn string) (Engine, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
-	}
-	if readOnly {
-		// default_transaction_read_only makes every transaction — including the
-		// implicit one wrapping a bare statement — read-only, so the server
-		// refuses writes the app-layer keyword guard would miss. Sent on every
-		// connection via the startup packet, so it covers the whole pool.
-		cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	}
 	sdb, err := sql.Open("pgx", stdlib.RegisterConnConfig(cfg))
 	if err != nil {

@@ -1,6 +1,6 @@
-// Package config loads the read-only connections file (see README.md).
-// The file is TOML with one section per connection; the section header is the
-// connection name. jsq never writes this file.
+// Package config loads the connections file (see README.md). jsq only ever
+// reads this file. The file is TOML with one section per connection; the
+// section header is the connection name.
 package config
 
 import (
@@ -13,9 +13,8 @@ import (
 
 // Conn is one connection entry. Name comes from the section header.
 type Conn struct {
-	Name     string `toml:"-"`
-	URL      string `toml:"url"`
-	ReadOnly bool   `toml:"read_only"`
+	Name string `toml:"-"`
+	URL  string `toml:"url"`
 
 	// Cmd is a shell command started before connecting and kept alive for the
 	// whole session (e.g. a port-forward), then terminated on exit. When set, jsq
