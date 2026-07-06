@@ -121,7 +121,8 @@ omits it).
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
 | `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row). FK columns are flagged with a `→` in the header |
-| `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort). `Ctrl-i` only works in terminals that distinguish it from `Tab` |
+| `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort). Most terminals send `Ctrl-i` as `Tab` — see below |
+| `` ` `` | open the jumplist picker — inspect every visited view and jump to any of them (`j`/`k` to move, `Enter` to go, `Esc` to close). Works regardless of terminal |
 | `Esc` | kill the running query (while one is in flight), else clear the current column's filter |
 | `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
 | `E` | edit the current cell in `$EDITOR` — opens the generated keyed `UPDATE` with the value pre-selected (vim/nvim); `:wq` runs it, `:q!` or an empty buffer aborts |
@@ -129,9 +130,9 @@ omits it).
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
-| `H` | toggle the table sidebar (focuses it; auto-hides on select) |
+| `t` | toggle the table list (focuses it; auto-hides on select) |
 | `Enter` (sidebar) | open the selected table |
-| `Tab` / `Shift-Tab` | cycle focus between sidebar and grid |
+| `Tab` | while browsing the grid, step the jumplist **forward** (this is where a `Ctrl-i` lands); with the sidebar open, cycle focus between sidebar and grid |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
@@ -273,7 +274,7 @@ Two panes — a declutter-first layout with an on-demand sidebar:
   activity indicator — a spinner and label (`running query`, `loading`, …) that
   appears only while a DB op is in flight and offers `esc` to kill it.
 - **Sidebar is on-demand.** Hidden by default; the results pane is the star. The
-  switch-table loop is `H` → `j`/`k` or `/` to find it → `Enter`: `H` brings the
+  switch-table loop is `t` → `j`/`k` or `/` to find it → `Enter`: `t` brings the
   sidebar back **focused**, `Enter` loads the table and the sidebar auto-hides.
 - **Flat, filterable table list — no tree.** jsq opens straight into the database
   named by the connection; the sidebar is a single flat list of that database's

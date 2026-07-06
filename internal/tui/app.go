@@ -61,14 +61,15 @@ type App struct {
 	sortCol      string
 	sortAsc      bool
 
-	// Jumplist (vim Ctrl-O / Ctrl-I): each navigation (follow FK, pick a table)
-	// pushes the current view onto jumpBack and clears jumpFwd; back/forward walk
-	// the two stacks. A view is {table, FK-filter, sort} — column filters aren't
-	// captured.
-	jumpBack  []viewState
-	jumpFwd   []viewState
-	resetGrid bool // reset cursor on next rows load (new table, not a re-sort)
-	adHoc     bool // grid shows a free-form (s) query result, not a table
+	// Jumplist: visited views oldest→newest with viewIdx marking the current one.
+	// Ctrl-O/Ctrl-I step it; the ` picker jumps to any entry. A new navigation
+	// truncates the forward tail and appends. A view is {table, FK-filter, sort}
+	// (column filters aren't captured).
+	views     []viewState
+	viewIdx   int      // index of the current view; -1 before the first
+	jumps     jumpView // the `-key jumplist picker overlay
+	resetGrid bool     // reset cursor on next rows load (new table, not a re-sort)
+	adHoc     bool     // grid shows a free-form (s) query result, not a table
 
 	lastQuery map[db.Table]string // per-table last scratch (s) query, for the edit loop
 
@@ -97,6 +98,7 @@ func New(conns []config.Conn, direct config.Conn) App {
 		pending:     direct,
 		showSidebar: true,
 		lastQuery:   map[db.Table]string{},
+		viewIdx:     -1,
 	}
 	if direct.URL != "" {
 		a.screen = screenBrowse
@@ -375,6 +377,25 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	// Jumplist picker captures keys while open; Enter jumps to the highlighted view.
+	if a.jumps.active {
+		switch msg.String() {
+		case "esc", "q", "`":
+			a.jumps.active = false
+		case "j", "down":
+			a.jumps.move(1)
+		case "k", "up":
+			a.jumps.move(-1)
+		case "g":
+			a.jumps.cursor = 0
+		case "G":
+			a.jumps.move(len(a.jumps.entries))
+		case "enter":
+			a.jumps.active = false
+			return a.jumpTo(a.jumps.cursor)
+		}
+		return a, nil
+	}
 	// While editing a cell (§8 quick path), keys go to the edit overlay.
 	if a.screen == screenBrowse && a.grid.editing {
 		return a.handleEditKey(msg)
@@ -392,6 +413,15 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// stays literal).
 	if a.screen == screenBrowse && msg.String() == "?" {
 		a.help.open(a.w-leftPad, a.h-1)
+		return a, nil
+	}
+	// ` opens the jumplist picker (inspect history, jump anywhere).
+	if a.screen == screenBrowse && msg.String() == "`" {
+		if len(a.views) == 0 {
+			a.status = "no navigation history yet"
+			return a, nil
+		}
+		a.jumps.open(a.jumpEntries(), a.viewIdx, a.w-leftPad, a.h-1)
 		return a, nil
 	}
 	// Esc kills an in-flight DB op (a slow query, a big load). This takes
@@ -435,10 +465,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenBrowse:
 		switch msg.String() {
 		case "ctrl+o": // jumplist back (vim Ctrl-O)
-			return a.jump(true)
+			return a.jumpBy(-1)
 		case "ctrl+i": // jumplist forward — note: many terminals send this as Tab
-			return a.jump(false)
-		case "H":
+			return a.jumpBy(1)
+		case "t":
+			// Toggle the table list, focusing it when shown.
 			a.showSidebar = !a.showSidebar
 			if a.showSidebar {
 				a.focus = focusSidebar
@@ -448,12 +479,18 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.layout()
 			return a, nil
 		case "tab":
-			if a.focus == focusSidebar {
-				a.focus = focusGrid
-			} else if a.showSidebar {
-				a.focus = focusSidebar
+			// With the sidebar up, Tab cycles focus. While browsing the grid
+			// (sidebar hidden) it steps the jumplist forward — this is also where a
+			// kitty-style Ctrl-I lands, since terminals send it as Tab.
+			if a.showSidebar {
+				if a.focus == focusSidebar {
+					a.focus = focusGrid
+				} else {
+					a.focus = focusSidebar
+				}
+				return a, nil
 			}
-			return a, nil
+			return a.jumpBy(1)
 		}
 		if a.showSidebar && a.focus == focusSidebar {
 			return a.handleSidebarKey(msg)
@@ -532,17 +569,70 @@ func (a App) currentView() viewState {
 	}
 }
 
-// pushJump records the current view before a navigation, and drops the forward
-// history (a new jump starts a new branch). A no-op before the first table.
-func (a *App) pushJump() {
-	if a.currentTable.Name == "" {
-		return
+// label is the jumplist picker's one-line description of a view.
+func (v viewState) label() string {
+	s := v.table.Name
+	if v.baseNote != "" {
+		s += " · " + v.baseNote
 	}
-	a.jumpBack = append(a.jumpBack, a.currentView())
-	if len(a.jumpBack) > 100 { // keep the list bounded
-		a.jumpBack = a.jumpBack[len(a.jumpBack)-100:]
+	return s
+}
+
+// syncCurrent refreshes the current entry with the live view (so a sort made
+// after arriving is remembered) before any jumplist move.
+func (a *App) syncCurrent() {
+	if a.viewIdx >= 0 && a.viewIdx < len(a.views) {
+		a.views[a.viewIdx] = a.currentView()
 	}
-	a.jumpFwd = nil
+}
+
+// navigate records v as a new jump (dropping any forward history) and loads it.
+func (a App) navigate(v viewState, label string) (tea.Model, tea.Cmd) {
+	a.syncCurrent()
+	// Truncate the forward tail and append; the 3-index slice forces a fresh
+	// backing array so the prior (value-copied) model isn't mutated.
+	a.views = append(a.views[:a.viewIdx+1:a.viewIdx+1], v)
+	if len(a.views) > 100 { // keep the list bounded
+		a.views = a.views[len(a.views)-100:]
+	}
+	a.viewIdx = len(a.views) - 1
+	return a.loadView(v, label)
+}
+
+// jumpBy steps the jumplist: d=-1 is Ctrl-O (back), d=+1 is Ctrl-I (forward).
+func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
+	a.syncCurrent()
+	ni := a.viewIdx + d
+	if ni < 0 || ni >= len(a.views) {
+		where := "back"
+		if d > 0 {
+			where = "forward"
+		}
+		a.status = "no view to go " + where + " to"
+		return a, nil
+	}
+	a.viewIdx = ni
+	return a.loadView(a.views[ni], "loading "+a.views[ni].table.Name)
+}
+
+// jumpEntries is the picker's label list, current view synced in first.
+func (a App) jumpEntries() []string {
+	a.syncCurrent()
+	out := make([]string, len(a.views))
+	for i, v := range a.views {
+		out[i] = v.label()
+	}
+	return out
+}
+
+// jumpTo loads the view at index i (the picker's Enter). Current/out-of-range → no-op.
+func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
+	a.syncCurrent()
+	if i < 0 || i >= len(a.views) || i == a.viewIdx {
+		return a, nil
+	}
+	a.viewIdx = i
+	return a.loadView(a.views[i], "loading "+a.views[i].table.Name)
 }
 
 // loadView switches to v and reloads it (default cursor, cleared column filters).
@@ -557,24 +647,6 @@ func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
 	ctx := a.begin(label)
 	a.status = label + "…"
 	return a, a.loadCurrentCmd(ctx)
-}
-
-// jump walks the jumplist: back=true is Ctrl-O, else Ctrl-I. The current view is
-// pushed onto the opposite stack so the move is reversible.
-func (a App) jump(back bool) (tea.Model, tea.Cmd) {
-	from, to := &a.jumpBack, &a.jumpFwd
-	if !back {
-		from, to = &a.jumpFwd, &a.jumpBack
-	}
-	if len(*from) == 0 {
-		a.status = "no view to go " + map[bool]string{true: "back", false: "forward"}[back] + " to"
-		return a, nil
-	}
-	*to = append(*to, a.currentView())
-	v := (*from)[len(*from)-1]
-	*from = (*from)[:len(*from)-1]
-	app, cmd := a.loadView(v, "loading "+v.table.Name)
-	return app, cmd
 }
 
 // follow navigates the foreign key on the cursor's column to the row it points
@@ -604,9 +676,8 @@ func (a App) follow() (tea.Model, tea.Cmd) {
 		}
 		preds = append(preds, eqPred{col: fk.RefColumns[i], val: v})
 	}
-	a.pushJump() // record a jump so Ctrl-O returns here
 	note := fmt.Sprintf("%s = %v", fk.RefColumns[0], row[fk.Columns[0]])
-	return a.loadView(viewState{
+	return a.navigate(viewState{
 		table:     db.Table{Schema: fk.RefTable.Schema, Name: fk.RefTable.Name},
 		basePreds: preds,
 		baseNote:  note,
@@ -617,10 +688,8 @@ func (a App) follow() (tea.Model, tea.Cmd) {
 // selectTable loads the given table into the grid with default sort and no
 // filters, and auto-hides the sidebar (handled on rowsMsg).
 func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
-	a.pushJump() // sidebar pick is a jump
 	// a fresh table from the sidebar is unfiltered, default (PK desc) sort.
-	app, cmd := a.loadView(viewState{table: t, sortAsc: true}, "loading "+t.Name)
-	return app, cmd
+	return a.navigate(viewState{table: t, sortAsc: true}, "loading "+t.Name)
 }
 
 // handleEditKey routes keys while a cell is being edited (§8 quick path). Enter
@@ -851,6 +920,10 @@ func (a App) browseView() string {
 	}
 	if a.cell.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
+		return a.statusLine() + "\n" + body
+	}
+	if a.jumps.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.jumps.View())
 		return a.statusLine() + "\n" + body
 	}
 	body := a.grid.View()

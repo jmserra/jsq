@@ -122,7 +122,7 @@ func TestJumplistBackForward(t *testing.T) {
 	}
 
 	// Forward → authors filtered again.
-	m, cmd = app.jump(false)
+	m, cmd = app.jumpBy(1)
 	app = m.(App)
 	if cmd == nil {
 		t.Fatal("forward should reload the followed view")
@@ -133,8 +133,72 @@ func TestJumplistBackForward(t *testing.T) {
 	}
 
 	// Nothing further forward.
-	if _, c := app.jump(false); c != nil {
+	if _, c := app.jumpBy(1); c != nil {
 		t.Fatal("no forward view should remain")
+	}
+
+	// While browsing the grid (sidebar hidden), Tab steps forward — this is where
+	// a kitty Ctrl-I lands too. Go back first so there's a forward view.
+	m, cmd = app.jumpBy(-1)
+	app = update(t, m.(App), cmd())
+	if app.currentTable.Name != "books" {
+		t.Fatalf("setup: expected books, got %q", app.currentTable.Name)
+	}
+	if app.showSidebar {
+		t.Fatal("sidebar should be hidden while browsing")
+	}
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyTab})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("Tab in the grid should step the jumplist forward")
+	}
+	app = update(t, app, cmd())
+	if app.currentTable.Name != "authors" {
+		t.Fatalf("Tab-forward should reach authors, got %q", app.currentTable.Name)
+	}
+}
+
+// TestJumplistPicker opens the ` picker and jumps to an arbitrary entry.
+func TestJumplistPicker(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "j.db")
+	e, _ := db.Open(ctx, path)
+	e.Exec(ctx, `CREATE TABLE a (id INTEGER PRIMARY KEY)`)
+	e.Exec(ctx, `CREATE TABLE b (id INTEGER PRIMARY KEY)`)
+	e.Exec(ctx, `CREATE TABLE c (id INTEGER PRIMARY KEY)`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "t"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	for _, name := range []string{"a", "b", "c"} {
+		m, cmd := app.selectTable(db.Table{Name: name})
+		app = update(t, m.(App), cmd())
+	}
+	if app.viewIdx != 2 || len(app.views) != 3 {
+		t.Fatalf("expected 3 views at idx 2, got idx=%d len=%d", app.viewIdx, len(app.views))
+	}
+
+	// Open the picker, move to the first entry (a), and jump.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("`")})
+	if !app.jumps.active || len(app.jumps.entries) != 3 {
+		t.Fatalf("picker should be open with 3 entries, got active=%v n=%d", app.jumps.active, len(app.jumps.entries))
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}) // top
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if app.jumps.active {
+		t.Fatal("Enter should close the picker")
+	}
+	app = update(t, app, cmd())
+	if app.currentTable.Name != "a" || app.viewIdx != 0 {
+		t.Fatalf("jumped to wrong view: table=%q idx=%d", app.currentTable.Name, app.viewIdx)
+	}
+	// Navigating from the middle truncates the forward tail.
+	m, cmd = app.selectTable(db.Table{Name: "b"})
+	app = update(t, m.(App), cmd())
+	if len(app.views) != 2 || app.viewIdx != 1 {
+		t.Fatalf("new jump from middle should truncate forward: len=%d idx=%d", len(app.views), app.viewIdx)
 	}
 }
 

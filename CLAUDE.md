@@ -81,13 +81,18 @@ AND-ed into every load via `whereClause`/`loadCmd`/`loadMoreCmd` and cleared by
 flagged in the header with `fkMarker` (`→`). Note grid cell values are
 driver-typed (sqlite ints come back `int64`, not string) — fine as bound params.
 
-**Jumplist** (`Ctrl-O` back / `Ctrl-I` forward, vim-style): a `viewState` is
-`{table, basePreds, baseNote, sort}` (column filters not captured). `pushJump`
-snapshots the current view before every navigation (follow FK, sidebar pick),
-clearing the forward stack; `jump(back)` moves between the two stacks; `loadView`
-is the shared restore-and-reload used by `selectTable`, follow, and jumps. Caveat:
-most terminals send `Ctrl-I` as `Tab` (jsq's focus-cycle key), so forward only
-works where the terminal distinguishes them; `Ctrl-O` is always unambiguous.
+**Jumplist**: `App.views` is the visited-view list (oldest→newest) with
+`viewIdx` the current one; a `viewState` is `{table, basePreds, baseNote, sort}`
+(column filters not captured). Every navigation goes through `navigate`, which
+`syncCurrent`s the live view into `views[viewIdx]`, truncates the forward tail,
+appends, and calls `loadView` (the shared restore-and-reload, also used by
+`selectTable` and `follow`). `Ctrl-O` is `jumpBy(-1)`; the `` ` `` overlay
+(`jumpView`, like `cellView`) is a picker over `views` — `jumpTo(i)` on Enter.
+Forward is `jumpBy(+1)`, reachable two ways: `Ctrl-I` (only where the terminal
+distinguishes it) **and** `Tab` while the sidebar is hidden — because on bubbletea
+v1 terminals send `Ctrl-I` as `Tab`, and Tab is otherwise a no-op while browsing
+the grid (it only cycles focus when the sidebar is up). The `` ` `` picker is the
+fully terminal-proof way to reach any view.
 
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a

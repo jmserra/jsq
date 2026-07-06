@@ -264,7 +264,7 @@ func TestSidebarFilter(t *testing.T) {
 	}
 
 	// Reopening the sidebar keeps the filter active (narrowed, no longer typing).
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	if app.sidebar.filtering {
 		t.Fatal("reopened sidebar should not be in typing mode")
 	}
