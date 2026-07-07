@@ -27,7 +27,7 @@ On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
 
 - **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back.
-- **Clipboard yank** (`y`/`Y`) and a **database picker**.
+- A **database picker**.
 - **Dismissible errors** — a failed statement currently shows a full-screen
   error; it should surface in the status line and let you continue.
 
@@ -122,6 +122,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `J` / `K` | sort current column ascending / descending |
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
+| `y` / `Y` | yank to the clipboard — `y` the current cell's value, `Y` the whole row as JSON. Uses an OSC 52 escape so it copies through the terminal (works over SSH; no `pbcopy`/`xclip` needed) |
 | `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row). FK columns are flagged with a `→` in the header |
 | `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort + **cursor position**). Recently-visited views restore instantly from an in-memory cache — no reload — so a jump lands exactly where you left; hit `r` to refresh if it looks stale. Most terminals send `Ctrl-i` as `Tab` — see below |
 | `` ` `` | open the jumplist picker — inspect every visited view and jump to any of them (`j`/`k` to move, `Enter` to go, `Esc` to close). Works regardless of terminal |

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -600,6 +602,68 @@ func (g *grid) currentRowMap() (map[string]any, bool) {
 		}
 	}
 	return vals, true
+}
+
+// yankCell returns the cursor cell's value as plain text for the y yank — the
+// raw driver value, without the display substitutions cellString makes. NULL
+// yanks as an empty string. ok is false when there's no cell under the cursor.
+func (g *grid) yankCell() (string, bool) {
+	v, _, ok := g.currentCell()
+	if !ok {
+		return "", false
+	}
+	return valueText(v), true
+}
+
+// currentRowJSON renders the cursor row as a JSON object for the Y yank, keeping
+// the column order (a plain map would sort the keys). ok is false when there's
+// no row under the cursor.
+func (g *grid) currentRowJSON() (string, bool) {
+	if g.cursorR >= len(g.visible) {
+		return "", false
+	}
+	row := g.rows[g.visible[g.cursorR]]
+	var compact strings.Builder
+	compact.WriteByte('{')
+	for i, c := range g.cols {
+		if i > 0 {
+			compact.WriteByte(',')
+		}
+		key, _ := json.Marshal(c.name)
+		compact.Write(key)
+		compact.WriteByte(':')
+		var v any
+		if i < len(row) {
+			v = row[i]
+		}
+		if bs, ok := v.([]byte); ok {
+			v = string(bs)
+		}
+		val, err := json.Marshal(v)
+		if err != nil {
+			val, _ = json.Marshal(valueText(v))
+		}
+		compact.Write(val)
+	}
+	compact.WriteByte('}')
+	var out bytes.Buffer
+	if err := json.Indent(&out, []byte(compact.String()), "", "  "); err != nil {
+		return compact.String(), true
+	}
+	return out.String(), true
+}
+
+// valueText is the plain-text form of a driver value for yanking: the raw string
+// for []byte, empty for NULL, else fmt's default. No newline/tab substitution.
+func valueText(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case []byte:
+		return string(t)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // applyEdit writes the committed value back into the in-memory row so the grid

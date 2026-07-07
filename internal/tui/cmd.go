@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
@@ -20,6 +21,17 @@ const spinnerInterval = 100 * time.Millisecond
 // tickCmd schedules the next spinner frame.
 func tickCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// yankCmd copies s to the system clipboard via an OSC 52 escape sequence — it
+// goes through the terminal, so it works over SSH with no external binary and
+// stays cgo-free. It's written to stderr (a single atomic write) so it never
+// interleaves with bubbletea's stdout render stream.
+func yankCmd(s string) tea.Cmd {
+	return func() tea.Msg {
+		os.Stderr.WriteString(osc52.New(s).String())
+		return nil
+	}
 }
 
 // dbErr maps a command's error to a message. A cancelled context (an Esc kill,

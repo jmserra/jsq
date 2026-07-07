@@ -1067,6 +1067,16 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, prepareDuplicateCmd(ctx, a.engine, a.currentTable, vals)
 		}
 		return a, nil
+	case "y":
+		if s, ok := a.grid.yankCell(); ok {
+			a.status = fmt.Sprintf("copied cell (%d chars)", len(s))
+			return a, yankCmd(s)
+		}
+	case "Y":
+		if s, ok := a.grid.currentRowJSON(); ok {
+			a.status = "copied row as JSON"
+			return a, yankCmd(s)
+		}
 	case "f":
 		return a.follow()
 	case "enter":

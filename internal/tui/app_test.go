@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1043,6 +1045,8 @@ func TestHelpOverlay(t *testing.T) {
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
 	})
+	// Tall enough to show the whole cheat sheet without scrolling.
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 40})
 
 	// `?` opens the panel; the view shows the title and a real binding.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
@@ -1268,6 +1272,69 @@ func TestSQLLiteral(t *testing.T) {
 		if got := sqlLiteral(c.in); got != c.want {
 			t.Errorf("sqlLiteral(%#v) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestYank verifies y copies the cell value and Y the row as JSON, that both
+// dispatch a (clipboard) command and set a status hint, and that the grid
+// helpers produce the expected text (raw cell value; column-ordered JSON).
+func TestYank(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'), ('Linus')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	// Cursor is on col 0 (id) — cell yank is the raw value, no display mangling.
+	cell, ok := app.grid.yankCell()
+	if !ok {
+		t.Fatal("yankCell returned !ok")
+	}
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("y should dispatch a clipboard command")
+	}
+	if !strings.Contains(app.status, "copied cell") {
+		t.Fatalf("y status = %q, want a 'copied cell' hint", app.status)
+	}
+
+	// Row yank is column-ordered JSON; its id matches the cell just yanked.
+	got, ok := app.grid.currentRowJSON()
+	if !ok {
+		t.Fatal("currentRowJSON returned !ok")
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(got), &obj); err != nil {
+		t.Fatalf("row JSON does not parse: %v\n%s", err, got)
+	}
+	if fmt.Sprintf("%v", obj["id"]) != cell {
+		t.Fatalf("row JSON id = %v, want %q (the yanked cell)", obj["id"], cell)
+	}
+	if n := fmt.Sprintf("%v", obj["name"]); n != "Ada" && n != "Linus" {
+		t.Fatalf("row JSON name = %q, want Ada or Linus", n)
+	}
+	if idx := strings.Index(got, `"name"`); idx < strings.Index(got, `"id"`) {
+		t.Fatalf("row JSON should keep column order (id before name): %s", got)
+	}
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("Y should dispatch a clipboard command")
+	}
+	if !strings.Contains(app.status, "copied row") {
+		t.Fatalf("Y status = %q, want a 'copied row' hint", app.status)
 	}
 }
 

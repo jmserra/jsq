@@ -49,6 +49,7 @@ var helpItems = []helpItem{
 	{key: "Esc", desc: "kill a running query, else clear the filter"},
 	{head: "Inspect"},
 	{key: "Enter", desc: "view the full cell value"},
+	{key: "y / Y", desc: "yank cell value / row as JSON to the clipboard"},
 	{key: "f", desc: "follow the foreign key on this column"},
 	{key: "Ctrl-o / Ctrl-i", desc: "jump back / forward (Ctrl-i needs terminal support)"},
 	{key: "`", desc: "jumplist picker — pick any visited view (j/k, enter)"},
