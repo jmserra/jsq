@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
 )
@@ -488,8 +489,13 @@ func TestEditCursorMechanics(t *testing.T) {
 		t.Fatalf("mid-string backspace: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
 	}
 
-	if got := editCursorText("ab", 1); got != "a▏b" {
-		t.Fatalf("editCursorText caret placement = %q, want a▏b", got)
+	// The block caret must not add a column: the rendered field stays width w for
+	// every caret position (the old bar glyph shifted text and showed a phantom
+	// space when the caret moved off the end).
+	for _, pos := range []int{0, 2, 5} {
+		if got := lipgloss.Width(renderEditCell("hello", pos, 6)); got != 6 {
+			t.Fatalf("renderEditCell width at caret %d = %d, want 6 (no phantom column)", pos, got)
+		}
 	}
 }
 

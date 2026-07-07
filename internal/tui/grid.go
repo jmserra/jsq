@@ -27,6 +27,10 @@ var (
 	nullStyle   = lipgloss.NewStyle().Faint(true)
 	selStyle    = lipgloss.NewStyle().Reverse(true)
 	editStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
+	// editCaretStyle is the block caret inside the edit field: inverted from
+	// editStyle so it reads as a cursor sitting on the character (or a solid block
+	// at end-of-text), without inserting an extra column the way a bar glyph does.
+	editCaretStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3")).Background(lipgloss.Color("0"))
 )
 
 type column struct {
@@ -796,12 +800,25 @@ func colWidthFor(name string, rows [][]any, i int) int {
 	return max(minColWidth, max(nameW, dataW))
 }
 
-// editCursorText renders the in-progress edit value with the "▏" cursor bar at
-// the rune index pos (clamped), so ←/→ show the caret mid-string.
-func editCursorText(val string, pos int) string {
+// renderEditCell renders the edit field of width w with a block caret at rune
+// index pos: the character under the caret (or a trailing space at end-of-text)
+// is drawn inverted, and the rest of the field keeps editStyle. The caret
+// overlays a cell rather than inserting one, so moving it never shifts the text
+// or shows a phantom space. w is assumed ≥ value width + 1 (see effWidth).
+func renderEditCell(val string, pos, w int) string {
 	r := []rune(val)
 	pos = clamp(pos, 0, len(r))
-	return string(r[:pos]) + "▏" + string(r[pos:])
+	before := string(r[:pos])
+	caret, after := " ", ""
+	if pos < len(r) {
+		caret, after = string(r[pos]), string(r[pos+1:])
+	}
+	pad := w - runewidth.StringWidth(before) - runewidth.StringWidth(caret) - runewidth.StringWidth(after)
+	if pad < 0 {
+		pad = 0
+	}
+	return editStyle.Render(before) + editCaretStyle.Render(caret) +
+		editStyle.Render(after+strings.Repeat(" ", pad))
 }
 
 func cellString(v any) string {
@@ -875,18 +892,24 @@ func (g *grid) renderRow(r int) string {
 		var cell string
 		isNull := false
 		isEdit := g.editing && r == g.editR && c == g.editC
+		w := g.effWidth(c)
 		if isEdit {
-			cell = editCursorText(g.editVal, g.editPos)
-		} else if c < len(row) {
+			// Block caret overlays a cell instead of inserting a bar glyph.
+			b.WriteString(renderEditCell(g.editVal, g.editPos, w))
+			b.WriteString(strings.Repeat(" ", colGap))
+			x += w + colGap
+			if x >= g.w {
+				break
+			}
+			continue
+		}
+		if c < len(row) {
 			v := row[c]
 			isNull = v == nil
 			cell = cellString(v)
 		}
-		w := g.effWidth(c)
 		cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
 		switch {
-		case isEdit:
-			cell = editStyle.Render(cell)
 		case r == g.cursorR && c == g.cursorC:
 			cell = selStyle.Render(cell)
 		case isNull:
