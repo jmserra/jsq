@@ -1214,14 +1214,25 @@ func (a App) statusLine() string {
 	if name == "" {
 		name = "adhoc"
 	}
-	parts := []string{name}
+	rest := []string{}
 	if a.dbName != "" {
-		parts = append(parts, a.dbName)
+		rest = append(rest, a.dbName)
 	}
 	if a.status != "" {
-		parts = append(parts, a.status)
+		rest = append(rest, a.status)
 	}
-	left := lipgloss.NewStyle().Faint(true).Render(" " + strings.Join(parts, " > ") + " ")
+	faint := lipgloss.NewStyle().Faint(true)
+	// A safe connection is most likely production — flag it by rendering the
+	// connection name in red so it stands out in the header.
+	nameStyle := faint
+	if a.safe {
+		nameStyle = safeConnStyle
+	}
+	left := faint.Render(" ") + nameStyle.Render(name)
+	if len(rest) > 0 {
+		left += faint.Render(" > " + strings.Join(rest, " > "))
+	}
+	left += faint.Render(" ")
 	if a.activity == "" {
 		return left
 	}
@@ -1236,6 +1247,9 @@ func (a App) statusLine() string {
 }
 
 var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+
+// safeConnStyle marks a safe (likely production) connection name in the header.
+var safeConnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
 
 // connectingView is the full-screen loader shown while a `cmd`-backed connection
 // starts its helper and waits for the port — it names what we ran and where.
