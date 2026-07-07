@@ -93,18 +93,32 @@ connection (no-op → its tables), else reconnects. Initial connect still uses
 `connectCmd` (quits on failure); mid-session `openEngineCmd` uses `errMsg`.
 
 **Jumplist**: one **session-wide** list (`App.views`, oldest→newest, `viewIdx` =
-current); a `viewState` is `{conn, db, table, basePreds, baseNote, sort}` (column
-filters not captured). It **spans connections and databases** — each view records
-its `conn`+`db`, and a jump elsewhere reconnects first: `jumpBy`/`jumpTo` route
-through `goToView`, which (on a conn or db mismatch) stashes `App.pendingView` and
-dispatches `openEngineCmd`; `connectedMsg` then loads `pendingView` (the grid)
-instead of the table list. So `connectedMsg` must **not** reset `views` — only the
-live table state. Same-place jumps just `loadView`. `navigate` (selectTable/follow)
-`syncCurrent`s, truncates the forward tail, appends. `Ctrl-O`=`jumpBy(-1)`;
-forward `jumpBy(+1)` is `Ctrl-I` (where the terminal distinguishes it from `Tab`)
-or `Tab` while browsing the grid (Tab there was a no-op; terminals send `Ctrl-I`
-as `Tab` on bubbletea v1). The `` ` `` picker (`jumpView`, db-qualified labels) is
-the terminal-proof way to reach any view.
+current); a `viewState` is `{conn, db, table, basePreds, baseNote, sort, pos}`
+plus an optional cached `*gridSnapshot` (`snap`) of its loaded rows/grid state
+and an LRU `seq`. `pos` (grid cursor + scroll) makes a jump land exactly where you
+left. `syncCurrent` captures both `pos` and a fresh `snap` off the live grid
+before any move (skipped while `adHoc` is on screen — the grid then holds a scratch
+query, not the table, so the cached table snapshot is preserved). `loadView`
+**restores from `snap` instantly** (no DB call, `r` refreshes if stale) when one is
+resident; otherwise it reloads and sets `App.pendingPos` so the `rowsMsg` handler
+repositions to `pos` once rows arrive (`loadViewCmd` widens the fetch window if the
+saved cursor sits past the default one). Snapshots are bounded: `evictSnaps` keeps
+only the `maxCachedViews` (16) most-recently-touched `snap`s, dropping older ones
+to metadata (which still reload+reposition, just not instantly). Committed column
+filters ride in `snap` but are lost on eviction. Snapshot slices are shared by
+reference (an in-place cell edit stays reflected in the cache); `visible` and the
+`filters` map are deep-copied so the live grid can't corrupt a stored snapshot.
+It **spans connections and databases** — each view records its `conn`+`db`, and a
+jump elsewhere reconnects first: `jumpBy`/`jumpTo` route through `goToView`, which
+(on a conn or db mismatch) stashes `App.pendingView` and dispatches
+`openEngineCmd`; `connectedMsg` then `loadView`s `pendingView` (restoring its
+`snap` or reloading) instead of the table list. So `connectedMsg` must **not**
+reset `views` — only the live table state. Same-place jumps just `loadView`.
+`navigate` (selectTable/follow) `syncCurrent`s, truncates the forward tail,
+appends. `Ctrl-O`=`jumpBy(-1)`; forward `jumpBy(+1)` is `Ctrl-I` (where the
+terminal distinguishes it from `Tab`) or `Tab` while browsing the grid (Tab there
+was a no-op; terminals send `Ctrl-I` as `Tab` on bubbletea v1). The `` ` `` picker
+(`jumpView`, db-qualified labels) is the terminal-proof way to reach any view.
 
 The `$EDITOR` full path (`E`/`o`/`D`/`p`/`s`): the generators
 return an `editorSeed` (SQL + cursor line/col + `selectKind`); `editorCmd` seeds a

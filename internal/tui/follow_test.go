@@ -110,24 +110,23 @@ func TestJumplistBackForward(t *testing.T) {
 		t.Fatalf("expected filtered authors, got %q note=%q", app.currentTable.Name, app.baseNote)
 	}
 
-	// Ctrl-O → back to books (unfiltered).
+	// Ctrl-O → back to books (unfiltered). Both views were cached when we left
+	// them, so a same-connection jump restores from memory with no reload cmd.
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	app = m.(App)
-	if cmd == nil {
-		t.Fatal("Ctrl-O should reload the previous view")
+	if cmd != nil {
+		t.Fatal("a cached jump should restore instantly, not reload")
 	}
-	app = update(t, app, cmd())
 	if app.currentTable.Name != "books" || app.baseNote != "" || len(app.basePreds) != 0 {
 		t.Fatalf("back should land on unfiltered books, got %q note=%q", app.currentTable.Name, app.baseNote)
 	}
 
-	// Forward → authors filtered again.
+	// Forward → authors filtered again (also from cache).
 	m, cmd = app.jumpBy(1)
 	app = m.(App)
-	if cmd == nil {
-		t.Fatal("forward should reload the followed view")
+	if cmd != nil {
+		t.Fatal("a cached forward jump should restore instantly")
 	}
-	app = update(t, app, cmd())
 	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 {
 		t.Fatalf("forward should restore filtered authors, got %q preds=%v", app.currentTable.Name, app.basePreds)
 	}
@@ -139,20 +138,16 @@ func TestJumplistBackForward(t *testing.T) {
 
 	// While browsing the grid (sidebar hidden), Tab steps forward — this is where
 	// a kitty Ctrl-I lands too. Go back first so there's a forward view.
-	m, cmd = app.jumpBy(-1)
-	app = update(t, m.(App), cmd())
+	m, _ = app.jumpBy(-1)
+	app = m.(App)
 	if app.currentTable.Name != "books" {
 		t.Fatalf("setup: expected books, got %q", app.currentTable.Name)
 	}
 	if app.screen != screenBrowse {
 		t.Fatal("should be on the grid screen while browsing")
 	}
-	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyTab})
 	app = m.(App)
-	if cmd == nil {
-		t.Fatal("Tab in the grid should step the jumplist forward")
-	}
-	app = update(t, app, cmd())
 	if app.currentTable.Name != "authors" {
 		t.Fatalf("Tab-forward should reach authors, got %q", app.currentTable.Name)
 	}
@@ -190,7 +185,9 @@ func TestJumplistPicker(t *testing.T) {
 	if app.jumps.active {
 		t.Fatal("Enter should close the picker")
 	}
-	app = update(t, app, cmd())
+	if cmd != nil { // a was cached when we left it → instant restore
+		t.Fatal("jumping to a cached view should not reload")
+	}
 	if app.currentTable.Name != "a" || app.viewIdx != 0 {
 		t.Fatalf("jumped to wrong view: table=%q idx=%d", app.currentTable.Name, app.viewIdx)
 	}

@@ -123,7 +123,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
 | `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row). FK columns are flagged with a `→` in the header |
-| `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort). Most terminals send `Ctrl-i` as `Tab` — see below |
+| `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort + **cursor position**). Recently-visited views restore instantly from an in-memory cache — no reload — so a jump lands exactly where you left; hit `r` to refresh if it looks stale. Most terminals send `Ctrl-i` as `Tab` — see below |
 | `` ` `` | open the jumplist picker — inspect every visited view and jump to any of them (`j`/`k` to move, `Enter` to go, `Esc` to close). Works regardless of terminal |
 | `Esc` | kill the running query (while one is in flight), else clear the current column's filter |
 | `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |

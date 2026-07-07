@@ -131,6 +131,83 @@ func (g *grid) setResult(rs *db.ResultSet) {
 // reset returns the cursor to the top-left; used when loading a different table.
 func (g *grid) reset() { g.cursorR, g.cursorC, g.rowOff, g.colOff = 0, 0, 0, 0 }
 
+// gridPos is the grid's cursor + scroll position — enough to land a jump exactly
+// where it left off (captured into a jumplist viewState).
+type gridPos struct{ cursorR, cursorC, rowOff, colOff int }
+
+func (g *grid) pos() gridPos { return gridPos{g.cursorR, g.cursorC, g.rowOff, g.colOff} }
+
+// setPos restores a saved position, clamped to the loaded bounds and nudged so
+// the cursor stays on screen (the saved rowOff/colOff may not fit if fewer rows
+// loaded this time). Used both by the cache restore and the reload-then-reposition
+// path in the jumplist.
+func (g *grid) setPos(p gridPos) {
+	g.cursorR = clamp(p.cursorR, 0, max(len(g.visible)-1, 0))
+	g.cursorC = clamp(p.cursorC, 0, max(len(g.cols)-1, 0))
+	g.rowOff = clamp(p.rowOff, 0, g.cursorR)
+	if vr := g.visibleRows(); g.cursorR >= g.rowOff+vr {
+		g.rowOff = g.cursorR - vr + 1
+	}
+	g.colOff = clamp(p.colOff, 0, g.cursorC)
+	g.ensureColVisible()
+}
+
+// gridSnapshot is a value copy of the grid's loaded result + view state, cached
+// on a jumplist entry so returning to it is instant (no DB round-trip). rows/cols
+// are shared by reference (an in-place edit stays reflected in the cache); the
+// mutated-in-place slices (visible) and the filters map are deep-copied so the
+// live grid can't corrupt a stored snapshot.
+type gridSnapshot struct {
+	cols                             []column
+	rows                             [][]any
+	table                            db.TableRef
+	visible                          []int
+	pk                               []string
+	fks                              []db.ForeignKey
+	filters                          map[int]string
+	sortCol                          string
+	sortAsc                          bool
+	hasMore                          bool
+	cursorR, cursorC, rowOff, colOff int
+}
+
+func (g *grid) snapshot() *gridSnapshot {
+	filters := make(map[int]string, len(g.filters))
+	for k, v := range g.filters {
+		filters[k] = v
+	}
+	return &gridSnapshot{
+		cols:    g.cols,
+		rows:    g.rows,
+		table:   g.table,
+		visible: append([]int(nil), g.visible...),
+		pk:      g.pk,
+		fks:     g.fks,
+		filters: filters,
+		sortCol: g.sortCol,
+		sortAsc: g.sortAsc,
+		hasMore: g.hasMore,
+		cursorR: g.cursorR, cursorC: g.cursorC, rowOff: g.rowOff, colOff: g.colOff,
+	}
+}
+
+// restore loads a snapshot back into the grid, deep-copying the slices/map the
+// grid mutates in place so the cached snapshot stays intact. It also clears the
+// transient edit/filter-typing state (a jump never lands mid-edit).
+func (g *grid) restore(s *gridSnapshot) {
+	g.cols, g.rows, g.table = s.cols, s.rows, s.table
+	g.visible = append([]int(nil), s.visible...)
+	g.pk, g.fks = s.pk, s.fks
+	g.filters = make(map[int]string, len(s.filters))
+	for k, v := range s.filters {
+		g.filters[k] = v
+	}
+	g.sortCol, g.sortAsc, g.hasMore = s.sortCol, s.sortAsc, s.hasMore
+	g.cursorR, g.cursorC, g.rowOff, g.colOff = s.cursorR, s.cursorC, s.rowOff, s.colOff
+	g.filtering, g.filterVal = -1, ""
+	g.editing, g.editVal, g.editDirty, g.loading = false, "", false, false
+}
+
 func (g *grid) setSize(w, h int)             { g.w, g.h = w, h }
 func (g *grid) setSort(col string, asc bool) { g.sortCol, g.sortAsc = col, asc }
 

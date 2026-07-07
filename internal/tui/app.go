@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -58,11 +59,15 @@ type App struct {
 	// Jumplist: one session-wide list of visited views (oldest→newest, viewIdx =
 	// current). Ctrl-O/Ctrl-I step it; the ` picker jumps to any entry. It spans
 	// databases — each view records its db and a jump reconnects if needed. A view
-	// is {db, table, FK-filter, sort} (column filters aren't captured).
+	// is {db, table, FK-filter, sort, cursor pos} plus a cached snapshot of its
+	// loaded rows, so a jump lands exactly where you left and, when the snapshot
+	// is still resident, restores instantly with no DB round-trip.
 	views       []viewState
 	viewIdx     int        // index of the current view; -1 before the first
+	viewSeq     int        // monotonic touch counter → LRU eviction of cached snapshots
 	jumps       jumpView   // the `-key jumplist picker overlay
 	pendingView *viewState // set for a cross-database jump: load it once reconnected
+	pendingPos  *gridPos   // restore this cursor/scroll after the next reload (a jump with no cache)
 	resetGrid   bool       // reset cursor on next rows load (new table, not a re-sort)
 	adHoc       bool       // grid shows a free-form (s) query result, not a table
 
@@ -185,6 +190,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.stop()
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.connecting = false
+		a.pendingPos = nil // a failed load never repositions a later one
 		a.err = msg.err
 		return a, nil
 
@@ -246,7 +252,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sc, sa = msg.rs.PK[0], false
 		}
 		a.grid.setSort(sc, sa)
-		if a.resetGrid {
+		switch {
+		case a.pendingPos != nil: // a jump reload: land where we left off
+			a.grid.setPos(*a.pendingPos)
+			a.pendingPos, a.resetGrid = nil, false
+		case a.resetGrid:
 			a.grid.reset()
 			a.resetGrid = false
 		}
@@ -638,9 +648,11 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// viewState is a jumplist entry: enough to reload a table exactly as it was
-// (bar column filters, which aren't captured). db is the database it lives in, so
-// the one session-wide jumplist can span databases — a jump reconnects if needed.
+// viewState is a jumplist entry: enough to reload a table exactly as it was,
+// plus (when resident) a cached snapshot for an instant restore. db is the
+// database it lives in, so the one session-wide jumplist can span databases — a
+// jump reconnects if needed. Committed column filters ride along in the cached
+// snapshot but are lost once it's evicted (the reload path doesn't reapply them).
 type viewState struct {
 	conn      string // connection name (so the jumplist can span connections)
 	db        string
@@ -649,6 +661,15 @@ type viewState struct {
 	baseNote  string
 	sortCol   string
 	sortAsc   bool
+
+	// pos is the cursor/scroll position when the view was last left, so a jump
+	// lands exactly where you were. snap is the cached loaded rows + grid state
+	// for an instant, DB-free restore (nil once evicted or on a never-loaded
+	// view, in which case the jump reloads and repositions to pos). seq is the
+	// LRU stamp that bounds how many snapshots we keep in memory.
+	pos  gridPos
+	snap *gridSnapshot
+	seq  int
 }
 
 func (a App) currentView() viewState {
@@ -684,14 +705,52 @@ func (v viewState) label() string {
 }
 
 // syncCurrent refreshes the current entry with the live view (so a sort made
-// after arriving is remembered) before any jumplist move. A no-op on a list
-// screen, where there is no live table view to capture.
+// after arriving is remembered, and its rows/cursor are cached) before any
+// jumplist move. A no-op on a list screen, where there is no live table view to
+// capture. While an s query is on screen (adHoc) the grid holds query rows, not
+// the table's, so the table's cached snapshot/position is preserved as-is.
 func (a *App) syncCurrent() {
 	if a.currentTable.Name == "" {
 		return
 	}
-	if a.viewIdx >= 0 && a.viewIdx < len(a.views) {
-		a.views[a.viewIdx] = a.currentView()
+	if a.viewIdx < 0 || a.viewIdx >= len(a.views) {
+		return
+	}
+	prev := a.views[a.viewIdx]
+	v := a.currentView()
+	if a.adHoc {
+		v.pos, v.snap = prev.pos, prev.snap
+	} else {
+		v.pos = a.grid.pos()
+		v.snap = a.grid.snapshot()
+	}
+	a.viewSeq++
+	v.seq = a.viewSeq
+	a.views[a.viewIdx] = v
+	a.evictSnaps()
+}
+
+// maxCachedViews bounds how many jumplist entries keep their full loaded rows in
+// memory; older (least-recently-visited) snapshots are dropped to their metadata
+// and reload on demand. Keeps the cache "reasonable" on a long session.
+const maxCachedViews = 16
+
+// evictSnaps drops the row cache from all but the maxCachedViews most recently
+// touched views (by seq). The metadata (table, preds, sort, pos) is kept, so an
+// evicted view still reloads and repositions — just not instantly.
+func (a *App) evictSnaps() {
+	cached := make([]int, 0, len(a.views))
+	for i := range a.views {
+		if a.views[i].snap != nil {
+			cached = append(cached, i)
+		}
+	}
+	if len(cached) <= maxCachedViews {
+		return
+	}
+	sort.Slice(cached, func(i, j int) bool { return a.views[cached[i]].seq < a.views[cached[j]].seq })
+	for _, i := range cached[:len(cached)-maxCachedViews] {
+		a.views[i].snap = nil
 	}
 }
 
@@ -789,18 +848,46 @@ func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
 	return a.goToView(a.views[i])
 }
 
-// loadView switches to v and reloads it (default cursor, cleared column filters).
-// Shared by selectTable, follow, and the jumplist.
+// loadView switches to v. If v carries a cached snapshot (a revisited view), it
+// restores instantly from memory — no DB round-trip; `r` refreshes if the data
+// looks stale. Otherwise it reloads the table and repositions to v.pos once the
+// rows arrive. Shared by selectTable, follow, and the jumplist.
 func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
 	a.currentTable = v.table
 	a.basePreds = v.basePreds
 	a.baseNote = v.baseNote
 	a.sortCol, a.sortAsc = v.sortCol, v.sortAsc
+	if v.snap != nil { // instant restore from the in-memory cache
+		a.stop()
+		a.grid.restore(v.snap)
+		a.adHoc = false
+		a.pendingPos, a.resetGrid = nil, false
+		a.screen = screenBrowse
+		a.layout()
+		a.status = v.table.Name
+		if v.baseNote != "" {
+			a.status = v.table.Name + " · " + v.baseNote
+		}
+		return a, nil
+	}
 	a.resetGrid = true
 	a.grid.clearFilters()
+	pos := v.pos
+	a.pendingPos = &pos // reposition to where we left, once the rows load
 	ctx := a.begin(label)
 	a.status = label + "…"
-	return a, a.loadCurrentCmd(ctx)
+	return a, a.loadViewCmd(ctx, pos)
+}
+
+// loadViewCmd loads the current view for a jump, widening the fetch window if the
+// remembered cursor sits past the default one (LIMIT/OFFSET from the top, so the
+// row is only there if the window reaches it).
+func (a App) loadViewCmd(ctx context.Context, pos gridPos) tea.Cmd {
+	limit := a.gridLimit()
+	if need := pos.cursorR + a.grid.visibleRows() + 1; need > limit {
+		limit = need
+	}
+	return loadCmd(ctx, a.engine, a.currentTable, limit, a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
 }
 
 // follow navigates the foreign key on the cursor's column to the row it points

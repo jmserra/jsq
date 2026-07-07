@@ -92,15 +92,19 @@ func TestMultiConnectionJump(t *testing.T) {
 		t.Fatalf("jumplist should span A and B, got %+v", app.views)
 	}
 
-	// Ctrl-O: cross-connection jump back to A/ta (reconnects A).
+	// Ctrl-O: cross-connection jump back to A/ta (reconnects A). A's view was
+	// cached when we left it, so once reconnected it restores from memory with no
+	// further rows fetch.
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	app = m.(App)
 	if app.pendingView == nil {
 		t.Fatal("cross-connection jump should stage a pendingView")
 	}
-	m, cmd = app.Update(cmd()) // connectedMsg for A
+	m, cmd = app.Update(cmd()) // connectedMsg for A → instant cache restore
 	app = m.(App)
-	app = update(t, app, cmd()) // rowsMsg
+	if cmd != nil {
+		t.Fatal("a cached view should restore without a further rows fetch")
+	}
 	if app.connName != "A" || app.currentTable.Name != "ta" || app.screen != screenBrowse {
 		t.Fatalf("Ctrl-O should land on A/ta, got conn=%q table=%q screen=%d",
 			app.connName, app.currentTable.Name, app.screen)
