@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
@@ -52,24 +53,18 @@ func (e *sqliteEngine) FilterPredicate(quotedCol string, _ int) string {
 func (e *sqliteEngine) Databases(context.Context) ([]string, error) { return nil, nil }
 
 func (e *sqliteEngine) Tables(ctx context.Context) ([]Table, error) {
-	rows, err := e.db.QueryContext(ctx,
+	names, err := queryStrings(ctx, e.db,
 		`SELECT name FROM sqlite_master
 		 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
 		 ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []Table
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, Table{Name: n})
+	out := make([]Table, len(names))
+	for i, n := range names {
+		out[i] = Table{Name: n}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (e *sqliteEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
@@ -215,8 +210,7 @@ func (e *sqliteEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKe
 	}
 	defer rows.Close()
 
-	byID := map[int]*ForeignKey{}
-	var order []int
+	var acc fkAccum
 	for rows.Next() {
 		var id, seq int
 		var refTable, from, onUpd, onDel, match string
@@ -224,22 +218,15 @@ func (e *sqliteEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKe
 		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpd, &onDel, &match); err != nil {
 			return nil, err
 		}
-		fk := byID[id]
-		if fk == nil {
-			fk = &ForeignKey{RefTable: TableRef{Name: refTable}}
-			byID[id] = fk
-			order = append(order, id)
-		}
-		fk.Columns = append(fk.Columns, from)
-		fk.RefColumns = append(fk.RefColumns, to.String) // "" → resolve to PK below
+		// "" RefColumn (a column-less REFERENCES) is resolved to the PK below.
+		acc.add(strconv.Itoa(id), TableRef{Name: refTable}, from, to.String)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	out := make([]ForeignKey, 0, len(order))
-	for _, id := range order {
-		fk := byID[id]
+	out := make([]ForeignKey, 0, len(acc.order))
+	for _, fk := range acc.ordered() {
 		if err := e.resolveImplicitPK(ctx, fk); err != nil {
 			return nil, err
 		}

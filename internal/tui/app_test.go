@@ -394,6 +394,55 @@ func TestQuickEditCell(t *testing.T) {
 	}
 }
 
+// TestQuickEditWriteBackTargetsEditedCell guards the race where a quick edit's
+// async result arrives after the cursor moved (or a new edit started): the
+// in-memory write-back must land on the cell that was committed, not on whatever
+// cell grid.editR/editC happen to point at when the editDoneMsg is handled.
+func TestQuickEditWriteBackTargetsEditedCell(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// Default sort is PK descending → visible row 0 is id=2 (Linus), row 1 is
+	// id=1 (Ada). Move to "name" and edit row 0's value.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "Grace")
+
+	// Commit, but hold the async result instead of applying it immediately.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("committing a changed cell should run an UPDATE")
+	}
+	done := cmd() // runs the UPDATE; carries the target cell coordinates
+
+	// Before the result lands, move to row 1 and start a fresh edit there — this
+	// is what used to repoint grid.editR/editC at the wrong cell.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyDown})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if !app.grid.editing || app.grid.editR != 1 {
+		t.Fatalf("expected to be editing row 1, editing=%v editR=%d", app.grid.editing, app.grid.editR)
+	}
+
+	// Now the first edit's result arrives while row 1 is being edited.
+	app = update(t, app, done)
+
+	// The write-back must have hit row 0 (Linus→Grace), not the cell under edit.
+	if got := app.grid.rows[0][1]; got != "Grace" {
+		t.Fatalf("row 0 name = %v, want Grace (write-back landed on the edited cell)", got)
+	}
+	if got := app.grid.rows[1][1]; got != "Ada" {
+		t.Fatalf("row 1 name = %v, want Ada (must not be clobbered by row 0's edit)", got)
+	}
+}
+
 // TestQuickEditNull drives the §8 quick path setting a cell to SQL NULL: `e`,
 // clear it, type NULL, Enter → the cell becomes real NULL (bound nil), the grid
 // shows it as NULL, and the DB row is actually NULL (not the string "NULL").
@@ -1599,6 +1648,29 @@ func TestScratchRemembersLastQuery(t *testing.T) {
 	app.currentTable = db.Table{Name: "other"}
 	if got := app.scratchSeed().sql; !strings.Contains(got, `SELECT * FROM "other" LIMIT 100`) {
 		t.Fatalf("a different table should get the template, got %q", got)
+	}
+}
+
+// TestScratchQueryScopedToDatabase guards that a remembered scratch query is keyed
+// by connection+database as well as table, so a same-named table in another
+// database (jumplist spans databases) doesn't inherit an unrelated last query.
+func TestScratchQueryScopedToDatabase(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	// Remember a custom query for users on the current database.
+	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users;", remember: app.currentTable})
+	if got := app.scratchSeed().sql; got != "SELECT name FROM users;" {
+		t.Fatalf("same db+table should prefill the last query, got %q", got)
+	}
+
+	// Same table name, different database → back to the template, not the query.
+	app.dbName = "otherdb"
+	if got := app.scratchSeed().sql; !strings.Contains(got, `SELECT * FROM "users" LIMIT 100`) {
+		t.Fatalf("same table in another database should get the template, got %q", got)
 	}
 }
 

@@ -49,21 +49,8 @@ func (e *pgEngine) FilterPredicate(quotedCol string, i int) string {
 }
 
 func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
-	rows, err := e.db.QueryContext(ctx,
+	return queryStrings(ctx, e.db,
 		`SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
 }
 
 func (e *pgEngine) Tables(ctx context.Context) ([]Table, error) {
@@ -153,7 +140,7 @@ func (e *pgEngine) uniqueColumns(ctx context.Context, t TableRef) ([]string, err
 	if schema == "" {
 		schema = "public"
 	}
-	rows, err := e.db.QueryContext(ctx, `
+	return queryStrings(ctx, e.db, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
@@ -161,19 +148,6 @@ func (e *pgEngine) uniqueColumns(ctx context.Context, t TableRef) ([]string, err
 		 AND tc.table_schema = kcu.table_schema
 		WHERE tc.constraint_type = 'UNIQUE'
 		  AND tc.table_schema = $1 AND tc.table_name = $2`, schema, t.Name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
 }
 
 func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {
@@ -181,7 +155,7 @@ func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 	if schema == "" {
 		schema = "public"
 	}
-	rows, err := e.db.QueryContext(ctx, `
+	return queryStrings(ctx, e.db, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
@@ -190,19 +164,6 @@ func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 		WHERE tc.constraint_type = 'PRIMARY KEY'
 		  AND tc.table_schema = $1 AND tc.table_name = $2
 		ORDER BY kcu.ordinal_position`, schema, t.Name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var pk []string
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
-		}
-		pk = append(pk, c)
-	}
-	return pk, rows.Err()
 }
 
 // ForeignKeys reads FK constraints from pg_catalog, walking each constraint's
@@ -230,30 +191,18 @@ func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	}
 	defer rows.Close()
 
-	byName := map[string]*ForeignKey{}
-	var order []string
+	var acc fkAccum
 	for rows.Next() {
 		var name, col, refSchema, refTable, refCol string
 		if err := rows.Scan(&name, &col, &refSchema, &refTable, &refCol); err != nil {
 			return nil, err
 		}
-		fk := byName[name]
-		if fk == nil {
-			fk = &ForeignKey{RefTable: TableRef{Schema: refSchema, Name: refTable}}
-			byName[name] = fk
-			order = append(order, name)
-		}
-		fk.Columns = append(fk.Columns, col)
-		fk.RefColumns = append(fk.RefColumns, refCol)
+		acc.add(name, TableRef{Schema: refSchema, Name: refTable}, col, refCol)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]ForeignKey, 0, len(order))
-	for _, name := range order {
-		out = append(out, *byName[name])
-	}
-	return out, nil
+	return acc.result(), nil
 }
 
 func (e *pgEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {

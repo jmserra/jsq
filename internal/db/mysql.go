@@ -77,43 +77,25 @@ func (e *myEngine) FilterPredicate(quotedCol string, _ int) string {
 }
 
 func (e *myEngine) Databases(ctx context.Context) ([]string, error) {
-	rows, err := e.db.QueryContext(ctx, `
+	return queryStrings(ctx, e.db, `
 		SELECT schema_name FROM information_schema.schemata
 		WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
 		ORDER BY schema_name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
 }
 
 func (e *myEngine) Tables(ctx context.Context) ([]Table, error) {
-	rows, err := e.db.QueryContext(ctx, `
+	names, err := queryStrings(ctx, e.db, `
 		SELECT table_name FROM information_schema.tables
 		WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'
 		ORDER BY table_name`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Table
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, Table{Name: n})
+	out := make([]Table, len(names))
+	for i, n := range names {
+		out[i] = Table{Name: n}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (e *myEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
@@ -149,25 +131,12 @@ func (e *myEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 // via Columns, which pulls column_default/extra and (in composite order) is
 // heavier. PrimaryKey is on the hot path (every load and scroll fetch).
 func (e *myEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {
-	rows, err := e.db.QueryContext(ctx, `
+	return queryStrings(ctx, e.db, `
 		SELECT column_name
 		FROM information_schema.key_column_usage
 		WHERE table_schema = DATABASE() AND table_name = ?
 		  AND constraint_name = 'PRIMARY'
 		ORDER BY ordinal_position`, t.Name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var pk []string
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
-		}
-		pk = append(pk, c)
-	}
-	return pk, rows.Err()
 }
 
 // ForeignKeys reads FK constraints from key_column_usage (rows carrying a
@@ -185,30 +154,18 @@ func (e *myEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	}
 	defer rows.Close()
 
-	byName := map[string]*ForeignKey{}
-	var order []string
+	var acc fkAccum
 	for rows.Next() {
 		var name, col, refTable, refCol string
 		if err := rows.Scan(&name, &col, &refTable, &refCol); err != nil {
 			return nil, err
 		}
-		fk := byName[name]
-		if fk == nil {
-			fk = &ForeignKey{RefTable: TableRef{Name: refTable}}
-			byName[name] = fk
-			order = append(order, name)
-		}
-		fk.Columns = append(fk.Columns, col)
-		fk.RefColumns = append(fk.RefColumns, refCol)
+		acc.add(name, TableRef{Name: refTable}, col, refCol)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]ForeignKey, 0, len(order))
-	for _, name := range order {
-		out = append(out, *byName[name])
-	}
-	return out, nil
+	return acc.result(), nil
 }
 
 func (e *myEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {

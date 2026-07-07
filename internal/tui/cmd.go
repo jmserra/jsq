@@ -204,7 +204,7 @@ func execEditCmd(ctx context.Context, gen int, eng db.Engine, req editReq) tea.C
 		if err != nil {
 			return dbErr(ctx, gen, err)
 		}
-		return editDoneMsg{col: req.col, val: req.val, null: req.null, affected: n, gen: gen}
+		return editDoneMsg{col: req.col, val: req.val, null: req.null, affected: n, gen: gen, rowIdx: req.rowIdx, colIdx: req.colIdx}
 	}
 }
 

@@ -77,8 +77,8 @@ type App struct {
 	resetGrid   bool       // reset cursor on next rows load (new table, not a re-sort)
 	adHoc       bool       // grid shows a free-form (s) query result, not a table
 
-	lastQuery  map[db.Table]string // per-table last scratch (s) query, for the edit loop
-	adHocQuery string              // SQL behind the current adHoc result, so `r` can re-run it
+	lastQuery  map[string]string // last scratch (s) query per conn+db+table (queryKey), for the edit loop
+	adHocQuery string            // SQL behind the current adHoc result, so `r` can re-run it
 
 	dbName         string
 	w, h           int
@@ -109,7 +109,7 @@ func New(conns []config.Conn, direct config.Conn) App {
 		connName:  direct.Name,
 		safe:      direct.Safe,
 		pending:   direct,
-		lastQuery: map[db.Table]string{},
+		lastQuery: map[string]string{},
 		viewIdx:   -1,
 		sidebar:   sidebar{label: "tables"},
 		dbs:       sidebar{label: "databases"},
@@ -396,10 +396,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A keyed edit must touch exactly one row; anything else is loud (§8).
 		if msg.affected == 1 {
 			if msg.null {
-				a.grid.applyEditNull()
+				a.grid.applyEditNull(msg.rowIdx, msg.colIdx)
 				a.status = fmt.Sprintf("set %s = NULL", msg.col)
 			} else {
-				a.grid.applyEdit(msg.val)
+				a.grid.applyEdit(msg.rowIdx, msg.colIdx, msg.val)
 				a.status = fmt.Sprintf("set %s = '%s'", msg.col, msg.val)
 			}
 		} else {
@@ -418,7 +418,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Remember an s query as its table's last query, so the next s prefills
 		// it (even if it errors) for a tight edit-run-edit loop.
 		if msg.remember.Name != "" {
-			a.lastQuery[msg.remember] = msg.sql
+			a.lastQuery[a.queryKey(msg.remember)] = msg.sql
 		}
 		// A read (s) shows its rows directly; a mutation runs via Exec — and on a
 		// safe connection it's held for a y/n confirmation first. A multi-statement
@@ -704,6 +704,25 @@ func (a App) openDatabases() (tea.Model, tea.Cmd) {
 	return a, databasesCmd(ctx, a.gen, a.engine)
 }
 
+// sidebarNav applies the list-navigation keys shared by the table and database
+// screens: arrows / Ctrl-N/P step within a column, ←/→ jump columns, and Space
+// types a filter space. Screen-specific keys (Enter, Esc, Backspace, rune input)
+// are handled by the caller before delegating here.
+func sidebarNav(s *sidebar, msg tea.KeyMsg) {
+	switch msg.Type {
+	case tea.KeyUp, tea.KeyCtrlP:
+		s.move(-1)
+	case tea.KeyDown, tea.KeyCtrlN:
+		s.move(1)
+	case tea.KeyLeft:
+		s.move(-s.rows())
+	case tea.KeyRight:
+		s.move(s.rows())
+	case tea.KeySpace:
+		s.filterInput(" ")
+	}
+}
+
 // handleDatabasesKey drives the full-screen database list: typing filters, Enter
 // switches to that database, Esc clears the filter then returns to the table list.
 func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -721,21 +740,14 @@ func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.screen = screenTables // no filter → back to the table list
 		a.layout()
 		return a, nil
-	case tea.KeyUp, tea.KeyCtrlP:
-		a.dbs.move(-1)
-	case tea.KeyDown, tea.KeyCtrlN:
-		a.dbs.move(1)
-	case tea.KeyLeft:
-		a.dbs.move(-a.dbs.rows())
-	case tea.KeyRight:
-		a.dbs.move(a.dbs.rows())
 	case tea.KeyBackspace:
 		a.dbs.filterBackspace()
-	case tea.KeySpace:
-		a.dbs.filterInput(" ")
+		return a, nil
 	case tea.KeyRunes:
 		a.dbs.filterInput(string(msg.Runes))
+		return a, nil
 	}
+	sidebarNav(&a.dbs, msg)
 	return a, nil
 }
 
@@ -774,14 +786,6 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.layout()
 		}
 		return a, nil
-	case tea.KeyUp, tea.KeyCtrlP:
-		a.sidebar.move(-1)
-	case tea.KeyDown, tea.KeyCtrlN:
-		a.sidebar.move(1)
-	case tea.KeyLeft:
-		a.sidebar.move(-a.sidebar.rows()) // previous column
-	case tea.KeyRight:
-		a.sidebar.move(a.sidebar.rows()) // next column
 	case tea.KeyBackspace:
 		// Backspace edits the filter while one is active; with none it steps up to
 		// the connection picker (mirroring Backspace in the grid → table list).
@@ -790,8 +794,7 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if len(a.picker.conns) > 0 {
 			a.screen = screenPicker
 		}
-	case tea.KeySpace:
-		a.sidebar.filterInput(" ")
+		return a, nil
 	case tea.KeyRunes:
 		// T jumps to the database list; a lowercase t still filters (matching is
 		// case-insensitive, so nothing is lost by not typing a literal T).
@@ -799,7 +802,9 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.openDatabases()
 		}
 		a.sidebar.filterInput(string(msg.Runes))
+		return a, nil
 	}
+	sidebarNav(&a.sidebar, msg)
 	return a, nil
 }
 
@@ -1307,10 +1312,19 @@ func (a *App) maybeLoadMore() tea.Cmd {
 // table so the loop continues.
 func (a App) scratchSeed() editorSeed {
 	sql := selectTemplate(a.engine, a.currentTable.Ref())
-	if last, ok := a.lastQuery[a.currentTable]; ok {
+	if last, ok := a.lastQuery[a.queryKey(a.currentTable)]; ok {
 		sql = last
 	}
 	return editorSeed{sql: sql, remember: a.currentTable}
+}
+
+// queryKey scopes a remembered scratch query to the current connection and
+// database as well as the table, so a same-named table in another database or
+// connection doesn't inherit an unrelated last query. The editor blocks the UI
+// while open, so connName/dbName are unchanged between the seed's read here and
+// the submit's write, keeping the two sides consistent.
+func (a App) queryKey(t db.Table) string {
+	return strings.Join([]string{a.connName, a.dbName, t.Schema, t.Name}, "\x00")
 }
 
 // loadCurrentCmd (re)loads the current table with the active sort, any followed-FK

@@ -160,10 +160,12 @@ needs the `E` full path. Reads are never
 gated. New mutation paths must funnel through `askMutation` when `a.safe`.
 
 `s` (`App.scratchSeed`) prefills the `selectTemplate` for the current table, or
-`App.lastQuery[table]` if one was run — the seed's `remember` field (the table)
-rides through `editorCmd`→`editorSubmitMsg`, and the submit handler stores the SQL
-back into `lastQuery` (even on error) so the next `s` on that table continues the
-edit-run loop. Only `s` sets `remember`; E/o/D/p leave it zero.
+the remembered last query if one was run — `App.lastQuery` is keyed by
+`App.queryKey` (conn+db+table, so a same-named table in another database/connection
+doesn't inherit it), the seed's `remember` field (the table) rides through
+`editorCmd`→`editorSubmitMsg`, and the submit handler stores the SQL back into
+`lastQuery` (even on error) so the next `s` on that table continues the edit-run
+loop. Only `s` sets `remember`; E/o/D/p leave it zero.
 
 `r` (`App.reloadView`) re-runs the current view: a table reload is just
 `loadCurrentCmd` (keeps sort, `basePreds`, column filters, and cursor — `setResult`

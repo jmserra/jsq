@@ -118,6 +118,70 @@ func scanQuery(ctx context.Context, sdb *sql.DB, query string, args ...any) (*Re
 	return rs, rows.Err()
 }
 
+// queryStrings runs a single-column query and collects the column into a slice —
+// the shared shape behind Databases/Tables/PrimaryKey and the unique-column
+// lookups, which otherwise repeat the same Next/Scan/Err boilerplate per engine.
+func queryStrings(ctx context.Context, sdb *sql.DB, query string, args ...any) ([]string, error) {
+	rows, err := sdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// fkAccum groups the per-column rows of a foreign-key introspection query into
+// ForeignKeys, preserving both first-seen constraint order and (within a
+// composite key) the scan order of the columns. Every engine's ForeignKeys walks
+// parallel (column, ref-column) rows keyed by a constraint identifier; this is
+// that shared assembly. Callers scan a row, then add() it under the constraint's
+// key with the referenced table (set once, from the first row of the group).
+type fkAccum struct {
+	byKey map[string]*ForeignKey
+	order []string
+}
+
+func (a *fkAccum) add(key string, ref TableRef, col, refCol string) {
+	if a.byKey == nil {
+		a.byKey = map[string]*ForeignKey{}
+	}
+	fk := a.byKey[key]
+	if fk == nil {
+		fk = &ForeignKey{RefTable: ref}
+		a.byKey[key] = fk
+		a.order = append(a.order, key)
+	}
+	fk.Columns = append(fk.Columns, col)
+	fk.RefColumns = append(fk.RefColumns, refCol)
+}
+
+// ordered returns the accumulated keys in first-seen order, as pointers so a
+// caller can still post-process each group (e.g. sqlite's implicit-PK fill).
+func (a *fkAccum) ordered() []*ForeignKey {
+	out := make([]*ForeignKey, 0, len(a.order))
+	for _, k := range a.order {
+		out = append(out, a.byKey[k])
+	}
+	return out
+}
+
+// result is ordered() flattened to values, for engines with nothing to fix up.
+func (a *fkAccum) result() []ForeignKey {
+	out := make([]ForeignKey, 0, len(a.order))
+	for _, fk := range a.ordered() {
+		out = append(out, *fk)
+	}
+	return out
+}
+
 // DatabaseName derives the database name for the header: the URL path for
 // server engines, or the file's base name (sans extension) for SQLite.
 func DatabaseName(dsn string) string {

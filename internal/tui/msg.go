@@ -40,6 +40,8 @@ type editDoneMsg struct {
 	null     bool // the cell was set to SQL NULL
 	affected int64
 	gen      int
+	rowIdx   int // target cell (grid.rows / grid.cols index) for the in-memory write-back
+	colIdx   int
 }
 
 // editorReadyMsg carries a seed that was built off the Update loop (e.g. o, which

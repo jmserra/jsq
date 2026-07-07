@@ -445,12 +445,17 @@ type keyPred struct {
 
 // editReq is a resolved single-cell update: SET col = val WHERE <full PK>.
 // When null is set the cell is set to SQL NULL (val is ignored / bound as nil).
+// rowIdx/colIdx pin the target cell (index into grid.rows and grid.cols) so the
+// in-memory write-back lands on the right cell even if the cursor moved or a new
+// edit started while this one was in flight — never on live grid.editR/editC.
 type editReq struct {
-	table db.TableRef
-	col   string
-	val   string
-	null  bool
-	keys  []keyPred
+	table  db.TableRef
+	col    string
+	val    string
+	null   bool
+	keys   []keyPred
+	rowIdx int // index into grid.rows (underlying, not the visible order)
+	colIdx int // index into grid.cols
 }
 
 // colIndex returns the display index of the named column, or -1.
@@ -579,15 +584,19 @@ func (g *grid) editDeleteWord() {
 // untouched NULL which stays NULL — §8), or the row can't be keyed.
 func (g *grid) commitEdit() (editReq, bool) {
 	val, dirty := g.editVal, g.editDirty
+	r, c := g.editR, g.editC
 	g.cancelEdit()
 	if !dirty {
 		return editReq{}, false
 	}
-	keys, ok := g.keyPreds()
+	if r < 0 || r >= len(g.visible) {
+		return editReq{}, false
+	}
+	keys, ok := g.keyPredsAt(r)
 	if !ok {
 		return editReq{}, false
 	}
-	req := editReq{table: g.table, col: g.cols[g.editC].name, val: val, keys: keys}
+	req := editReq{table: g.table, col: g.cols[c].name, val: val, keys: keys, rowIdx: g.visible[r], colIdx: c}
 	// Typing exactly NULL (uppercase) sets SQL NULL, not the string "NULL" — the
 	// only way to null a cell on the quick path (the string "NULL" needs E).
 	if val == "NULL" {
@@ -747,27 +756,36 @@ func valueText(v any) string {
 }
 
 // applyEdit writes the committed value back into the in-memory row so the grid
-// reflects the change immediately, without a server round-trip. The typed value
+// reflects the change immediately, without a server round-trip. rowIdx/colIdx
+// pin the exact cell (from the editReq), so a cursor move or a fresh edit started
+// while the save was in flight can't misdirect the write-back. The typed value
 // keeps the prior cell's driver type when it parses cleanly (coerceLike), so an
 // edited cell — e.g. an integer PK — stays the same type for later keyed edits.
-func (g *grid) applyEdit(val string) {
-	if g.editR < len(g.visible) {
-		row := g.rows[g.visible[g.editR]]
-		if g.editC < len(row) {
-			row[g.editC] = coerceLike(row[g.editC], val)
-		}
+func (g *grid) applyEdit(rowIdx, colIdx int, val string) {
+	if row, ok := g.cellAt(rowIdx, colIdx); ok {
+		row[colIdx] = coerceLike(row[colIdx], val)
 	}
 }
 
 // applyEditNull writes SQL NULL into the just-edited cell (in-memory), so it
 // renders as faint NULL immediately without a reload.
-func (g *grid) applyEditNull() {
-	if g.editR < len(g.visible) {
-		row := g.rows[g.visible[g.editR]]
-		if g.editC < len(row) {
-			row[g.editC] = nil
-		}
+func (g *grid) applyEditNull(rowIdx, colIdx int) {
+	if row, ok := g.cellAt(rowIdx, colIdx); ok {
+		row[colIdx] = nil
 	}
+}
+
+// cellAt returns the underlying row backing (rowIdx, colIdx) if both indexes are
+// in bounds, so the write-back helpers can share the guard.
+func (g *grid) cellAt(rowIdx, colIdx int) ([]any, bool) {
+	if rowIdx < 0 || rowIdx >= len(g.rows) {
+		return nil, false
+	}
+	row := g.rows[rowIdx]
+	if colIdx < 0 || colIdx >= len(row) {
+		return nil, false
+	}
+	return row, true
 }
 
 // coerceLike converts the edited string back to prev's type when it parses
