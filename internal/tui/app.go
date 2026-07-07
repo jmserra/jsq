@@ -1007,6 +1007,16 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.status = a.currentTable.Name
 	case tea.KeyBackspace:
 		a.grid.editBackspace()
+	case tea.KeyLeft:
+		a.grid.editLeft()
+	case tea.KeyRight:
+		a.grid.editRight()
+	case tea.KeyHome, tea.KeyCtrlA:
+		a.grid.editHome()
+	case tea.KeyEnd, tea.KeyCtrlE:
+		a.grid.editEnd()
+	case tea.KeyCtrlW:
+		a.grid.editDeleteWord()
 	case tea.KeySpace:
 		a.grid.editInput(" ")
 	case tea.KeyRunes:

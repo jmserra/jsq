@@ -453,6 +453,76 @@ func TestQuickEditLiteralNullString(t *testing.T) {
 	}
 }
 
+// TestEditCursorMechanics unit-tests the in-cell cursor: insert at the caret,
+// ←/→ movement, Home/End, backspace-before-caret, and Ctrl-W delete-word.
+func TestEditCursorMechanics(t *testing.T) {
+	g := grid{}
+	g.editVal, g.editPos = "hello world", len([]rune("hello world")) // caret at end (11)
+
+	g.editLeft()
+	g.editLeft()
+	if g.editPos != 9 {
+		t.Fatalf("after ←←, pos = %d, want 9", g.editPos)
+	}
+	g.editInput("X") // insert at the caret, not the end
+	if g.editVal != "hello worXld" || g.editPos != 10 {
+		t.Fatalf("after insert: %q pos %d, want \"hello worXld\" pos 10", g.editVal, g.editPos)
+	}
+	g.editDeleteWord() // Ctrl-W: removes "worX" back to the space
+	if g.editVal != "hello ld" || g.editPos != 6 {
+		t.Fatalf("after Ctrl-W: %q pos %d, want \"hello ld\" pos 6", g.editVal, g.editPos)
+	}
+	g.editHome()
+	if g.editPos != 0 {
+		t.Fatalf("Home pos = %d, want 0", g.editPos)
+	}
+	g.editEnd()
+	if g.editPos != len([]rune(g.editVal)) {
+		t.Fatalf("End pos = %d, want %d", g.editPos, len([]rune(g.editVal)))
+	}
+
+	// Backspace deletes the rune *before* the caret, not the last one.
+	g.editVal, g.editPos = "abc", 2
+	g.editBackspace()
+	if g.editVal != "ac" || g.editPos != 1 {
+		t.Fatalf("mid-string backspace: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
+	}
+
+	if got := editCursorText("ab", 1); got != "a▏b" {
+		t.Fatalf("editCursorText caret placement = %q, want a▏b", got)
+	}
+}
+
+// TestQuickEditCursorKeys checks the key wiring: ←/Ctrl-W reach the edit overlay
+// and a mid-string insert commits the right value.
+func TestQuickEditCursorKeys(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	// PK-desc → row 0 is id=2 (Linus). Edit "name".
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if app.grid.editVal != "Linus" || app.grid.editPos != 5 {
+		t.Fatalf("start: %q pos %d, want Linus pos 5", app.grid.editVal, app.grid.editPos)
+	}
+	// ← to the middle, insert, then Ctrl-W wipes back to the caret's word start.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
+	if app.grid.editPos != 3 {
+		t.Fatalf("after ←←, pos = %d, want 3", app.grid.editPos)
+	}
+	app = typeRunes(t, app, "X") // "LinXus", caret after X
+	if app.grid.editVal != "LinXus" {
+		t.Fatalf("mid insert = %q, want LinXus", app.grid.editVal)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyCtrlW})
+	if app.grid.editVal != "us" || app.grid.editPos != 0 {
+		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.grid.editVal, app.grid.editPos)
+	}
+}
+
 // safeUsers seeds a two-row users table for the safe-mode tests.
 func safeUsers(e db.Engine) {
 	ctx := context.Background()

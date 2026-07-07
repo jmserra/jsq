@@ -150,7 +150,9 @@ is continuous** — reaching the loaded edge fetches the next window; there are 
 pages. The grid opens sorted by primary key, newest first.
 
 **Editing** with `e` is available only when the grid came from a single-table
-select with a resolved primary key. The
+select with a resolved primary key. The overlay is a small line editor: `←`/`→`
+move the caret, `Home`/`End` (or `Ctrl-a`/`Ctrl-e`) jump to the ends, and
+`Ctrl-w` deletes the word before the caret. The
 `UPDATE` is always keyed on the full primary key and runs immediately; the status
 line reports what changed. A bare `Enter` that changed nothing (including an
 untouched `NULL` cell) does nothing — so you can't blank a value by accident.

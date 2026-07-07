@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jmserra/jsq/internal/db"
@@ -66,6 +67,7 @@ type grid struct {
 	// Quick-path cell edit (§8): a single-line overlay on the cursor cell.
 	editing      bool
 	editVal      string // in-progress text
+	editPos      int    // cursor position within editVal, as a rune index
 	editR, editC int    // visible-row / column index being edited
 	editOrigNull bool   // the original cell was SQL NULL
 	editDirty    bool   // the user typed at least one key
@@ -490,16 +492,65 @@ func (g *grid) startEdit() bool {
 	} else {
 		g.editVal = fmt.Sprintf("%v", v)
 	}
+	g.editPos = len([]rune(g.editVal)) // cursor at the end
 	return true
 }
 
-func (g *grid) editInput(s string) { g.editVal += s; g.editDirty = true }
-func (g *grid) cancelEdit()        { g.editing, g.editVal, g.editDirty = false, "", false }
+// editInput inserts s at the cursor and advances past it.
+func (g *grid) editInput(s string) {
+	r, ins := []rune(g.editVal), []rune(s)
+	r = append(r[:g.editPos:g.editPos], append(ins, r[g.editPos:]...)...)
+	g.editVal = string(r)
+	g.editPos += len(ins)
+	g.editDirty = true
+}
 
+func (g *grid) cancelEdit() {
+	g.editing, g.editVal, g.editDirty, g.editPos = false, "", false, 0
+}
+
+// editBackspace deletes the rune before the cursor.
 func (g *grid) editBackspace() {
-	if r := []rune(g.editVal); len(r) > 0 {
-		g.editVal = string(r[:len(r)-1])
+	if g.editPos > 0 {
+		r := []rune(g.editVal)
+		r = append(r[:g.editPos-1], r[g.editPos:]...)
+		g.editVal = string(r)
+		g.editPos--
 	}
+	g.editDirty = true
+}
+
+// editLeft / editRight move the cursor within the value; editHome / editEnd jump
+// to the ends. Bounded to [0, len].
+func (g *grid) editLeft() {
+	if g.editPos > 0 {
+		g.editPos--
+	}
+}
+
+func (g *grid) editRight() {
+	if g.editPos < len([]rune(g.editVal)) {
+		g.editPos++
+	}
+}
+
+func (g *grid) editHome() { g.editPos = 0 }
+func (g *grid) editEnd()  { g.editPos = len([]rune(g.editVal)) }
+
+// editDeleteWord deletes from the start of the word before the cursor up to the
+// cursor (Ctrl-W): trailing spaces first, then the run of non-spaces.
+func (g *grid) editDeleteWord() {
+	r := []rune(g.editVal)
+	i := g.editPos
+	for i > 0 && unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	for i > 0 && !unicode.IsSpace(r[i-1]) {
+		i--
+	}
+	r = append(r[:i], r[g.editPos:]...)
+	g.editVal = string(r)
+	g.editPos = i
 	g.editDirty = true
 }
 
@@ -745,6 +796,14 @@ func colWidthFor(name string, rows [][]any, i int) int {
 	return max(minColWidth, max(nameW, dataW))
 }
 
+// editCursorText renders the in-progress edit value with the "▏" cursor bar at
+// the rune index pos (clamped), so ←/→ show the caret mid-string.
+func editCursorText(val string, pos int) string {
+	r := []rune(val)
+	pos = clamp(pos, 0, len(r))
+	return string(r[:pos]) + "▏" + string(r[pos:])
+}
+
 func cellString(v any) string {
 	if v == nil {
 		return "NULL"
@@ -817,7 +876,7 @@ func (g *grid) renderRow(r int) string {
 		isNull := false
 		isEdit := g.editing && r == g.editR && c == g.editC
 		if isEdit {
-			cell = g.editVal + "▏"
+			cell = editCursorText(g.editVal, g.editPos)
 		} else if c < len(row) {
 			v := row[c]
 			isNull = v == nil
