@@ -112,7 +112,7 @@ func TestRunFlowConnects(t *testing.T) {
 	}
 
 	// connectCmd starts the helper and opens the engine (SQLite → no port wait).
-	msg := connectCmd(app.pending)()
+	msg := connectCmd(0, app.pending)()
 	if _, ok := msg.(connectedMsg); !ok {
 		t.Fatalf("expected connectedMsg, got %T (%+v)", msg, msg)
 	}
@@ -167,7 +167,7 @@ func TestConnectErrorQuits(t *testing.T) {
 // TestConnectCmdReportsConnectErr checks a failed connect surfaces as
 // connectErrMsg (here: the helper exits before its port opens).
 func TestConnectCmdReportsConnectErr(t *testing.T) {
-	msg := connectCmd(config.Conn{URL: "postgres://u@127.0.0.1:1/app", Cmd: "exit 1"})()
+	msg := connectCmd(0, config.Conn{URL: "postgres://u@127.0.0.1:1/app", Cmd: "exit 1"})()
 	if _, ok := msg.(connectErrMsg); !ok {
 		t.Fatalf("expected connectErrMsg, got %T (%+v)", msg, msg)
 	}

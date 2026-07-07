@@ -259,6 +259,17 @@ func isReadSQL(sql string) bool {
 	return false
 }
 
+// isMultiStatement reports whether sql carries more than one statement (a ';'
+// before the final one). Used to force a safe-mode confirmation on a "read" that
+// smuggles a trailing write — e.g. "SELECT 1; DELETE FROM users;", which
+// isReadSQL (leading keyword only) would otherwise wave through unconfirmed. It
+// over-counts a ';' inside a string literal, but on a safe connection an extra
+// confirmation is harmless.
+func isMultiStatement(sql string) bool {
+	s := strings.TrimRight(strings.TrimSpace(stripSQLComments(sql)), "; \t\r\n")
+	return strings.Contains(s, ";")
+}
+
 // stripSQLComments drops -- line comments and blank lines. Used only to detect an
 // emptied editor buffer (cleared → abort); the statement that actually runs is
 // the file's full contents.

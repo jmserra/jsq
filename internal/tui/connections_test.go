@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -108,6 +109,168 @@ func TestMultiConnectionJump(t *testing.T) {
 	if app.connName != "A" || app.currentTable.Name != "ta" || app.screen != screenBrowse {
 		t.Fatalf("Ctrl-O should land on A/ta, got conn=%q table=%q screen=%d",
 			app.connName, app.currentTable.Name, app.screen)
+	}
+}
+
+// TestReconnectShowsLoader: a mid-session connection switch shows the animated
+// connecting loader (naming the target) even without a cmd/port to wait on, so a
+// non-instant open doesn't feel like nothing is happening.
+func TestReconnectShowsLoader(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = connectPicker(t, app, 0) // connect A (starts the perpetual spinner loop)
+	app = openFirstTable(t, app)
+
+	// c → picker, select B and dispatch the switch, but hold the connectedMsg: the
+	// reconnect is now in flight.
+	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	app = m.(App)
+	app.picker.cursor = 1
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("selecting another connection should dispatch a reconnect")
+	}
+	if !app.isConnecting() {
+		t.Fatal("a mid-session reconnect should be flagged as connecting")
+	}
+	if v := app.View(); !strings.Contains(v, "connecting to B") {
+		t.Fatalf("the connecting loader should name the target:\n%s", v)
+	}
+	// While it's in flight the loader owns the screen: a stray key is swallowed.
+	before := app.screen
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	app = m.(App)
+	if app.screen != before {
+		t.Fatal("keys must be swallowed while the connecting loader is up")
+	}
+	// Delivering the connectedMsg dismisses the loader.
+	app = update(t, app, cmd())
+	if app.isConnecting() {
+		t.Fatal("connectedMsg should dismiss the connecting loader")
+	}
+}
+
+// TestPickerFirstConnectShowsLoader: the very first connect from the startup
+// picker (no perpetual spinner loop yet) still shows the animated loader, so a
+// slow open doesn't leave the picker sitting there with no feedback.
+func TestPickerFirstConnectShowsLoader(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{}) // picker mode
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if !app.ticking {
+		t.Fatal("picker mode should reserve the spinner loop (Init dispatches it)")
+	}
+
+	// Select the first connection and dispatch the connect, holding the
+	// connectedMsg so the connect is in flight.
+	app.picker.cursor = 0
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("picker Enter should dispatch a connect")
+	}
+	if !app.isConnecting() {
+		t.Fatal("the first picker connect should show the connecting loader")
+	}
+	if v := app.View(); !strings.Contains(v, "connecting to A") {
+		t.Fatalf("the loader should name the target connection:\n%s", v)
+	}
+	app = update(t, app, cmd()) // connectedMsg
+	if app.isConnecting() || app.screen != screenTables {
+		t.Fatalf("connectedMsg should dismiss the loader and show tables; screen=%d", app.screen)
+	}
+}
+
+// TestTableListBackspaceToPicker: on the table list with no filter, Backspace
+// steps up to the connection picker (and Esc there returns to the table list).
+// Esc on the table list does NOT go to the picker — with no grid it stays put.
+func TestTableListBackspaceToPicker(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = connectPicker(t, app, 0) // lands on the table list, no table opened
+	if app.screen != screenTables || app.currentTable.Name != "" {
+		t.Fatalf("expected the table list with nothing opened, screen=%d table=%q",
+			app.screen, app.currentTable.Name)
+	}
+
+	// Esc with no filter and no grid → stays on the table list (no double-Esc jump).
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.screen != screenTables {
+		t.Fatalf("Esc on an empty table list should stay put, got screen=%d", app.screen)
+	}
+
+	// Backspace (no filter) → the connection picker.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if app.screen != screenPicker {
+		t.Fatalf("Backspace on the table list should go to the connection picker, got screen=%d", app.screen)
+	}
+	// Esc back from the picker → the table list (there's no grid yet).
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.screen != screenTables {
+		t.Fatalf("Esc from the picker with nothing loaded should return to the table list, got screen=%d", app.screen)
+	}
+
+	// With a filter active, Backspace edits it rather than leaving the list.
+	app = typeRunes(t, app, "zz") // no match, but a live filter
+	if !app.sidebar.hasFilter() {
+		t.Fatal("typing should start a filter")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if app.screen != screenTables || app.sidebar.filterVal != "z" {
+		t.Fatalf("Backspace with a filter should delete a char, got screen=%d filter=%q",
+			app.screen, app.sidebar.filterVal)
+	}
+}
+
+// TestCancelReconnect: Esc while connecting cancels the connect, rolls the
+// identity back, returns to the previous page, and the in-flight connect's late
+// result is discarded (the old engine stays usable).
+func TestCancelReconnect(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = connectPicker(t, app, 0) // connect A
+	app = openFirstTable(t, app)
+	engineA := app.engine
+
+	// c → picker, select B, dispatch the switch (in flight, hold the result).
+	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	app = m.(App)
+	app.picker.cursor = 1
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if !app.isConnecting() {
+		t.Fatal("should be connecting to B")
+	}
+	if v := app.View(); !strings.Contains(v, "esc to cancel") {
+		t.Fatalf("the loader should offer esc to cancel:\n%s", v)
+	}
+
+	// Esc cancels → back to the picker, identity rolled back to A.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = m.(App)
+	if app.isConnecting() {
+		t.Fatal("Esc should cancel the connect")
+	}
+	if app.screen != screenPicker {
+		t.Fatalf("Esc should return to the previous page (the picker), got screen=%d", app.screen)
+	}
+	if app.connName != "A" {
+		t.Fatalf("identity should roll back to A, got %q", app.connName)
+	}
+
+	// The in-flight connect finishes late: its result must be discarded, not applied.
+	m, _ = app.Update(cmd())
+	app = m.(App)
+	if app.connName != "A" || app.engine != engineA {
+		t.Fatalf("a cancelled connect's late result must not switch to B; conn=%q engineSwapped=%v",
+			app.connName, app.engine != engineA)
+	}
+	if _, err := app.engine.Query(context.Background(), "SELECT 1"); err != nil {
+		t.Fatalf("connection A should still be usable after cancelling B: %v", err)
 	}
 }
 

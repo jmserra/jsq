@@ -42,6 +42,12 @@ type App struct {
 	connAddr string
 	ticking  bool
 
+	// preConn snapshots the identity a mid-session connect overwrites optimistically
+	// (connName/safe/pending/viewIdx), so an Esc-cancel or a failed connect can roll
+	// it back. It's set only while a cancellable connect is in flight and cleared
+	// once one commits (connectedMsg).
+	preConn *connRestore
+
 	engine  db.Engine
 	sidebar sidebar // the full-screen table list (screenTables)
 	dbs     sidebar // the full-screen database list (screenDatabases; items are db.Table{Name: db})
@@ -78,7 +84,6 @@ type App struct {
 	w, h           int
 	status         string
 	postExecStatus string // shown after the reload that follows a full-path exec
-	err            error  // mid-session failure → in-app error screen
 	fatalErr       error  // connect failure → carried out to main, printed to stderr
 
 	// Header activity indicator (top-right): activity names the in-flight DB op
@@ -114,6 +119,10 @@ func New(conns []config.Conn, direct config.Conn) App {
 		a.screen = screenBrowse
 		a.status = "connecting…"
 		a.beginConnect(direct)
+	} else {
+		// Picker mode: reserve the spinner loop (Init dispatches it) so the very
+		// first connect — before any perpetual loop exists — animates its loader.
+		a.ticking = true
 	}
 	return a
 }
@@ -124,14 +133,18 @@ func (a App) FatalErr() error { return a.fatalErr }
 
 func (a App) Init() tea.Cmd {
 	if a.pending.URL == "" {
-		return nil
+		// Picker mode: run the spinner loop for the whole session (it idles
+		// invisibly) so a slow first connect from the picker shows an animated loader.
+		return tickCmd()
 	}
+	// The initial connect carries gen 0 — it can't be cancelled in place (Esc quits,
+	// there being no previous page), so its result is never dropped as stale.
 	if a.connCmd != "" {
 		// New already armed the waiting view + spinner loop; animate it while
 		// connectCmd runs the cmd/wait/open in the background.
-		return tea.Batch(connectCmd(a.pending), tickCmd())
+		return tea.Batch(connectCmd(0, a.pending), tickCmd())
 	}
-	return connectCmd(a.pending)
+	return connectCmd(0, a.pending)
 }
 
 // beginConnect arms the full-screen waiting view for a `cmd`-backed connection
@@ -146,6 +159,49 @@ func (a *App) beginConnect(c config.Conn) {
 	a.ticking = true
 }
 
+// connRestore is the identity a mid-session connect overwrites before it resolves;
+// an Esc-cancel or a failed connect rolls it back so we don't end up showing a
+// connection/database/jumplist position we never actually reached.
+type connRestore struct {
+	connName string
+	safe     bool
+	pending  config.Conn
+	viewIdx  int
+}
+
+// startConnect marks a cancellable connect as in flight: it snapshots the identity
+// to roll back on cancel, bumps the op token so a late result can be dropped, and
+// sets connecting. Callers invoke it just before overwriting connName/pending/etc.
+func (a *App) startConnect() int {
+	a.preConn = &connRestore{connName: a.connName, safe: a.safe, pending: a.pending, viewIdx: a.viewIdx}
+	a.gen++
+	a.connecting = true
+	return a.gen
+}
+
+// restoreConn rolls back the identity captured by startConnect (a no-op if none),
+// used when a connect is cancelled or fails.
+func (a *App) restoreConn() {
+	if a.preConn == nil {
+		return
+	}
+	a.connName, a.safe, a.pending, a.viewIdx = a.preConn.connName, a.preConn.safe, a.preConn.pending, a.preConn.viewIdx
+	a.preConn = nil
+}
+
+// cancelConnect aborts an in-flight connect (Esc): it invalidates the connect's
+// late result (a bumped token via restore's caller), rolls back the optimistic
+// identity, dismisses the loader, and drops any staged jump — the View then falls
+// back to the screen we were on, i.e. the previous page.
+func (a *App) cancelConnect() {
+	a.gen++ // supersede the in-flight connect so its connectedMsg is dropped
+	a.restoreConn()
+	a.pendingView = nil
+	a.connecting = false
+	a.connCmd, a.connAddr = "", ""
+	a.status = "cancelled"
+}
+
 // ensureTick starts the spinner loop unless one is already running — so a
 // waiting-view connect and connectedMsg don't spin up two loops.
 func (a *App) ensureTick() tea.Cmd {
@@ -155,6 +211,14 @@ func (a *App) ensureTick() tea.Cmd {
 	a.ticking = true
 	return tickCmd()
 }
+
+// isConnecting reports whether the full-screen connecting loader should own the
+// screen: a cmd-backed connect (connCmd set) or a plain reconnect that has the
+// spinner loop running to animate it (connecting && ticking). The ticking guard
+// keeps the no-loop initial-picker window off the loader (it would sit frozen),
+// while every mid-session reconnect — where a perpetual loop is already up —
+// shows an animated "connecting to X…" even when the open isn't instant.
+func (a App) isConnecting() bool { return a.connCmd != "" || (a.connecting && a.ticking) }
 
 // begin marks a new in-flight DB op labelled for the header indicator, cancels
 // any previous op, and returns a cancellable context for the op's command. The
@@ -193,6 +257,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case connectErrMsg:
+		if a.stale(msg.gen) { // a picker connect the user cancelled before it failed
+			return a, nil
+		}
 		// No session to fall back to — quit and let main print it to stderr.
 		a.stop()
 		a.fatalErr = msg.err
@@ -205,20 +272,38 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.stop()
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.connecting = false
-		a.pendingPos = nil // a failed load never repositions a later one
-		a.err = msg.err
+		a.grid.loading = false
+		a.pendingPos = nil  // a failed load never repositions a later one
+		a.pendingView = nil // and never resolves a pending cross-DB jump
+		a.restoreConn()     // a failed mid-session connect rolls back its optimistic identity
+		// A mid-session failure — a typo'd ad-hoc query, a rejected mutation, a
+		// failed reconnect — is recoverable: the engine is still usable (the connect
+		// path fails via connectErrMsg instead). Surface it in the status line and
+		// stay on the current screen rather than trapping on a dead-end error page.
+		a.status = "error: " + strings.Join(strings.Fields(msg.err.Error()), " ")
 		return a, nil
 
 	case tickMsg:
-		if a.activity != "" || a.connCmd != "" {
+		if a.activity != "" || a.isConnecting() {
 			a.spinner++
 		}
 		return a, tickCmd()
 
 	case connectedMsg:
+		if a.stale(msg.gen) { // a cancelled/superseded connect landed late — drop it
+			if msg.engine != nil {
+				msg.engine.Close() // and don't leak the engine it opened
+			}
+			return a, nil
+		}
+		a.preConn = nil                // this connect committed; nothing to roll back
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.connecting = false
+		old := a.engine
 		a.engine = msg.engine
+		if old != nil {
+			old.Close() // close the previous engine now that the new one is ready
+		}
 		if msg.name != "" {
 			a.connName = msg.name
 		}
@@ -335,9 +420,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.remember.Name != "" {
 			a.lastQuery[msg.remember] = msg.sql
 		}
-		// A read (s) shows its rows; a mutation runs via Exec — and on a safe
-		// connection it's held for a y/n confirmation first.
-		if isReadSQL(msg.sql) {
+		// A read (s) shows its rows directly; a mutation runs via Exec — and on a
+		// safe connection it's held for a y/n confirmation first. A multi-statement
+		// submission on a safe connection is treated as a mutation even if it leads
+		// with a read verb, so a trailing write can't slip past unconfirmed.
+		if isReadSQL(msg.sql) && !(a.safe && isMultiStatement(msg.sql)) {
 			ctx := a.begin("running query")
 			a.status = "running query…"
 			return a, runQueryCmd(ctx, a.gen, a.engine, msg.sql)
@@ -408,6 +495,20 @@ func (a *App) layout() {
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return a, tea.Quit
+	}
+	// While a connect is in flight the loader owns the screen. Esc cancels it and
+	// returns to the previous page (or quits if this is the very first connect, with
+	// nowhere to go back to); every other key but Ctrl-C is swallowed so a stray key
+	// can't mutate state behind the loader.
+	if a.isConnecting() {
+		if msg.Type == tea.KeyEsc {
+			if a.engine == nil && a.screen != screenPicker {
+				return a, tea.Quit // initial direct connect: no previous page
+			}
+			a.cancelConnect()
+			return a, nil
+		}
+		return a, nil
 	}
 	// Safe-mode confirmation captures every key: only 'y' runs the pending
 	// mutation, anything else cancels it.
@@ -515,12 +616,17 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			a.picker.move(-1)
 		case "esc":
-			if a.engine != nil { // opened mid-session (c) → back to where we were
-				a.screen = screenBrowse
+			if a.engine != nil { // opened mid-session → back to where we were
+				if a.currentTable.Name != "" {
+					a.screen = screenBrowse // a loaded grid
+				} else {
+					a.screen = screenTables // nothing loaded yet → the table list
+				}
 				a.layout()
 			}
 		case "enter":
-			// Ignore a second Enter while a connect is already in flight.
+			// Ignore a second Enter while a connect is already in flight (the loader
+			// isn't shown yet in the no-loop initial-picker window).
 			if a.connecting {
 				return a, nil
 			}
@@ -542,7 +648,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.jumpBy(-1)
 		case "ctrl+i", "tab": // jumplist forward — terminals send Ctrl-I as Tab
 			return a.jumpBy(1)
-		case "t": // go to the table list
+		case "t", "backspace": // go to the table list
 			a.screen = screenTables
 			a.layout()
 			return a, nil
@@ -572,23 +678,23 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 	}
-	a.syncCurrent() // capture the current view before changing identity
+	a.syncCurrent()         // capture the current view before changing identity
+	gen := a.startConnect() // snapshot identity (rollback on Esc) + op token + connecting
 	a.connName, a.safe, a.pending = c.Name, c.Safe, c
-	a.connecting = true
 	a.status = "connecting to " + c.Name + "…"
 	if a.engine == nil { // initial connect (startup): connectCmd, quits on failure
 		a.beginConnect(c)
 		if a.connCmd != "" {
-			return a, tea.Batch(connectCmd(c), tickCmd())
+			return a, tea.Batch(connectCmd(gen, c), tickCmd())
 		}
-		return a, connectCmd(c)
+		return a, connectCmd(gen, c)
 	}
 	// Mid-session switch: reuse the tunnel if it's already up.
 	start := !a.tunneled[c.Name]
 	if start && c.Cmd != "" {
 		a.beginConnect(c) // loader while the tunnel comes up
 	}
-	return a, openEngineCmd(a.engine, c, c.URL, start)
+	return a, openEngineCmd(gen, c, c.URL, start)
 }
 
 // openDatabases fetches the connection's databases and shows the picker.
@@ -640,15 +746,17 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 	}
-	a.syncCurrent() // save the current view into the session jumplist before leaving
+	a.syncCurrent()         // save the current view into the session jumplist before leaving
+	gen := a.startConnect() // snapshot for rollback + op token + arm the loader
 	dsn := db.WithDatabase(a.pending.URL, name)
 	a.pending.URL = dsn // so a later T swaps from the new database
 	a.status = "connecting to " + name + "…"
-	return a, openEngineCmd(a.engine, config.Conn{Name: a.connName}, dsn, false)
+	return a, openEngineCmd(gen, config.Conn{Name: a.connName}, dsn, false)
 }
 
 // handleTablesKey drives the full-screen table list: typing narrows it (no `/`),
-// arrows / Ctrl-N/P move, Enter opens, Esc clears the filter or returns to the grid.
+// arrows / Ctrl-N/P move, Enter opens, Esc clears the filter or returns to the
+// grid, and Backspace (with no filter) steps up to the connection picker.
 func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
@@ -675,7 +783,13 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyRight:
 		a.sidebar.move(a.sidebar.rows()) // next column
 	case tea.KeyBackspace:
-		a.sidebar.filterBackspace()
+		// Backspace edits the filter while one is active; with none it steps up to
+		// the connection picker (mirroring Backspace in the grid → table list).
+		if a.sidebar.hasFilter() {
+			a.sidebar.filterBackspace()
+		} else if len(a.picker.conns) > 0 {
+			a.screen = screenPicker
+		}
 	case tea.KeySpace:
 		a.sidebar.filterInput(" ")
 	case tea.KeyRunes:
@@ -820,14 +934,16 @@ func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
 		a.status = "no view to go " + where + " to"
 		return a, nil
 	}
-	a.viewIdx = ni
-	return a.goToView(a.views[ni])
+	return a.goToView(ni)
 }
 
-// goToView loads v, first reconnecting to another connection or database if v
-// lives elsewhere. The jumplist pointer (viewIdx) has already been set by the
-// caller. pendingView makes connectedMsg load the view rather than the table list.
-func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
+// goToView loads the jumplist entry at idx, reconnecting first if it lives on
+// another connection or database. On a reconnect it snapshots the current identity
+// (startConnect) so an Esc-cancel rolls back cleanly, and moves the jumplist
+// pointer here (not in the caller) so a cancelled jump leaves it where it was.
+// pendingView makes connectedMsg load the view rather than the table list.
+func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
+	v := a.views[idx]
 	if v.conn != "" && v.conn != a.connName { // cross-connection jump
 		c, ok := a.findConn(v.conn)
 		if !ok {
@@ -838,24 +954,29 @@ func (a App) goToView(v viewState) (tea.Model, tea.Cmd) {
 		if v.db != "" {
 			dsn = db.WithDatabase(c.URL, v.db)
 		}
+		gen := a.startConnect() // snapshots viewIdx before the move below
+		a.viewIdx = idx
 		a.connName, a.safe, a.pending = c.Name, c.Safe, c
 		vv := v
 		a.pendingView = &vv
 		start := !a.tunneled[c.Name]
 		a.status = "connecting to " + c.Name + "…"
 		if start && c.Cmd != "" {
-			a.beginConnect(c) // show the loader while the tunnel comes up
+			a.beginConnect(c) // cmd-backed: also show the running/waiting detail
 		}
-		return a, openEngineCmd(a.engine, c, dsn, start)
+		return a, openEngineCmd(gen, c, dsn, start)
 	}
 	if v.db != "" && v.db != a.dbName { // same connection, different database
+		gen := a.startConnect()
+		a.viewIdx = idx
 		dsn := db.WithDatabase(a.pending.URL, v.db)
 		a.pending.URL = dsn
 		vv := v
 		a.pendingView = &vv
 		a.status = "connecting to " + v.db + "…"
-		return a, openEngineCmd(a.engine, config.Conn{Name: a.connName}, dsn, false)
+		return a, openEngineCmd(gen, config.Conn{Name: a.connName}, dsn, false)
 	}
+	a.viewIdx = idx
 	return a.loadView(v, "loading "+v.table.Name)
 }
 
@@ -885,8 +1006,7 @@ func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
 	if i < 0 || i >= len(a.views) || i == a.viewIdx {
 		return a, nil
 	}
-	a.viewIdx = i
-	return a.goToView(a.views[i])
+	return a.goToView(i)
 }
 
 // loadView switches to v. If v carries a cached snapshot (a revisited view), it
@@ -1169,9 +1289,11 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // maybeLoadMore triggers a continuous-scroll fetch when the cursor nears the
-// loaded edge and more rows exist.
+// loaded edge and more rows exist. It never fires while another op is in flight:
+// begin() would cancel that op, so a cursor move during a sort/filter/reload
+// could silently supersede it and append the next window onto the stale rows.
 func (a *App) maybeLoadMore() tea.Cmd {
-	if !a.grid.wantMore() {
+	if a.activity != "" || !a.grid.wantMore() {
 		return nil
 	}
 	a.grid.loading = true
@@ -1225,14 +1347,7 @@ func (a App) gridLimit() int {
 }
 
 func (a App) View() string {
-	if a.err != nil {
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-		if a.w > 0 {
-			style = style.Width(a.w) // soft-wrap long errors instead of clipping
-		}
-		return style.Render("error: "+a.err.Error()) + "\n\npress ctrl-c to quit"
-	}
-	if a.connCmd != "" {
+	if a.isConnecting() {
 		return a.connectingView()
 	}
 	switch a.screen {
@@ -1314,24 +1429,31 @@ var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"
 // safeConnStyle marks a safe (likely production) connection name in the header.
 var safeConnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
 
-// connectingView is the full-screen loader shown while a `cmd`-backed connection
-// starts its helper and waits for the port — it names what we ran and where.
+// connectingView is the full-screen loader shown while a connect/reconnect is in
+// flight — so even a plain, non-instant open shows something is happening. For a
+// cmd-backed connection it also names the helper we ran and the port we're waiting
+// on; a plain open shows just the spinner and the target.
 func (a App) connectingView() string {
 	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
 	label := lipgloss.NewStyle().Faint(true)
-	head := "connecting"
-	if a.connName != "" {
-		head += " to " + a.connName
+	head := a.status // the caller set "connecting to X…"; fall back if empty
+	if head == "" {
+		head = "connecting"
+		if a.connName != "" {
+			head += " to " + a.connName
+		}
 	}
 	var b strings.Builder
 	b.WriteString("\n " + activityStyle.Render(frame) + " " + head + "\n\n")
-	// The cmd can be long; soft-wrap it (indented under the label) so it never
-	// clips off the right edge.
-	b.WriteString(" " + label.Render("running") + "  " + a.wrapIndent(a.connCmd, 10) + "\n")
-	if a.connAddr != "" {
-		b.WriteString(" " + label.Render("waiting") + "  " + a.connAddr + " …\n")
+	if a.connCmd != "" {
+		// The cmd can be long; soft-wrap it (indented under the label) so it never
+		// clips off the right edge.
+		b.WriteString(" " + label.Render("running") + "  " + a.wrapIndent(a.connCmd, 10) + "\n")
+		if a.connAddr != "" {
+			b.WriteString(" " + label.Render("waiting") + "  " + a.connAddr + " …\n")
+		}
 	}
-	b.WriteString("\n " + label.Render("ctrl-c to abort") + "\n")
+	b.WriteString("\n " + label.Render("esc to cancel") + "\n")
 	return b.String()
 }
 

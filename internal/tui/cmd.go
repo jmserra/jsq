@@ -49,14 +49,14 @@ func dbErr(ctx context.Context, gen int, err error) tea.Msg {
 // start the `cmd` helper (if any) and wait for the URL's host:port, then open
 // the engine and list tables. The helper is registered globally the instant
 // it starts (KillRunHelpers reaps it on exit); on any failure here we kill it.
-func connectCmd(c config.Conn) tea.Cmd {
+func connectCmd(gen int, c config.Conn) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		var proc *runProc
 		if c.Cmd != "" {
 			p, err := startRun(c.Cmd)
 			if err != nil {
-				return connectErrMsg{err}
+				return connectErrMsg{err, gen}
 			}
 			proc = p
 			// The helper is typically a tunnel to the URL's port — wait for it to
@@ -64,22 +64,22 @@ func connectCmd(c config.Conn) tea.Cmd {
 			if addr := db.HostPort(c.URL); addr != "" {
 				if err := waitPort(addr, proc, waitTimeout); err != nil {
 					proc.kill()
-					return connectErrMsg{err}
+					return connectErrMsg{err, gen}
 				}
 			}
 		}
 		eng, err := db.Open(ctx, c.URL)
 		if err != nil {
 			proc.kill()
-			return connectErrMsg{err}
+			return connectErrMsg{err, gen}
 		}
 		tables, err := eng.Tables(ctx)
 		if err != nil {
 			eng.Close()
 			proc.kill()
-			return connectErrMsg{err}
+			return connectErrMsg{err, gen}
 		}
-		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(c.URL), tables: tables}
+		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(c.URL), tables: tables, gen: gen}
 	}
 }
 
@@ -128,37 +128,36 @@ func databasesCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
 
 // openEngineCmd is the mid-session (re)connect: optionally start c's `cmd` tunnel
 // (only the first time for a connection — startTunnel), open a fresh engine on
-// dsn, list its tables, then close the old engine. Used for both database switches
-// (startTunnel=false, same connection) and connection switches. A failure is a
-// mid-session errMsg — the old engine stays usable until the new one is ready.
-func openEngineCmd(old db.Engine, c config.Conn, dsn string, startTunnel bool) tea.Cmd {
+// dsn, and list its tables. Used for both database switches (startTunnel=false,
+// same connection) and connection switches. A failure is a mid-session errMsg
+// stamped with gen — the old engine stays usable until the new one is ready.
+// Closing the old engine is left to the connectedMsg handler, so a cancelled
+// connect (whose result is dropped by gen) never closes the engine we fell back to.
+func openEngineCmd(gen int, c config.Conn, dsn string, startTunnel bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		if startTunnel && c.Cmd != "" {
 			p, err := startRun(c.Cmd)
 			if err != nil {
-				return errMsg{err: err}
+				return errMsg{err: err, gen: gen}
 			}
 			if addr := db.HostPort(dsn); addr != "" {
 				if err := waitPort(addr, p, waitTimeout); err != nil {
 					p.kill()
-					return errMsg{err: err}
+					return errMsg{err: err, gen: gen}
 				}
 			}
 		}
 		eng, err := db.Open(ctx, dsn)
 		if err != nil {
-			return errMsg{err: err}
+			return errMsg{err: err, gen: gen}
 		}
 		tables, err := eng.Tables(ctx)
 		if err != nil {
 			eng.Close()
-			return errMsg{err: err}
+			return errMsg{err: err, gen: gen}
 		}
-		if old != nil {
-			old.Close()
-		}
-		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(dsn), tables: tables}
+		return connectedMsg{engine: eng, name: c.Name, dbName: db.DatabaseName(dsn), tables: tables, gen: gen}
 	}
 }
 

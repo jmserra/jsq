@@ -63,7 +63,7 @@ var helpItems = []helpItem{
 	{key: "s", desc: "free-form SQL in $EDITOR"},
 	{key: "r", desc: "reload the current table / query view"},
 	{head: "Navigate"},
-	{key: "t", desc: "go to the table list (type to filter, enter opens)"},
+	{key: "t / Bksp", desc: "go to the table list (type to filter, enter opens)"},
 	{key: "T", desc: "go to the database list (jump to another database)"},
 	{key: "c", desc: "connection picker (switch to another connection)"},
 	{key: "Tab", desc: "jump forward through views (= Ctrl-i)"},

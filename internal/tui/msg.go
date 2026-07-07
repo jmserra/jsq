@@ -2,12 +2,17 @@ package tui
 
 import "github.com/jmserra/jsq/internal/db"
 
-// connectedMsg is delivered when an engine opens and its tables are listed.
+// connectedMsg is delivered when an engine opens and its tables are listed. gen
+// is the connect's op token: a cancelled (Esc) or superseded connect bumps the
+// token, so its late connectedMsg is dropped (and its orphaned engine closed)
+// instead of yanking the user into a connection they backed out of. The initial
+// connect carries gen 0 (never stale — it can't be cancelled in place).
 type connectedMsg struct {
 	engine db.Engine
 	name   string
 	dbName string
 	tables []db.Table
+	gen    int
 }
 
 // rowsMsg is delivered when a table's first window of rows loads. full is true
@@ -78,8 +83,10 @@ type databasesMsg struct {
 	gen   int
 }
 
-// errMsg carries any async failure that happens mid-session (shown on the
-// in-app error screen). gen is the dispatching op's token when the failure came
+// errMsg carries any async failure that happens mid-session. It's recoverable —
+// the engine stays usable — so the handler surfaces it in the status line and
+// stays on the current screen (a genuinely fatal connect failure uses
+// connectErrMsg instead). gen is the dispatching op's token when the failure came
 // from a cancellable DB op (0 for connect/editor errors, which are never stale).
 type errMsg struct {
 	err error
@@ -88,8 +95,13 @@ type errMsg struct {
 
 // connectErrMsg is a failure during the initial connect (bad DSN, tunnel never
 // opened the port, engine wouldn't open). There's no session to fall back to, so
-// the App quits and main prints the error to stderr.
-type connectErrMsg struct{ err error }
+// the App quits and main prints the error to stderr — unless gen marks it stale
+// (a picker connect the user cancelled with Esc before it failed), in which case
+// it's ignored and we stay on the picker.
+type connectErrMsg struct {
+	err error
+	gen int
+}
 
 // tickMsg drives the header activity spinner; it self-perpetuates once the
 // connection is up (see the connectedMsg handler).

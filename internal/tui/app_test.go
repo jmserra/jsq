@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -280,6 +281,23 @@ func TestSidebarFilter(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
 	if app.screen != screenBrowse {
 		t.Fatal("Esc with no filter should return to the grid")
+	}
+}
+
+// TestGridBackspaceToTableList: Backspace while navigating the grid jumps to the
+// table list (same as `t`).
+func TestGridBackspaceToTableList(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	if app.screen != screenBrowse {
+		t.Fatalf("setup should leave us on the grid, got screen=%d", app.screen)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if app.screen != screenTables {
+		t.Fatalf("Backspace in the grid should go to the table list, got screen=%d", app.screen)
 	}
 }
 
@@ -685,6 +703,22 @@ func TestSafeReadRunsWithoutConfirm(t *testing.T) {
 	}
 	if _, ok := cmd().(queryResultMsg); !ok {
 		t.Fatal("a read submit should produce a query result")
+	}
+}
+
+// TestSafeMultiStatementReadHeld guards the safe-mode read bypass: a submission
+// that leads with a read verb but carries a trailing write must still be held for
+// confirmation on a safe connection, not run unconfirmed via the read path.
+func TestSafeMultiStatementReadHeld(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	m, cmd := app.Update(editorSubmitMsg{sql: `SELECT 1; DELETE FROM users;`})
+	app = m.(App)
+	if !app.confirm.active {
+		t.Fatal("a multi-statement submit on a safe connection must be held for confirmation")
+	}
+	if cmd != nil {
+		t.Fatal("nothing should run before the multi-statement submit is confirmed")
 	}
 }
 
@@ -1211,6 +1245,68 @@ func TestCanceledSwallowed(t *testing.T) {
 	defer cancel()
 	if _, ok := dbErr(live, 1, context.DeadlineExceeded).(errMsg); !ok {
 		t.Fatalf("a real failure on a live ctx should be an errMsg")
+	}
+}
+
+// TestMidSessionErrorRecoverable guards that a recoverable async failure (a
+// typo'd ad-hoc query being the common case) surfaces in the status line and
+// leaves the grid usable, rather than trapping on a dead-end error screen.
+func TestMidSessionErrorRecoverable(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// A mid-session op fails (e.g. a bad SELECT run via `s`).
+	app.begin("running query")
+	m, _ := app.Update(errMsg{err: errors.New("near \"SLECT\": syntax error"), gen: app.gen})
+	app = m.(App)
+
+	if !strings.Contains(app.status, "syntax error") {
+		t.Fatalf("the failure should show in the status line, got %q", app.status)
+	}
+	if app.screen != screenBrowse {
+		t.Fatalf("a recoverable error must not leave the grid; screen=%v", app.screen)
+	}
+	if v := app.View(); strings.Contains(v, "press ctrl-c to quit") {
+		t.Fatalf("a recoverable error must not show the dead-end error screen:\n%s", v)
+	}
+	// The grid is still interactive: a cursor move works and the rows survive.
+	if len(app.grid.rows) != 2 {
+		t.Fatalf("the loaded rows should survive the error, got %d", len(app.grid.rows))
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if app.grid.cursorR != 1 {
+		t.Fatalf("the grid should stay interactive after an error; cursorR=%d", app.grid.cursorR)
+	}
+}
+
+// TestMoveDuringOpKeepsInFlight guards the scroll-vs-op race: a cursor move while
+// another DB op is running must not start a continuous-scroll fetch, because that
+// would cancel the in-flight op (begin) and append onto stale rows.
+func TestMoveDuringOpKeepsInFlight(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	// Pretend more rows exist and an op (e.g. a sort) is already in flight.
+	app.grid.hasMore = true
+	app.begin("sorting")
+	app.activity = "sorting"
+	opGen := app.gen
+
+	// A cursor move must not supersede the running op with a load-more.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if app.activity != "sorting" {
+		t.Fatalf("a move during an op must not start a load-more; activity=%q", app.activity)
+	}
+	if app.gen != opGen {
+		t.Fatalf("a move during an op must not bump gen (cancel it): gen %d != %d", app.gen, opGen)
+	}
+	if app.grid.loading {
+		t.Fatal("a move during an op must not flag a scroll fetch as loading")
 	}
 }
 
