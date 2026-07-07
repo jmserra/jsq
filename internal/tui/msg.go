@@ -32,6 +32,7 @@ type moreRowsMsg struct {
 type editDoneMsg struct {
 	col      string
 	val      string
+	null     bool // the cell was set to SQL NULL
 	affected int64
 	gen      int
 }

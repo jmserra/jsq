@@ -438,10 +438,12 @@ type keyPred struct {
 }
 
 // editReq is a resolved single-cell update: SET col = val WHERE <full PK>.
+// When null is set the cell is set to SQL NULL (val is ignored / bound as nil).
 type editReq struct {
 	table db.TableRef
 	col   string
 	val   string
+	null  bool
 	keys  []keyPred
 }
 
@@ -514,7 +516,13 @@ func (g *grid) commitEdit() (editReq, bool) {
 	if !ok {
 		return editReq{}, false
 	}
-	return editReq{table: g.table, col: g.cols[g.editC].name, val: val, keys: keys}, true
+	req := editReq{table: g.table, col: g.cols[g.editC].name, val: val, keys: keys}
+	// Typing exactly NULL (uppercase) sets SQL NULL, not the string "NULL" — the
+	// only way to null a cell on the quick path (the string "NULL" needs E).
+	if val == "NULL" {
+		req.null, req.val = true, ""
+	}
+	return req, true
 }
 
 // keyPreds builds the WHERE predicates from the edited row's PK values (quick
@@ -676,6 +684,17 @@ func (g *grid) applyEdit(val string) {
 		row := g.rows[g.visible[g.editR]]
 		if g.editC < len(row) {
 			row[g.editC] = coerceLike(row[g.editC], val)
+		}
+	}
+}
+
+// applyEditNull writes SQL NULL into the just-edited cell (in-memory), so it
+// renders as faint NULL immediately without a reload.
+func (g *grid) applyEditNull() {
+	if g.editR < len(g.visible) {
+		row := g.rows[g.visible[g.editR]]
+		if g.editC < len(row) {
+			row[g.editC] = nil
 		}
 	}
 }

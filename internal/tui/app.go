@@ -310,8 +310,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.stop()
 		// A keyed edit must touch exactly one row; anything else is loud (§8).
 		if msg.affected == 1 {
-			a.grid.applyEdit(msg.val)
-			a.status = fmt.Sprintf("set %s = '%s'", msg.col, msg.val)
+			if msg.null {
+				a.grid.applyEditNull()
+				a.status = fmt.Sprintf("set %s = NULL", msg.col)
+			} else {
+				a.grid.applyEdit(msg.val)
+				a.status = fmt.Sprintf("set %s = '%s'", msg.col, msg.val)
+			}
 		} else {
 			a.status = fmt.Sprintf("⚠ %s: %d rows affected, expected 1", msg.col, msg.affected)
 		}

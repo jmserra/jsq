@@ -374,6 +374,85 @@ func TestQuickEditCell(t *testing.T) {
 	}
 }
 
+// TestQuickEditNull drives the §8 quick path setting a cell to SQL NULL: `e`,
+// clear it, type NULL, Enter → the cell becomes real NULL (bound nil), the grid
+// shows it as NULL, and the DB row is actually NULL (not the string "NULL").
+func TestQuickEditNull(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// PK-desc → row 0 is id=2 (Linus). Move to "name" and edit.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "NULL")
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("committing NULL should run an UPDATE")
+	}
+	app = update(t, app, cmd())
+
+	// Grid shows a real NULL (nil cell), not the string "NULL".
+	if got, _, _ := app.grid.currentCell(); got != nil {
+		t.Fatalf("grid cell after NULL edit = %#v, want nil", got)
+	}
+	if !strings.Contains(app.status, "set name = NULL") {
+		t.Fatalf("status should report a NULL set, got %q", app.status)
+	}
+
+	// And the DB row is SQL NULL, not the text "NULL".
+	rs, err := app.engine.Query(context.Background(),
+		`SELECT name IS NULL, name FROM users WHERE id = 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rs.Rows))
+	}
+	// sqlite returns the boolean as int64(1) for a real NULL.
+	if isNull := rs.Rows[0][0]; isNull != int64(1) {
+		t.Fatalf("name IS NULL = %#v, want 1 (a real NULL); cell value = %#v", isNull, rs.Rows[0][1])
+	}
+}
+
+// TestQuickEditLiteralNullString guards that a *lowercase* null stays the string
+// "null" — only exactly-uppercase NULL is the SQL-NULL sentinel.
+func TestQuickEditLiteralNullString(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "null")
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	rs, err := app.engine.Query(context.Background(),
+		`SELECT name IS NULL, name FROM users WHERE id = 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.Rows[0][0] == int64(1) {
+		t.Fatal("lowercase null should stay the string \"null\", not become SQL NULL")
+	}
+	if rs.Rows[0][1] != "null" {
+		t.Fatalf("cell = %#v, want string \"null\"", rs.Rows[0][1])
+	}
+}
+
 // safeUsers seeds a two-row users table for the safe-mode tests.
 func safeUsers(e db.Engine) {
 	ctx := context.Background()

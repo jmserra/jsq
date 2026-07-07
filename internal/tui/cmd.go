@@ -189,7 +189,11 @@ func execEditCmd(ctx context.Context, gen int, eng db.Engine, req editReq) tea.C
 	return func() tea.Msg {
 		args := make([]any, 0, len(req.keys)+1)
 		set := eng.QuoteIdent(req.col) + " = " + eng.Placeholder(1)
-		args = append(args, req.val)
+		var newVal any = req.val
+		if req.null {
+			newVal = nil // SET col = NULL (bound, not inlined)
+		}
+		args = append(args, newVal)
 		preds := make([]string, len(req.keys))
 		for i, k := range req.keys {
 			preds[i] = eng.QuoteIdent(k.col) + " = " + eng.Placeholder(i+2)
@@ -201,7 +205,7 @@ func execEditCmd(ctx context.Context, gen int, eng db.Engine, req editReq) tea.C
 		if err != nil {
 			return dbErr(ctx, gen, err)
 		}
-		return editDoneMsg{col: req.col, val: req.val, affected: n, gen: gen}
+		return editDoneMsg{col: req.col, val: req.val, null: req.null, affected: n, gen: gen}
 	}
 }
 

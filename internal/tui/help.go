@@ -54,7 +54,7 @@ var helpItems = []helpItem{
 	{key: "Ctrl-o / Ctrl-i", desc: "jump back / forward (Ctrl-i needs terminal support)"},
 	{key: "`", desc: "jumplist picker — pick any visited view (j/k, enter)"},
 	{head: "Edit"},
-	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now)"},
+	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now; type NULL to null it)"},
 	{key: "E", desc: "edit cell in $EDITOR"},
 	{key: "o", desc: "insert a blank row"},
 	{key: "D", desc: "delete the current row"},

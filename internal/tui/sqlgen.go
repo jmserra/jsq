@@ -76,8 +76,12 @@ func previewEditSQL(eng db.Engine, req editReq) string {
 	for i, k := range req.keys {
 		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
 	}
+	newVal := sqlLiteral(req.val)
+	if req.null {
+		newVal = "NULL"
+	}
 	return fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s",
-		eng.QualifiedName(req.table), eng.QuoteIdent(req.col), sqlLiteral(req.val),
+		eng.QualifiedName(req.table), eng.QuoteIdent(req.col), newVal,
 		strings.Join(preds, " AND "))
 }
 

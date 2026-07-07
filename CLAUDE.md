@@ -152,7 +152,11 @@ active connection has `safe=true`, both mutation dispatch points — the quick-p
 database + the SQL) instead of running. The `confirm` guard at the top of
 `handleKey` runs the held command on `y` (any other key cancels). The quick-path
 preview is `previewEditSQL` (values inlined for display only — the statement that
-runs still parameter-binds them; not an invariant-5 exception). Reads are never
+runs still parameter-binds them; not an invariant-5 exception). On the quick
+path, typing exactly `NULL` (uppercase) in the `e` overlay sets SQL NULL:
+`commitEdit` flags `editReq.null`, `execEditCmd` binds `nil` (not the string),
+and `applyEditNull` shows the faint `NULL` in-grid. The literal string `"NULL"`
+needs the `E` full path. Reads are never
 gated. New mutation paths must funnel through `askMutation` when `a.safe`.
 
 `s` (`App.scratchSeed`) prefills the `selectTemplate` for the current table, or

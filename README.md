@@ -127,7 +127,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort + **cursor position**). Recently-visited views restore instantly from an in-memory cache — no reload — so a jump lands exactly where you left; hit `r` to refresh if it looks stale. Most terminals send `Ctrl-i` as `Tab` — see below |
 | `` ` `` | open the jumplist picker — inspect every visited view and jump to any of them (`j`/`k` to move, `Enter` to go, `Esc` to close). Works regardless of terminal |
 | `Esc` | kill the running query (while one is in flight), else clear the current column's filter |
-| `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels) |
+| `e` | quick-edit the current cell (single-line overlay; `Enter` runs a PK-keyed `UPDATE`, `Esc` cancels). Type exactly `NULL` to set SQL `NULL` |
 | `E` | edit the current cell in `$EDITOR` — opens the generated keyed `UPDATE` with the value pre-selected (vim/nvim); `:wq` runs it, `:q!` or an empty buffer aborts |
 | `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
@@ -153,10 +153,11 @@ pages. The grid opens sorted by primary key, newest first.
 select with a resolved primary key. The
 `UPDATE` is always keyed on the full primary key and runs immediately; the status
 line reports what changed. A bare `Enter` that changed nothing (including an
-untouched `NULL` cell) does nothing — so you can't blank a value by accident. For
-long, multi-line, `NULL`-setting, or otherwise fiddly edits, `E` opens the
-generated `UPDATE` in your `$EDITOR` instead: review it, `:wq` to run, `:q!` to
-abort.
+untouched `NULL` cell) does nothing — so you can't blank a value by accident.
+Typing exactly `NULL` (uppercase) sets SQL `NULL` rather than the string
+`"NULL"` — to store the literal three-letter string, use `E`. For long,
+multi-line, or otherwise fiddly edits, `E` opens the generated `UPDATE` in your
+`$EDITOR` instead: review it, `:wq` to run, `:q!` to abort.
 
 ---
 
@@ -389,8 +390,9 @@ resolved a primary key. Otherwise edit keys are inert (status line says why).
   and runs it immediately (low blast radius); `Esc` cancels. jsq reports the
   affected-row count. `Enter` on empty input sets `''`; a bare `Enter` on an
   untouched `NULL` is a no-op (stays NULL) so you can't blank it by accident.
-  Setting a value *to* `NULL` is done via the `E` full path (write `NULL`
-  unquoted). This is the only in-app text-input widget in jsq.
+  Typing exactly `NULL` (uppercase) sets SQL `NULL` (bound as `nil`, not the
+  string `"NULL"`); the literal three-letter string needs the `E` full path.
+  This is the only in-app text-input widget in jsq.
 - **Full path — generate SQL → `$EDITOR` → `:wq`**: jsq builds the statement from
   the current row and opens it in your editor; a save (`:wq`) runs the SQL
   verbatim, an empty buffer or quit-without-save (`:q!`) aborts. The value is
