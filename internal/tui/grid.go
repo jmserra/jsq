@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -667,14 +668,41 @@ func valueText(v any) string {
 }
 
 // applyEdit writes the committed value back into the in-memory row so the grid
-// reflects the change immediately, without a server round-trip.
+// reflects the change immediately, without a server round-trip. The typed value
+// keeps the prior cell's driver type when it parses cleanly (coerceLike), so an
+// edited cell — e.g. an integer PK — stays the same type for later keyed edits.
 func (g *grid) applyEdit(val string) {
 	if g.editR < len(g.visible) {
 		row := g.rows[g.visible[g.editR]]
 		if g.editC < len(row) {
-			row[g.editC] = val
+			row[g.editC] = coerceLike(row[g.editC], val)
 		}
 	}
+}
+
+// coerceLike converts the edited string back to prev's type when it parses
+// cleanly, so an edited cell keeps the driver type it had rather than turning
+// into a string. Falls back to the raw string (and to string for a prior NULL).
+func coerceLike(prev any, val string) any {
+	switch prev.(type) {
+	case int, int8, int16, int32, int64:
+		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return n
+		}
+	case uint, uint8, uint16, uint32, uint64:
+		if n, err := strconv.ParseUint(val, 10, 64); err == nil {
+			return n
+		}
+	case float32, float64:
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
+		}
+	case bool:
+		if b, err := strconv.ParseBool(val); err == nil {
+			return b
+		}
+	}
+	return val
 }
 
 // --- rendering ---

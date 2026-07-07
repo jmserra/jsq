@@ -86,6 +86,13 @@ type App struct {
 	activity string
 	cancel   context.CancelFunc
 	spinner  int
+
+	// gen is a monotonic token bumped by begin() and stamped onto each dispatched
+	// DB command's result message. A message whose gen no longer matches belongs
+	// to a superseded op (a faster later op cancelled it after it had already
+	// produced its result) and is ignored — so a stale result can neither cancel
+	// the current op nor apply its rows over it. Non-op messages carry gen 0.
+	gen int
 }
 
 // New builds the root model. If direct.URL != "", it connects to that connection
@@ -156,10 +163,15 @@ func (a *App) ensureTick() tea.Cmd {
 func (a *App) begin(label string) context.Context {
 	a.stop()
 	a.activity = label
+	a.gen++ // supersede any prior op: its late result will no longer match a.gen
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	return ctx
 }
+
+// stale reports whether a gen-stamped result message belongs to a superseded op
+// and should be ignored. Non-op messages carry gen 0 and are never stale.
+func (a App) stale(gen int) bool { return gen != 0 && gen != a.gen }
 
 // stop clears the activity indicator and cancels any in-flight op — used both to
 // kill a running op (Esc) and to tidy up once one completes.
@@ -187,6 +199,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 
 	case errMsg:
+		if a.stale(msg.gen) { // a superseded op's late failure — ignore it
+			return a, nil
+		}
 		a.stop()
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.connecting = false
@@ -227,6 +242,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.ensureTick()
 
 	case databasesMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
 		a.stop()
 		if len(msg.names) == 0 {
 			a.status = "no other databases on this connection"
@@ -242,6 +260,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case rowsMsg:
+		if a.stale(msg.gen) { // a superseded load landed late — don't apply it
+			return a, nil
+		}
 		a.stop()
 		a.grid.setResult(msg.rs)
 		a.grid.hasMore = msg.full
@@ -275,11 +296,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case moreRowsMsg:
+		if a.stale(msg.gen) { // a superseded scroll fetch — never append to a newer view
+			return a, nil
+		}
 		a.stop()
 		a.grid.appendRows(msg.rows, msg.full)
 		return a, nil
 
 	case editDoneMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
 		a.stop()
 		// A keyed edit must touch exactly one row; anything else is loud (§8).
 		if msg.affected == 1 {
@@ -291,6 +318,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case editorReadyMsg:
+		if a.stale(msg.gen) { // a superseded insert/duplicate prep — don't open the editor
+			return a, nil
+		}
 		a.stop() // insert/duplicate prep finished; the editor spawn isn't a DB op
 		return a, editorCmd(msg.seed)
 
@@ -305,16 +335,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isReadSQL(msg.sql) {
 			ctx := a.begin("running query")
 			a.status = "running query…"
-			return a, runQueryCmd(ctx, a.engine, msg.sql)
+			return a, runQueryCmd(ctx, a.gen, a.engine, msg.sql)
 		}
 		sql := msg.sql
 		if a.safe {
 			return a.askMutation(sql, "running",
-				func(ctx context.Context) tea.Cmd { return execRawCmd(ctx, a.engine, sql) })
+				func(ctx context.Context, gen int) tea.Cmd { return execRawCmd(ctx, gen, a.engine, sql) })
 		}
 		ctx := a.begin("running")
 		a.status = "running…"
-		return a, execRawCmd(ctx, a.engine, sql)
+		return a, execRawCmd(ctx, a.gen, a.engine, sql)
 
 	case editorAbortedMsg:
 		a.stop()
@@ -322,6 +352,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case queryResultMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
 		a.stop()
 		a.grid.setResult(msg.rs)
 		a.grid.setSort("", false)
@@ -337,6 +370,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case execDoneMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
 		// Reload the current view so the change is reflected; the affected count
 		// survives the reload via postExecStatus.
 		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
@@ -376,7 +412,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.confirm.active = false
 			ctx := a.begin(label)
 			a.status = label + "…"
-			return a, run(ctx)
+			return a, run(ctx, a.gen)
 		}
 		a.confirm.active = false
 		a.status = "cancelled"
@@ -554,7 +590,7 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 func (a App) openDatabases() (tea.Model, tea.Cmd) {
 	ctx := a.begin("loading databases")
 	a.status = "loading databases…"
-	return a, databasesCmd(ctx, a.engine)
+	return a, databasesCmd(ctx, a.gen, a.engine)
 }
 
 // handleDatabasesKey drives the full-screen database list: typing filters, Enter
@@ -887,7 +923,7 @@ func (a App) loadViewCmd(ctx context.Context, pos gridPos) tea.Cmd {
 	if need := pos.cursorR + a.grid.visibleRows() + 1; need > limit {
 		limit = need
 	}
-	return loadCmd(ctx, a.engine, a.currentTable, limit, a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
+	return loadCmd(ctx, a.gen, a.engine, a.currentTable, limit, a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
 }
 
 // follow navigates the foreign key on the cursor's column to the row it points
@@ -938,7 +974,7 @@ func (a App) selectTable(t db.Table) (tea.Model, tea.Cmd) {
 // askMutation arms the safe-mode confirmation overlay (connection safe=true) for
 // a pending mutation: it shows sql on the current connection/database, and run
 // dispatches the exec command only if the user confirms with 'y'.
-func (a App) askMutation(sql, label string, run func(context.Context) tea.Cmd) (tea.Model, tea.Cmd) {
+func (a App) askMutation(sql, label string, run func(context.Context, int) tea.Cmd) (tea.Model, tea.Cmd) {
 	a.confirm.ask(a.connName, a.dbName, sql, label, run, a.w-leftPad, a.h-1)
 	a.status = "confirm — run this statement? (y = yes)"
 	return a, nil
@@ -954,11 +990,11 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if req, ok := a.grid.commitEdit(); ok {
 			if a.safe {
 				return a.askMutation(previewEditSQL(a.engine, req), "saving",
-					func(ctx context.Context) tea.Cmd { return execEditCmd(ctx, a.engine, req) })
+					func(ctx context.Context, gen int) tea.Cmd { return execEditCmd(ctx, gen, a.engine, req) })
 			}
 			ctx := a.begin("saving")
 			a.status = "saving…"
-			return a, execEditCmd(ctx, a.engine, req)
+			return a, execEditCmd(ctx, a.gen, a.engine, req)
 		}
 		a.status = a.currentTable.Name
 	case tea.KeyEsc:
@@ -1048,7 +1084,7 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			ctx := a.begin("preparing insert")
 			a.status = "preparing insert…"
-			return a, prepareInsertCmd(ctx, a.engine, a.currentTable)
+			return a, prepareInsertCmd(ctx, a.gen, a.engine, a.currentTable)
 		}
 		return a, nil
 	case "D":
@@ -1064,7 +1100,7 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if vals, ok := a.grid.currentRowValues(); ok {
 			ctx := a.begin("preparing duplicate")
 			a.status = "preparing duplicate…"
-			return a, prepareDuplicateCmd(ctx, a.engine, a.currentTable, vals)
+			return a, prepareDuplicateCmd(ctx, a.gen, a.engine, a.currentTable, vals)
 		}
 		return a, nil
 	case "y":
@@ -1123,7 +1159,7 @@ func (a *App) maybeLoadMore() tea.Cmd {
 	}
 	a.grid.loading = true
 	ctx := a.begin("loading more")
-	return loadMoreCmd(ctx, a.engine, a.currentTable, a.sortCol, a.sortAsc,
+	return loadMoreCmd(ctx, a.gen, a.engine, a.currentTable, a.sortCol, a.sortAsc,
 		a.basePreds, a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
 }
 
@@ -1141,7 +1177,7 @@ func (a App) scratchSeed() editorSeed {
 // loadCurrentCmd (re)loads the current table with the active sort, any followed-FK
 // base predicate, and the column filters.
 func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
-	return loadCmd(ctx, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
+	return loadCmd(ctx, a.gen, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
 }
 
 // reloadView re-runs the current view (`r`): a table reload keeps the sort,
@@ -1154,7 +1190,7 @@ func (a App) reloadView() (tea.Model, tea.Cmd) {
 		}
 		ctx := a.begin("reloading")
 		a.status = "reloading…"
-		return a, runQueryCmd(ctx, a.engine, a.adHocQuery)
+		return a, runQueryCmd(ctx, a.gen, a.engine, a.adHocQuery)
 	}
 	if a.currentTable.Name == "" {
 		return a, nil

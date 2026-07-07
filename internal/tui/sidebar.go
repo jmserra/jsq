@@ -110,9 +110,6 @@ func (s *sidebar) move(d int) {
 	}
 }
 
-func (s *sidebar) top()    { s.cursor, s.off = 0, 0 }
-func (s *sidebar) bottom() { s.move(len(s.visible)) }
-
 func (s *sidebar) selected() (db.Table, bool) {
 	if s.cursor >= 0 && s.cursor < len(s.visible) {
 		return s.tables[s.visible[s.cursor]], true

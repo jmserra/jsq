@@ -37,7 +37,6 @@ func sqlitePath(dsn string) string {
 }
 
 func (e *sqliteEngine) Close() error           { return e.db.Close() }
-func (e *sqliteEngine) UsesSchemas() bool      { return false }
 func (e *sqliteEngine) Placeholder(int) string { return "?" }
 
 func (e *sqliteEngine) QuoteIdent(s string) string {
@@ -99,10 +98,8 @@ func (e *sqliteEngine) Columns(ctx context.Context, t TableRef) ([]Column, error
 		cols = append(cols, Column{
 			Name:       name,
 			Type:       ctype,
-			Nullable:   notnull == 0,
 			PrimaryKey: pk > 0,
 			HasDefault: dflt.Valid,
-			Default:    dflt.String,
 		})
 	}
 	// A lone INTEGER PRIMARY KEY is a rowid alias → auto-generated.

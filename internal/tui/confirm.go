@@ -19,13 +19,14 @@ type confirmView struct {
 	conn   string
 	db     string
 	lines  []string // the SQL to preview, split into display lines
-	run    func(context.Context) tea.Cmd
+	run    func(context.Context, int) tea.Cmd
 	label  string
 	w, h   int
 }
 
-// ask arms the overlay for sql, remembering how to run it once confirmed.
-func (c *confirmView) ask(conn, db, sql, label string, run func(context.Context) tea.Cmd, w, h int) {
+// ask arms the overlay for sql, remembering how to run it once confirmed. run
+// receives the cancellable ctx and the op's gen token when the user confirms.
+func (c *confirmView) ask(conn, db, sql, label string, run func(context.Context, int) tea.Cmd, w, h int) {
 	c.active = true
 	c.conn, c.db, c.label, c.run = conn, db, label, run
 	c.w, c.h = w, h

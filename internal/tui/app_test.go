@@ -1026,13 +1026,85 @@ func TestActivityIndicator(t *testing.T) {
 func TestCanceledSwallowed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := dbErr(ctx, context.Canceled); got != nil {
+	if got := dbErr(ctx, 1, context.Canceled); got != nil {
 		t.Fatalf("a cancelled op should swallow to nil, got %#v", got)
 	}
 	live, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, ok := dbErr(live, context.DeadlineExceeded).(errMsg); !ok {
+	if _, ok := dbErr(live, 1, context.DeadlineExceeded).(errMsg); !ok {
 		t.Fatalf("a real failure on a live ctx should be an errMsg")
+	}
+}
+
+// TestStaleResultIgnored guards the gen-token fix: a result carrying an old gen
+// (a superseded op that finished late) must neither apply its rows over the
+// current view nor cancel the in-flight op.
+func TestStaleResultIgnored(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// Arm a fresh in-flight op; remember its gen and activity label.
+	app.begin("loading")
+	app.activity = "loading"
+	curGen := app.gen
+	rowsBefore := len(app.grid.rows)
+
+	// A rowsMsg stamped with a superseded gen must be dropped whole.
+	stale := rowsMsg{
+		table: app.grid.table,
+		rs:    &db.ResultSet{Cols: []string{"id"}, Rows: [][]any{{int64(99)}}},
+		full:  false,
+		gen:   curGen - 1,
+	}
+	app = update(t, app, stale)
+
+	if app.activity != "loading" {
+		t.Fatalf("a stale result must not clear the in-flight activity, got %q", app.activity)
+	}
+	if app.cancel == nil {
+		t.Fatal("a stale result must not cancel the current op")
+	}
+	if len(app.grid.rows) != rowsBefore {
+		t.Fatalf("a stale result must not replace the grid rows: got %d, want %d", len(app.grid.rows), rowsBefore)
+	}
+
+	// The matching gen still applies.
+	app = update(t, app, rowsMsg{
+		table: app.grid.table,
+		rs:    &db.ResultSet{Cols: []string{"id"}, Rows: [][]any{{int64(99)}}},
+		gen:   curGen,
+	})
+	if app.activity != "" {
+		t.Fatalf("the current op's result should clear the activity, got %q", app.activity)
+	}
+	if len(app.grid.rows) != 1 {
+		t.Fatalf("the current op's result should apply, got %d rows", len(app.grid.rows))
+	}
+}
+
+// TestCoerceLikeKeepsType guards that a quick edit keeps the cell's driver type
+// (so an integer PK stays int64 for later keyed edits) rather than turning into
+// a bare string.
+func TestCoerceLikeKeepsType(t *testing.T) {
+	cases := []struct {
+		prev any
+		val  string
+		want any
+	}{
+		{int64(1), "42", int64(42)},
+		{float64(1.5), "2.5", float64(2.5)},
+		{true, "false", false},
+		{"txt", "other", "other"},      // string stays string
+		{int64(1), "notnum", "notnum"}, // unparseable → raw string
+		{nil, "x", "x"},                // prior NULL → string
+	}
+	for _, c := range cases {
+		if got := coerceLike(c.prev, c.val); got != c.want {
+			t.Errorf("coerceLike(%#v, %q) = %#v, want %#v", c.prev, c.val, got, c.want)
+		}
 	}
 }
 
