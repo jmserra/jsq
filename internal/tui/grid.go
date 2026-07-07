@@ -27,10 +27,10 @@ var (
 	nullStyle   = lipgloss.NewStyle().Faint(true)
 	selStyle    = lipgloss.NewStyle().Reverse(true)
 	editStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
-	// editCaretStyle is the block caret inside the edit field: inverted from
-	// editStyle so it reads as a cursor sitting on the character (or a solid block
-	// at end-of-text), without inserting an extra column the way a bar glyph does.
-	editCaretStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3")).Background(lipgloss.Color("0"))
+	// editCaretStyle is the block caret inside the edit field: a light block (the
+	// char under it stays dark and readable) that reads as a cursor without
+	// inserting an extra column the way a bar glyph does.
+	editCaretStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("15"))
 )
 
 type column struct {
@@ -496,7 +496,12 @@ func (g *grid) startEdit() bool {
 	} else {
 		g.editVal = fmt.Sprintf("%v", v)
 	}
-	g.editPos = len([]rune(g.editVal)) // cursor at the end
+	// Open with the caret on the last character (0 for an empty / NULL cell).
+	if n := len([]rune(g.editVal)); n > 0 {
+		g.editPos = n - 1
+	} else {
+		g.editPos = 0
+	}
 	return true
 }
 
@@ -520,6 +525,17 @@ func (g *grid) editBackspace() {
 		r = append(r[:g.editPos-1], r[g.editPos:]...)
 		g.editVal = string(r)
 		g.editPos--
+	}
+	g.editDirty = true
+}
+
+// editDelete removes the rune at the caret (forward delete / Del); a no-op at
+// end-of-text. The caret stays put.
+func (g *grid) editDelete() {
+	r := []rune(g.editVal)
+	if g.editPos < len(r) {
+		r = append(r[:g.editPos], r[g.editPos+1:]...)
+		g.editVal = string(r)
 	}
 	g.editDirty = true
 }

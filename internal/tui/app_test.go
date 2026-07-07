@@ -343,6 +343,7 @@ func TestQuickEditCell(t *testing.T) {
 	}
 
 	// Clear "Linus" and type "Grace", then commit.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd}) // caret opens on the last char
 	for range "Linus" {
 		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	}
@@ -388,6 +389,7 @@ func TestQuickEditNull(t *testing.T) {
 	// PK-desc → row 0 is id=2 (Linus). Move to "name" and edit.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd}) // caret opens on the last char
 	for range "Linus" {
 		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	}
@@ -433,6 +435,7 @@ func TestQuickEditLiteralNullString(t *testing.T) {
 	})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd}) // caret opens on the last char
 	for range "Linus" {
 		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	}
@@ -489,6 +492,18 @@ func TestEditCursorMechanics(t *testing.T) {
 		t.Fatalf("mid-string backspace: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
 	}
 
+	// Del (forward delete) removes the rune *at* the caret; the caret stays put.
+	g.editVal, g.editPos = "abc", 1
+	g.editDelete()
+	if g.editVal != "ac" || g.editPos != 1 {
+		t.Fatalf("forward delete: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
+	}
+	g.editVal, g.editPos = "ab", 2 // at end → no-op on the text
+	g.editDelete()
+	if g.editVal != "ab" {
+		t.Fatalf("forward delete at end changed the text: %q", g.editVal)
+	}
+
 	// The block caret must not add a column: the rendered field stays width w for
 	// every caret position (the old bar glyph shifted text and showed a phantom
 	// space when the caret moved off the end).
@@ -507,17 +522,18 @@ func TestQuickEditCursorKeys(t *testing.T) {
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
 	})
-	// PK-desc → row 0 is id=2 (Linus). Edit "name".
+	// PK-desc → row 0 is id=2 (Linus). Edit "name": caret opens on the last char.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if app.grid.editVal != "Linus" || app.grid.editPos != 5 {
-		t.Fatalf("start: %q pos %d, want Linus pos 5", app.grid.editVal, app.grid.editPos)
+	if app.grid.editVal != "Linus" || app.grid.editPos != 4 {
+		t.Fatalf("start: %q pos %d, want Linus pos 4 (on last char)", app.grid.editVal, app.grid.editPos)
 	}
-	// ← to the middle, insert, then Ctrl-W wipes back to the caret's word start.
+	// End, then ← to the middle, insert, then Ctrl-W wipes back to the word start.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	if app.grid.editPos != 3 {
-		t.Fatalf("after ←←, pos = %d, want 3", app.grid.editPos)
+		t.Fatalf("after End ←←, pos = %d, want 3", app.grid.editPos)
 	}
 	app = typeRunes(t, app, "X") // "LinXus", caret after X
 	if app.grid.editVal != "LinXus" {
@@ -526,6 +542,11 @@ func TestQuickEditCursorKeys(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyCtrlW})
 	if app.grid.editVal != "us" || app.grid.editPos != 0 {
 		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.grid.editVal, app.grid.editPos)
+	}
+	// Del removes the rune at the caret.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyDelete})
+	if app.grid.editVal != "s" || app.grid.editPos != 0 {
+		t.Fatalf("after Del: %q pos %d, want \"s\" pos 0", app.grid.editVal, app.grid.editPos)
 	}
 }
 
@@ -544,6 +565,7 @@ func TestSafeConfirmQuickEdit(t *testing.T) {
 	// Row 0 is id=2 (Linus, PK desc). Edit "name" → "Grace" → Enter.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd}) // caret opens on the last char
 	for range "Linus" {
 		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	}
@@ -592,6 +614,7 @@ func TestSafeCancelQuickEdit(t *testing.T) {
 
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd}) // caret opens on the last char
 	for range "Linus" {
 		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	}
