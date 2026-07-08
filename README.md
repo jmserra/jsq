@@ -21,14 +21,23 @@ fixed-width results grid with continuous scroll, per-column sort, per-column
 filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 (`e`), plus the `$EDITOR` full paths — cell edit (`E`), blank-row insert (`o`),
 row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`) is in
-too.**
+too.** Navigation is in: follow a foreign key (`f`), step a session-wide jumplist
+(`Ctrl-o`/`` ` ``), switch database (`T`) or connection (`c`), and re-run past
+queries from the history buffer (`b`). A failed statement surfaces in the status
+line and lets you continue — no dead-end error page.
 
-On the roadmap (parts of the design below describe the intended end state, not
-what ships today):
+Continuous scroll pages by a **keyset cursor** on the primary key (the default
+order, and explicit sorts on a PK column), so a concurrent write mid-scroll can't
+duplicate or skip rows. Sorts on a non-PK column fall back to `LIMIT`/`OFFSET` —
+a nullable sort column's NULL group can sit at either end depending on the engine,
+which a keyset cursor could skip, so those aren't keyset'd.
 
-- A **database picker**.
-- **Dismissible errors** — a failed statement currently shows a full-screen
-  error; it should surface in the status line and let you continue.
+On the roadmap — smaller paging polish, none of it correctness:
+
+- A viewport-sized fetch window (today it's a fixed floor of 200 rows).
+- `G` fetching a genuine tail window rather than jumping to the loaded end.
+- A `(more↓)` / row-position hint in the status line.
+- Keyset for non-PK sorts too (needs per-engine NULL-ordering handling).
 
 ---
 
@@ -240,7 +249,7 @@ type Engine interface {
     Tables(ctx) ([]Table, error)
     Columns(ctx, TableRef) ([]Column, error)
     PrimaryKey(ctx, TableRef) ([]string, error)  // empty => read-only view
-    Databases(ctx) ([]string, error)             // deferred database picker
+    Databases(ctx) ([]string, error)             // the T database picker
 
     // Data
     Query(ctx, sql string, args ...any) (*ResultSet, error)
@@ -306,9 +315,12 @@ framework. No auto-sizing, no wrapping, no variable widths.
 - **Scrolling is by slice, not geometry.** `rowOff`/`colOff` track the top-left
   visible cell. Horizontal scroll steps whole columns (trivial with fixed widths).
 - **No pages — continuous lazy scroll.** `j`/`k` scroll; crossing the loaded edge
-  fetches the next window and extends the buffer, so it feels like one long list.
-  `g`/`G` jump to the first / last loaded row. **No total row count** — jsq never
-  runs `COUNT(*)`, so opening or filtering a huge table is always cheap.
+  fetches the next window (by a **keyset cursor** on the primary key — `WHERE key >
+  last-loaded-row` — so a concurrent write can't dup/skip; `LIMIT`/`OFFSET` as a
+  fallback for non-PK sorts, whose NULL ordering a keyset cursor could skip) and
+  extends the buffer, so it feels like one long list. `g`/`G` jump to the first /
+  last loaded row. **No total row count** — jsq never runs `COUNT(*)`, so opening
+  or filtering a huge table is always cheap.
 - **NULL vs empty rendering.** SQL `NULL` → dimmed `NULL`; empty string → blank
   cell; a literal string `"NULL"` → normal text — all three visually distinct.
 - **Control chars are glyphed** (`\n`→`↵`, `\t`→`→`, `\r` dropped) so a cell can
@@ -359,18 +371,24 @@ counts as a read; everything else, **including any `WITH …`**, is a mutation (
 data-modifying CTE like `WITH … DELETE` also leads with `WITH`, so it routes to
 the write path). An empty buffer or `:q!` aborts.
 
-### Query history *(roadmap)*
+### Query history
 
 One result pane, not tabs — the query, not the result, is the thing you keep.
-Planned: a session-scoped in-memory ring of every statement (reads and mutations
-alike); `Ctrl-r` history picker (reads re-execute, mutations open in nvim);
-`Ctrl-o` steps back to the previous read.
+`b` opens an in-memory, connection-scoped history of every free-form (`s`) query,
+most-recent first and deduped by SQL, each annotated with its last result count
+(`+` when a read hit its own `LIMIT`). `Enter` re-executes a read (a mutation
+opens in `$EDITOR` for review rather than running unseen); `s` opens any entry in
+`$EDITOR` to evolve it. Structured edits (`E`/`o`/`D`/`p`) stay out of it — the
+history is the free-form queries you'd want to re-run. History is not persisted
+across sessions. Separately, `Ctrl-o` / the `` ` `` jumplist step back through
+visited *views* (table + filter + sort + cursor), which is the "previous read"
+navigation.
 
 ### Modes
 
 Only **Normal** and **Filter**, plus transient overlays (cell-edit input,
-full-cell viewer, the `?` help cheat sheet, and eventually the history picker).
-There is no `:`
+full-cell viewer, the `?` help cheat sheet, the jumplist picker, and the `b`
+query-history buffer). There is no `:`
 command mode, and no in-app SQL "insert mode" — editing SQL suspends jsq and drops
 you into `$EDITOR`.
 
@@ -441,9 +459,9 @@ resolved a primary key. Otherwise edit keys are inert (status line says why).
 
 ## Deferred (post-v1)
 
-Column width adjust · disk-persisted history · database picker (`Databases()` is
-already on the `Engine` interface) · vertical row-detail view for wide tables ·
-cross-table duplicate · filter stacking as OR / clear-all · keymap override file.
+Column width adjust · disk-persisted query history (the `b` buffer is in-memory
+only) · vertical row-detail view for wide tables · cross-table duplicate · filter
+stacking as OR / clear-all · keymap override file.
 
 ## Relationship to lazysql
 

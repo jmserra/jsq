@@ -184,6 +184,26 @@ loop); `s` opens any entry in `$EDITOR`. History is in-memory only (no persisten
 re-clamps it); an adHoc result re-runs `App.adHocQuery`, the SQL stashed from the
 last `queryResultMsg` (now carries its `sql`). No-op before anything is loaded.
 
+**Continuous scroll (keyset)**: `loadMoreCmd` pages by a keyset cursor, not
+`OFFSET`. `orderKeys(sortCol, sortAsc, pk)` defines the **total order** — the
+sort column then every remaining PK column (tiebreakers, same dir), or the full
+PK descending by default — and drives *both* the `ORDER BY` (`orderClauseKeys`,
+used by `loadCmd` and `loadMoreCmd` alike) and the cursor. **Invariant: first
+load and scroll must share that order**, so both go through `orderKeys` — don't
+give one a different `ORDER BY`. `keysetWhere` builds `… AND (keyset cursor)`
+from the anchor (`grid.lastRowMap()`, the last loaded row, passed down from
+`maybeLoadMore`); `keysetCursor` emits the lexicographic `(k0>v0) OR (k0=v0 AND
+k1>v1) OR …` expansion (`>` asc / `<` desc — handles mixed directions, unlike a
+row-value tuple compare) with every value parameter-bound. It **falls back to
+`LIMIT`/`OFFSET`** (the old path) unless `keysetEligible(sortCol, pk)` — i.e. all
+ordering keys are **PK columns** (default PK sort, or an explicit sort on a PK
+column). That gate is the NULL-safety guarantee: PK columns are NOT NULL, so the
+order has no NULLs, so keyset can't skip a NULL group that an engine sorts to the
+far end (they disagree on which end, and it flips with direction). A non-PK sort
+therefore stays on OFFSET — correct, just not concurrency-stable. `filterPreds`
+is the shared base+filter builder (threads the placeholder start index so the
+cursor's params continue the numbering).
+
 Note: many `.go` comments still carry `§N` section refs that pointed at the old
 DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
 
@@ -208,10 +228,6 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
 
 Know these before touching scroll/paging:
 
-- **Scroll is `LIMIT`/`OFFSET`, not keyset.** `cmd.go:loadMoreCmd` does
-  `ORDER BY … LIMIT n OFFSET len(rows)`, despite the design calling for keyset on
-  the sort key. Concurrent writes mid-scroll can dup/skip rows. Migrating to
-  keyset is a real feature, not a cleanup.
 - **Fetch window isn't viewport-sized.** `app.go:gridLimit()` = `max(200,
   (h-2)*4)` — a fixed floor of 200, used for both initial load and scroll window.
 - **`G` doesn't fetch a tail window** — `grid.bottom()` just jumps the cursor to

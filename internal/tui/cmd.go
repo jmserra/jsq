@@ -101,7 +101,7 @@ func loadCmd(ctx context.Context, gen int, eng db.Engine, t db.Table, limit int,
 		}
 		where, args := whereClause(eng, base, filters)
 		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d",
-			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit)
+			eng.QualifiedName(ref), where, orderClauseKeys(eng, orderKeys(sortCol, sortAsc, pk)), limit)
 		rs, err := eng.Query(ctx, q, args...)
 		if err != nil {
 			return dbErr(ctx, gen, err)
@@ -161,18 +161,33 @@ func openEngineCmd(gen int, c config.Conn, dsn string, startTunnel bool) tea.Cmd
 	}
 }
 
-// loadMoreCmd fetches the next window (continuous scroll) via LIMIT/OFFSET,
-// preserving the active sort and filters.
-func loadMoreCmd(ctx context.Context, gen int, eng db.Engine, t db.Table, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec, offset, limit int) tea.Cmd {
+// loadMoreCmd fetches the next window for continuous scroll, preserving the
+// active sort and filters. When the ordering is keyset-safe (all PK columns —
+// see keysetEligible) it pages by a keyset cursor — WHERE the row key is strictly
+// past the last loaded row — which is stable under concurrent writes (no
+// dup/skip) and jumps to the anchor via the index instead of scanning-and-
+// discarding. It falls back to LIMIT/OFFSET (today's behavior) otherwise.
+func loadMoreCmd(ctx context.Context, gen int, eng db.Engine, t db.Table, sortCol string, sortAsc bool, base []eqPred, filters []filterSpec, anchor map[string]any, offset, limit int) tea.Cmd {
 	return func() tea.Msg {
 		ref := t.Ref()
 		pk, err := eng.PrimaryKey(ctx, ref)
 		if err != nil {
 			return dbErr(ctx, gen, err)
 		}
-		where, args := whereClause(eng, base, filters)
-		q := fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d",
-			eng.QualifiedName(ref), where, orderClause(eng, sortCol, sortAsc, pk), limit, offset)
+		keys := orderKeys(sortCol, sortAsc, pk)
+		order := orderClauseKeys(eng, keys)
+		var q string
+		var args []any
+		where, ksArgs, ok := keysetWhere(eng, base, filters, keys, anchor)
+		if ok && keysetEligible(sortCol, pk) {
+			q = fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d",
+				eng.QualifiedName(ref), where, order, limit)
+			args = ksArgs
+		} else {
+			where, args = whereClause(eng, base, filters)
+			q = fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d",
+				eng.QualifiedName(ref), where, order, limit, offset)
+		}
 		rs, err := eng.Query(ctx, q, args...)
 		if err != nil {
 			return dbErr(ctx, gen, err)
@@ -364,17 +379,15 @@ func prepareDuplicateCmd(ctx context.Context, gen int, eng db.Engine, t db.Table
 	}
 }
 
-// whereClause builds "WHERE p1 AND p2 …" from the base equality predicates (a
-// followed FK) followed by the column filters, stacking AND. Base predicates bind
-// as exact `col = $i`; filters bind their pattern via FilterPredicate. Parameter
-// indexes are shared and 1-based across both.
-func whereClause(eng db.Engine, base []eqPred, filters []filterSpec) (string, []any) {
-	if len(base) == 0 && len(filters) == 0 {
-		return "", nil
-	}
+// filterPreds builds the predicate strings and bind args for the base equality
+// predicates (a followed FK) followed by the column filters, numbering
+// placeholders from startIdx (1-based, shared across both). Base predicates bind
+// as exact `col = $i`; filters bind their pattern via FilterPredicate. Returns
+// the next free placeholder index so a keyset cursor can continue the numbering.
+func filterPreds(eng db.Engine, base []eqPred, filters []filterSpec, startIdx int) ([]string, []any, int) {
 	preds := make([]string, 0, len(base)+len(filters))
 	args := make([]any, 0, len(base)+len(filters))
-	i := 1
+	i := startIdx
 	for _, b := range base {
 		preds = append(preds, eng.QuoteIdent(b.col)+" = "+eng.Placeholder(i))
 		args = append(args, b.val)
@@ -385,24 +398,136 @@ func whereClause(eng db.Engine, base []eqPred, filters []filterSpec) (string, []
 		args = append(args, f.pattern)
 		i++
 	}
+	return preds, args, i
+}
+
+// whereClause builds "WHERE p1 AND p2 …" from the base predicates and column
+// filters (empty when there are none).
+func whereClause(eng db.Engine, base []eqPred, filters []filterSpec) (string, []any) {
+	preds, args, _ := filterPreds(eng, base, filters, 1)
+	if len(preds) == 0 {
+		return "", nil
+	}
 	return " WHERE " + strings.Join(preds, " AND "), args
 }
 
-func orderClause(eng db.Engine, sortCol string, sortAsc bool, pk []string) string {
-	dir := "ASC"
-	if !sortAsc {
-		dir = "DESC"
-	}
+// orderKey is one column of the total ordering that drives both the ORDER BY and
+// the keyset scroll cursor.
+type orderKey struct {
+	col string
+	asc bool
+}
+
+// orderKeys is the total ordering for a load: the explicit sort column (J/K)
+// followed by every primary-key column not already named (tiebreakers, in the
+// same direction), or — with no explicit sort — the full PK descending (newest
+// first). Appending the *whole* PK makes the order total, which is what lets
+// keyset paging page cleanly across tied rows. Empty (no sort and no PK) → no
+// ORDER BY, and loadMoreCmd falls back to OFFSET.
+func orderKeys(sortCol string, sortAsc bool, pk []string) []orderKey {
 	if sortCol != "" {
-		s := " ORDER BY " + eng.QuoteIdent(sortCol) + " " + dir
-		if len(pk) > 0 && pk[0] != sortCol {
-			s += ", " + eng.QuoteIdent(pk[0]) + " " + dir
+		keys := []orderKey{{sortCol, sortAsc}}
+		for _, p := range pk {
+			if p != sortCol {
+				keys = append(keys, orderKey{p, sortAsc})
+			}
 		}
-		return s
+		return keys
 	}
-	// Default (no explicit J/K sort): PK descending — newest rows first.
-	if len(pk) > 0 {
-		return " ORDER BY " + eng.QuoteIdent(pk[0]) + " DESC"
+	keys := make([]orderKey, 0, len(pk))
+	for _, p := range pk {
+		keys = append(keys, orderKey{p, false}) // default: PK descending
 	}
-	return ""
+	return keys
+}
+
+// orderClauseKeys renders the ORDER BY for a total ordering (empty for none).
+func orderClauseKeys(eng db.Engine, keys []orderKey) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		dir := "ASC"
+		if !k.asc {
+			dir = "DESC"
+		}
+		parts[i] = eng.QuoteIdent(k.col) + " " + dir
+	}
+	return " ORDER BY " + strings.Join(parts, ", ")
+}
+
+// keysetEligible reports whether a load's ordering is safe to page by keyset:
+// every ordering key must be a primary-key column. PK columns are NOT NULL, so
+// the order has no NULLs anywhere — which sidesteps the one thing that makes
+// keyset silently *skip* rows: a nullable leading sort column whose NULL group
+// the engine sorts to the far end (and the engines disagree on which end / by
+// direction), so a `col < anchor` cursor would never reach it. The default sort
+// (PK descending) and an explicit sort on a PK column qualify; any other explicit
+// sort falls back to OFFSET (no worse than before). Requires a PK to exist.
+func keysetEligible(sortCol string, pk []string) bool {
+	if len(pk) == 0 {
+		return false
+	}
+	if sortCol == "" {
+		return true // default: ordered by the PK only
+	}
+	for _, p := range pk {
+		if p == sortCol {
+			return true // explicit sort on a PK column → all keys are PK columns
+		}
+	}
+	return false
+}
+
+// keysetWhere builds the full WHERE for a keyset-paged scroll fetch: the base
+// predicates and column filters, AND-ed with a cursor selecting rows strictly
+// past the anchor (the last loaded row) in the total order `keys`. ok is false —
+// the caller falls back to OFFSET — when there's no total order, no anchor, or
+// any anchor key is NULL (a keyset comparison against NULL is ambiguous). The
+// caller also gates on keysetEligible so the keys are all non-null PK columns.
+func keysetWhere(eng db.Engine, base []eqPred, filters []filterSpec, keys []orderKey, anchor map[string]any) (string, []any, bool) {
+	if len(keys) == 0 || anchor == nil {
+		return "", nil, false
+	}
+	for _, k := range keys {
+		if anchor[k.col] == nil {
+			return "", nil, false
+		}
+	}
+	preds, args, next := filterPreds(eng, base, filters, 1)
+	cursor, cArgs := keysetCursor(eng, keys, anchor, next)
+	preds = append(preds, cursor)
+	args = append(args, cArgs...)
+	return " WHERE " + strings.Join(preds, " AND "), args, true
+}
+
+// keysetCursor renders the lexicographic "strictly after the anchor" predicate
+// for the total order `keys`: an OR over each key i of (equal on keys 0..i-1 AND
+// key i past the anchor), where "past" is `>` for an ascending key and `<` for a
+// descending one. Expanding it this way handles mixed ASC/DESC directions (a
+// plain `(a,b) > (x,y)` row-value comparison cannot) and stays portable across
+// the engines. Every anchor value binds as a parameter; placeholders start at
+// startIdx.
+func keysetCursor(eng db.Engine, keys []orderKey, anchor map[string]any, startIdx int) (string, []any) {
+	terms := make([]string, 0, len(keys))
+	var args []any
+	idx := startIdx
+	for i := range keys {
+		conj := make([]string, 0, i+1)
+		for j := 0; j < i; j++ {
+			conj = append(conj, eng.QuoteIdent(keys[j].col)+" = "+eng.Placeholder(idx))
+			args = append(args, anchor[keys[j].col])
+			idx++
+		}
+		cmp := "<"
+		if keys[i].asc {
+			cmp = ">"
+		}
+		conj = append(conj, eng.QuoteIdent(keys[i].col)+" "+cmp+" "+eng.Placeholder(idx))
+		args = append(args, anchor[keys[i].col])
+		idx++
+		terms = append(terms, "("+strings.Join(conj, " AND ")+")")
+	}
+	return "(" + strings.Join(terms, " OR ") + ")", args
 }

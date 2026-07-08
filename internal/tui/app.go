@@ -1352,9 +1352,10 @@ func (a *App) maybeLoadMore() tea.Cmd {
 		return nil
 	}
 	a.grid.loading = true
+	anchor, _ := a.grid.lastRowMap() // keyset cursor; nil falls back to OFFSET
 	ctx := a.begin("loading more")
 	return loadMoreCmd(ctx, a.gen, a.engine, a.currentTable, a.sortCol, a.sortAsc,
-		a.basePreds, a.grid.filterSpecs(), len(a.grid.rows), a.gridLimit())
+		a.basePreds, a.grid.filterSpecs(), anchor, len(a.grid.rows), a.gridLimit())
 }
 
 // scratchSeed is the prefill for s: this table's last scratch query if one was

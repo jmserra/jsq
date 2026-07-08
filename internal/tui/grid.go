@@ -677,6 +677,23 @@ func (g *grid) fkFor(col string) (db.ForeignKey, bool) {
 	return db.ForeignKey{}, false
 }
 
+// lastRowMap returns the last loaded row (in server sort order — continuous
+// scroll appends in ORDER BY order) as a column→value map. It's the keyset
+// cursor anchor for the next scroll fetch. ok is false when no rows are loaded.
+func (g *grid) lastRowMap() (map[string]any, bool) {
+	if len(g.rows) == 0 {
+		return nil, false
+	}
+	row := g.rows[len(g.rows)-1]
+	vals := make(map[string]any, len(g.cols))
+	for i, c := range g.cols {
+		if i < len(row) {
+			vals[c.name] = row[i]
+		}
+	}
+	return vals, true
+}
+
 // currentRowMap returns the cursor row as a column→value map, with no editability
 // requirement — used to follow a foreign key from any table.
 func (g *grid) currentRowMap() (map[string]any, bool) {

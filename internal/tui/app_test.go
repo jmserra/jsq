@@ -203,6 +203,118 @@ func TestContinuousScroll(t *testing.T) {
 	}
 }
 
+// idsFrom pulls the id column (index 0) out of a moreRowsMsg's rows as int64s.
+func idsFrom(t *testing.T, rows [][]any) []int64 {
+	t.Helper()
+	out := make([]int64, len(rows))
+	for i, r := range rows {
+		n, ok := r[0].(int64)
+		if !ok {
+			t.Fatalf("row %d id not int64: %T", i, r[0])
+		}
+		out[i] = n
+	}
+	return out
+}
+
+// TestKeysetStableUnderInsert is the point of keyset paging: a scroll fetch pages
+// by the anchor row's key, not a row offset — so a row inserted at the top of the
+// order (here a new highest id, default DESC sort) mid-scroll can't shift the
+// window and cause a dup/skip. With OFFSET, `LIMIT 5 OFFSET 5` after the insert
+// would re-return the anchor row (6) as a duplicate.
+func TestKeysetStableUnderInsert(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.Exec(ctx, `CREATE TABLE nums (id INTEGER PRIMARY KEY, v INTEGER)`)
+	for i := 0; i < 10; i++ { // ids 1..10
+		e.Exec(ctx, `INSERT INTO nums (v) VALUES (?)`, i)
+	}
+
+	// Simulate: the first window (default sort, id DESC) loaded ids 10..6, so the
+	// anchor is the last loaded row, id=6. A concurrent write then inserts id 11.
+	e.Exec(ctx, `INSERT INTO nums (v) VALUES (99)`) // id 11, "newest" → top of DESC
+	anchor := map[string]any{"id": int64(6), "v": int64(5)}
+
+	cmd := loadMoreCmd(context.Background(), 1, e, db.Table{Name: "nums"},
+		"", false, nil, nil, anchor, 5 /*offset*/, 5 /*limit*/)
+	msg, ok := cmd().(moreRowsMsg)
+	if !ok {
+		t.Fatalf("expected moreRowsMsg, got %T", cmd())
+	}
+	got := idsFrom(t, msg.rows)
+	want := []int64{5, 4, 3, 2, 1} // strictly past id=6, no dup of 6, no skip
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("keyset next window = %v, want %v (OFFSET would dup 6)", got, want)
+	}
+}
+
+// TestKeysetTiebreakerNoSkip guards the composite cursor: with a composite PK
+// (a, b) sorted on its first column, the second PK column is the tiebreaker, and
+// an anchor mid-tie must still return the rest of the tie — a naive `a > 5` would
+// skip it. (Sorting on a PK column keeps the ordering keyset-safe.)
+func TestKeysetTiebreakerNoSkip(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.Exec(ctx, `CREATE TABLE t (a INTEGER, b INTEGER, PRIMARY KEY (a, b))`)
+	// a=5 is a three-row tie broken by b; a=6 has two rows.
+	e.Exec(ctx, `INSERT INTO t (a, b) VALUES (5,1),(5,2),(5,3),(6,4),(6,5)`)
+
+	// Sort a ASC → order (a,b): (5,1),(5,2),(5,3),(6,4),(6,5). Say (5,1),(5,2)
+	// loaded; anchor is a=5,b=2, mid-tie.
+	anchor := map[string]any{"a": int64(5), "b": int64(2)}
+	cmd := loadMoreCmd(context.Background(), 1, e, db.Table{Name: "t"},
+		"a", true, nil, nil, anchor, 2, 10)
+	msg := cmd().(moreRowsMsg)
+	// Rows are (a,b); collect b (column index 1) — expect 3 (rest of the tie), 4, 5.
+	var got []int64
+	for _, r := range msg.rows {
+		got = append(got, r[1].(int64))
+	}
+	want := []int64{3, 4, 5} // (5,3) not skipped, then the a=6 rows
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("keyset tie window (b values) = %v, want %v", got, want)
+	}
+}
+
+// TestKeysetFallsBackForNonPKSort guards the NULL-safety gate: an explicit sort
+// on a non-PK column is not keyset-eligible (its NULL ordering could hide rows),
+// so loadMoreCmd must page by OFFSET. Verified by giving a *wrong* anchor that a
+// keyset cursor would honor but OFFSET ignores.
+func TestKeysetFallsBackForNonPKSort(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	e.Exec(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)`)
+	e.Exec(ctx, `INSERT INTO t (id, v) VALUES (1,10),(2,20),(3,30),(4,40),(5,50)`)
+
+	// Sort by v ASC (v is not the PK). A misleading anchor of v=999 would make a
+	// keyset cursor (`v > 999`) return nothing; OFFSET 2 ignores the anchor and
+	// returns rows 3..5 (v = 30,40,50) → ids 3,4,5. Getting those proves OFFSET.
+	anchor := map[string]any{"id": int64(999), "v": int64(999)}
+	cmd := loadMoreCmd(context.Background(), 1, e, db.Table{Name: "t"},
+		"v", true, nil, nil, anchor, 2, 10)
+	msg := cmd().(moreRowsMsg)
+	got := idsFrom(t, msg.rows)
+	want := []int64{3, 4, 5}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("non-PK sort should page by OFFSET (ids %v), got %v", want, got)
+	}
+}
+
 // TestSidebarFilter drives the full-screen table list: typing narrows it (no
 // `/`), arrows move within matches, and Enter loads the highlighted table.
 func TestSidebarFilter(t *testing.T) {
