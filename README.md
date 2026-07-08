@@ -26,18 +26,18 @@ too.** Navigation is in: follow a foreign key (`f`), step a session-wide jumplis
 queries from the history buffer (`b`). A failed statement surfaces in the status
 line and lets you continue — no dead-end error page.
 
-Continuous scroll pages by a **keyset cursor** on the primary key (the default
-order, and explicit sorts on a PK column), so a concurrent write mid-scroll can't
-duplicate or skip rows. Sorts on a non-PK column fall back to `LIMIT`/`OFFSET` —
-a nullable sort column's NULL group can sit at either end depending on the engine,
-which a keyset cursor could skip, so those aren't keyset'd.
+Continuous scroll pages by a **keyset cursor** on the primary key, so a
+concurrent write mid-scroll can't duplicate or skip rows (a non-PK sort falls
+back to `LIMIT`/`OFFSET` — see below).
 
-On the roadmap:
+Deliberately deferred — considered and set aside, not unfinished:
 
-- `G` fetching a genuine tail window (the last rows) rather than jumping to the
-  loaded end — a change to the "one contiguous window from the top" scroll model
-  (it would need bidirectional windows), not just polish.
-- Keyset for non-PK sorts too (needs per-engine NULL-ordering handling).
+- **`G` jumps to the loaded end**, not a true fetch of the last rows. A real tail
+  window would need bidirectional scrolling (the buffer is a top-anchored window),
+  and `K` already reaches the other extreme by flipping the sort — so it isn't
+  worth the complexity.
+- **Keyset paging is primary-key only.** A non-PK sort falls back to
+  `LIMIT`/`OFFSET`; keyset there would need per-engine NULL-ordering handling.
 
 ---
 
