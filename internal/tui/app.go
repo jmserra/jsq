@@ -841,17 +841,65 @@ func sidebarFilterEdit(s *sidebar, msg tea.KeyMsg) {
 	}
 }
 
-// handlePickerKey drives the connection picker (screenPicker): navigation by
-// default, `/` filters, Enter connects to the highlighted connection (moving right
-// to its tables), Esc clears the filter. The picker is the leftmost screen, so
-// Backspace has nowhere further left to go.
-func (a App) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.connList.filtering && msg.Type != tea.KeyEnter && msg.Type != tea.KeyEsc {
-		sidebarFilterEdit(&a.connList, msg)
-		return a, nil
+// listKeys applies the navigation/filter keys shared by all three list screens
+// (connection picker, table list, database list): filter-mode text editing, `/`
+// to start a filter, Esc to clear it, and j/k/h/l/g/G + arrow movement. It
+// returns false — leaving the key to the caller — only for Enter, Backspace, and
+// unrecognized navigation-mode runes (e.g. T, s), whose meaning is screen-specific.
+func listKeys(s *sidebar, msg tea.KeyMsg) bool {
+	if s.filtering {
+		switch msg.Type {
+		case tea.KeyEnter:
+			return false // caller commits the filter and opens the item
+		case tea.KeyEsc:
+			s.clearFilter()
+			return true
+		default:
+			sidebarFilterEdit(s, msg)
+			return true
+		}
 	}
 	switch msg.Type {
-	case tea.KeyEnter:
+	case tea.KeyEnter, tea.KeyBackspace:
+		return false // screen-specific: open the item / step left
+	case tea.KeyEsc:
+		if s.hasFilter() {
+			s.clearFilter()
+		}
+		return true
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "/":
+			s.startFilter()
+		case "j":
+			s.move(1)
+		case "k":
+			s.move(-1)
+		case "h":
+			s.move(-s.rows())
+		case "l":
+			s.move(s.rows())
+		case "g":
+			s.top()
+		case "G":
+			s.bottom()
+		default:
+			return false // e.g. T / s — screen-specific
+		}
+		return true
+	}
+	sidebarNav(s, msg)
+	return true
+}
+
+// handlePickerKey drives the connection picker (screenPicker): shared list
+// navigation, plus Enter to connect to the highlighted connection (moving right
+// to its tables). The picker is the leftmost screen, so Backspace is a no-op.
+func (a App) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if listKeys(&a.connList, msg) {
+		return a, nil
+	}
+	if msg.Type == tea.KeyEnter {
 		// Ignore a second Enter while a connect is already in flight (the loader
 		// isn't shown yet in the no-loop initial-picker window).
 		if a.connecting {
@@ -863,32 +911,7 @@ func (a App) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a.connectTo(c)
 			}
 		}
-		return a, nil
-	case tea.KeyEsc:
-		if a.connList.filtering || a.connList.hasFilter() {
-			a.connList.clearFilter()
-		}
-		return a, nil
-	case tea.KeyRunes:
-		switch string(msg.Runes) {
-		case "/":
-			a.connList.startFilter()
-		case "j":
-			a.connList.move(1)
-		case "k":
-			a.connList.move(-1)
-		case "h":
-			a.connList.move(-a.connList.rows())
-		case "l":
-			a.connList.move(a.connList.rows())
-		case "g":
-			a.connList.top()
-		case "G":
-			a.connList.bottom()
-		}
-		return a, nil
 	}
-	sidebarNav(&a.connList, msg)
 	return a, nil
 }
 
@@ -896,8 +919,7 @@ func (a App) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // navigation by default, `/` filters, Enter switches to that database, Backspace
 // steps back to the table list, and Esc clears the filter.
 func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.dbs.filtering && msg.Type != tea.KeyEnter && msg.Type != tea.KeyEsc {
-		sidebarFilterEdit(&a.dbs, msg)
+	if listKeys(&a.dbs, msg) {
 		return a, nil
 	}
 	switch msg.Type {
@@ -906,36 +928,10 @@ func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if t, ok := a.dbs.selected(); ok {
 			return a.switchDatabase(t.Name)
 		}
-		return a, nil
 	case tea.KeyBackspace:
 		a.screen = screenTables // step back to the table list
 		a.layout()
-		return a, nil
-	case tea.KeyEsc:
-		if a.dbs.filtering || a.dbs.hasFilter() {
-			a.dbs.clearFilter()
-		}
-		return a, nil
-	case tea.KeyRunes:
-		switch string(msg.Runes) {
-		case "/":
-			a.dbs.startFilter()
-		case "j":
-			a.dbs.move(1)
-		case "k":
-			a.dbs.move(-1)
-		case "h":
-			a.dbs.move(-a.dbs.rows())
-		case "l":
-			a.dbs.move(a.dbs.rows())
-		case "g":
-			a.dbs.top()
-		case "G":
-			a.dbs.bottom()
-		}
-		return a, nil
 	}
-	sidebarNav(&a.dbs, msg)
 	return a, nil
 }
 
@@ -959,53 +955,30 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 // database list, Backspace steps left to the connection picker, and Esc clears the
 // filter.
 func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.sidebar.filtering && msg.Type != tea.KeyEnter && msg.Type != tea.KeyEsc {
-		sidebarFilterEdit(&a.sidebar, msg)
+	if listKeys(&a.sidebar, msg) {
 		return a, nil
 	}
+	// Only Enter, Backspace, and the screen-specific runes (T, s) reach here.
 	switch msg.Type {
 	case tea.KeyEnter:
 		a.sidebar.commitFilter() // an Enter from filter mode opens; leave nav mode
 		if t, ok := a.sidebar.selected(); ok {
 			return a.selectTable(t)
 		}
-		return a, nil
-	case tea.KeyEsc:
-		if a.sidebar.filtering || a.sidebar.hasFilter() {
-			a.sidebar.clearFilter()
-		}
-		return a, nil
 	case tea.KeyBackspace:
 		// Backspace steps left to the connection picker (Connections → Tables →
 		// Grid). Any committed filter is preserved.
 		if len(a.conns) > 0 {
 			a.screen = screenPicker
 		}
-		return a, nil
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
-		case "/":
-			a.sidebar.startFilter()
 		case "T": // jump to the database list
 			return a.openDatabases()
 		case "s": // free-form scratch query for this connection/database
 			return a, editorCmd(a.blankScratchSeed())
-		case "j":
-			a.sidebar.move(1)
-		case "k":
-			a.sidebar.move(-1)
-		case "h":
-			a.sidebar.move(-a.sidebar.rows())
-		case "l":
-			a.sidebar.move(a.sidebar.rows())
-		case "g":
-			a.sidebar.top()
-		case "G":
-			a.sidebar.bottom()
 		}
-		return a, nil
 	}
-	sidebarNav(&a.sidebar, msg)
 	return a, nil
 }
 

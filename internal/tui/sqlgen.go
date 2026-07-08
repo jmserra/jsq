@@ -77,22 +77,30 @@ type editorSeed struct {
 	scratch bool
 }
 
+// inlinedKeyPreds renders the "col = literal" WHERE predicates for a full-PK
+// keyed statement, values inlined via sqlLiteral. Shared by the E/D full paths
+// and the safe-mode quick-edit preview — all display/user-authored SQL, the
+// documented invariant-5 exception (the executed quick path binds instead).
+func inlinedKeyPreds(eng db.Engine, keys []keyPred) []string {
+	preds := make([]string, len(keys))
+	for i, k := range keys {
+		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
+	}
+	return preds
+}
+
 // previewEditSQL renders the quick-path (e) UPDATE with its values inlined, for
 // the safe-mode confirmation overlay only. The statement that actually runs
 // (execEditCmd) binds the same values as parameters — this is display text, not
 // what's executed (cf. invariant 5).
 func previewEditSQL(eng db.Engine, req editReq) string {
-	preds := make([]string, len(req.keys))
-	for i, k := range req.keys {
-		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
-	}
 	newVal := sqlLiteral(req.val)
 	if req.null {
 		newVal = "NULL"
 	}
 	return fmt.Sprintf("UPDATE %s SET %s = %s WHERE %s",
 		eng.QualifiedName(req.table), eng.QuoteIdent(req.col), newVal,
-		strings.Join(preds, " AND "))
+		strings.Join(inlinedKeyPreds(eng, req.keys), " AND "))
 }
 
 // buildUpdateStmt is the E full-path starting point (the editing model in
@@ -105,11 +113,7 @@ func buildUpdateStmt(eng db.Engine, table db.TableRef, col string, val any, keys
 		eng.QualifiedName(table), eng.QuoteIdent(col), lit)
 	litStart := len(setLine) - len(lit) + 1 // 1-based byte col of the literal
 
-	preds := make([]string, len(keys))
-	for i, k := range keys {
-		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
-	}
-	sql := setLine + "\nWHERE " + strings.Join(preds, " AND ") + ";\n"
+	sql := setLine + "\nWHERE " + strings.Join(inlinedKeyPreds(eng, keys), " AND ") + ";\n"
 
 	seed := editorSeed{sql: sql, line: 1, col: litStart, kind: selectToken}
 	switch {
@@ -219,11 +223,8 @@ func buildDuplicateStmt(eng db.Engine, table db.TableRef, cols []db.Column, vals
 // the current row, opened in $EDITOR for review — :wq confirms and runs it, :q!
 // (or an emptied buffer) aborts. Never a bare DELETE.
 func buildDeleteStmt(eng db.Engine, table db.TableRef, keys []keyPred) editorSeed {
-	preds := make([]string, len(keys))
-	for i, k := range keys {
-		preds[i] = eng.QuoteIdent(k.col) + " = " + sqlLiteral(k.val)
-	}
-	sql := fmt.Sprintf("DELETE FROM %s WHERE %s;\n", eng.QualifiedName(table), strings.Join(preds, " AND "))
+	sql := fmt.Sprintf("DELETE FROM %s WHERE %s;\n",
+		eng.QualifiedName(table), strings.Join(inlinedKeyPreds(eng, keys), " AND "))
 	return editorSeed{sql: sql, line: 1, col: 1, kind: selectNone}
 }
 

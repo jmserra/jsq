@@ -12,20 +12,19 @@ import (
 )
 
 type sqliteEngine struct {
-	db *sql.DB
+	stdEngine
 }
 
 func openSQLite(ctx context.Context, dsn string) (Engine, error) {
 	path := sqlitePath(dsn)
-	sdb, err := sql.Open("sqlite", path)
+	sdb, err := openStd(ctx, "sqlite", path, fmt.Sprintf("opening sqlite %q", path))
 	if err != nil {
 		return nil, err
 	}
-	if err := sdb.PingContext(ctx); err != nil {
-		sdb.Close()
-		return nil, fmt.Errorf("opening sqlite %q: %w", path, err)
-	}
-	return &sqliteEngine{db: sdb}, nil
+	// One connection: SQLite serialises writers, and a concurrent read during a
+	// write (a scroll fetch while an edit commits) would otherwise risk SQLITE_BUSY.
+	sdb.SetMaxOpenConns(1)
+	return &sqliteEngine{stdEngine{db: sdb}}, nil
 }
 
 // sqlitePath extracts a filesystem path from sqlite:///path, file:path, or a bare path.
@@ -38,7 +37,6 @@ func sqlitePath(dsn string) string {
 	return dsn
 }
 
-func (e *sqliteEngine) Close() error           { return e.db.Close() }
 func (e *sqliteEngine) Placeholder(int) string { return "?" }
 
 func (e *sqliteEngine) QuoteIdent(s string) string { return quoteIdentDouble(s) }
@@ -59,11 +57,7 @@ func (e *sqliteEngine) Tables(ctx context.Context) ([]Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Table, len(names))
-	for i, n := range names {
-		out[i] = Table{Name: n}
-	}
-	return out, nil
+	return namesToTables(names), nil
 }
 
 func (e *sqliteEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
@@ -278,16 +272,4 @@ func (e *sqliteEngine) resolveImplicitPK(ctx context.Context, fk *ForeignKey) er
 		}
 	}
 	return nil
-}
-
-func (e *sqliteEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
-	return scanQuery(ctx, e.db, query, args...)
-}
-
-func (e *sqliteEngine) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	res, err := e.db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }

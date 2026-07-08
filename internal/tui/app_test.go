@@ -209,6 +209,46 @@ func TestGridFilterSubstringFallback(t *testing.T) {
 	}
 }
 
+// TestGridFilterPreviewSkipsNull: the client preview must not match a NULL cell,
+// because the server's LIKE never returns NULL rows — otherwise a NULL row shows
+// in the live preview and then vanishes on commit. Typing "N" (NULL renders as
+// the glyph "NULL") must match the real "Nora" row only, not the NULL one.
+func TestGridFilterPreviewSkipsNull(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (id, name) VALUES (1,'Nora'),(2,NULL),(3,'Ada')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load users
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	// name column, filter "N": prefix "N%" matches "Nora" only — the NULL row must
+	// be skipped even though its cell renders as the glyph "NULL".
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
+	if len(app.grid.visible) != 1 {
+		t.Fatalf("preview matched %d rows, want 1 (Nora only, NULL skipped)", len(app.grid.visible))
+	}
+
+	// Commit → the server query agrees: exactly the one non-NULL match.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	app = update(t, app, cmd())
+	if len(app.grid.rows) != 1 {
+		t.Fatalf("server filter returned %d rows, want 1 (preview must equal commit)", len(app.grid.rows))
+	}
+}
+
 // TestSidebarSubstringFallback: the list filter also widens to a substring match
 // when the prefix finds nothing.
 func TestSidebarSubstringFallback(t *testing.T) {
@@ -673,8 +713,8 @@ func TestQuickEditCell(t *testing.T) {
 	if !app.grid.editing {
 		t.Fatal("`e` should start editing")
 	}
-	if app.grid.editVal != "Linus" {
-		t.Fatalf("overlay pre-fill = %q, want Linus", app.grid.editVal)
+	if app.grid.edit.val != "Linus" {
+		t.Fatalf("overlay pre-fill = %q, want Linus", app.grid.edit.val)
 	}
 
 	// Clear "Linus" and type "Grace", then commit.
@@ -845,47 +885,47 @@ func TestQuickEditLiteralNullString(t *testing.T) {
 // ←/→ movement, Home/End, backspace-before-caret, and Ctrl-W delete-word.
 func TestEditCursorMechanics(t *testing.T) {
 	g := grid{}
-	g.editVal, g.editPos = "hello world", len([]rune("hello world")) // caret at end (11)
+	g.edit.val, g.edit.pos = "hello world", len([]rune("hello world")) // caret at end (11)
 
 	g.editLeft()
 	g.editLeft()
-	if g.editPos != 9 {
-		t.Fatalf("after ←←, pos = %d, want 9", g.editPos)
+	if g.edit.pos != 9 {
+		t.Fatalf("after ←←, pos = %d, want 9", g.edit.pos)
 	}
 	g.editInput("X") // insert at the caret, not the end
-	if g.editVal != "hello worXld" || g.editPos != 10 {
-		t.Fatalf("after insert: %q pos %d, want \"hello worXld\" pos 10", g.editVal, g.editPos)
+	if g.edit.val != "hello worXld" || g.edit.pos != 10 {
+		t.Fatalf("after insert: %q pos %d, want \"hello worXld\" pos 10", g.edit.val, g.edit.pos)
 	}
 	g.editDeleteWord() // Ctrl-W: removes "worX" back to the space
-	if g.editVal != "hello ld" || g.editPos != 6 {
-		t.Fatalf("after Ctrl-W: %q pos %d, want \"hello ld\" pos 6", g.editVal, g.editPos)
+	if g.edit.val != "hello ld" || g.edit.pos != 6 {
+		t.Fatalf("after Ctrl-W: %q pos %d, want \"hello ld\" pos 6", g.edit.val, g.edit.pos)
 	}
 	g.editHome()
-	if g.editPos != 0 {
-		t.Fatalf("Home pos = %d, want 0", g.editPos)
+	if g.edit.pos != 0 {
+		t.Fatalf("Home pos = %d, want 0", g.edit.pos)
 	}
 	g.editEnd()
-	if g.editPos != len([]rune(g.editVal)) {
-		t.Fatalf("End pos = %d, want %d", g.editPos, len([]rune(g.editVal)))
+	if g.edit.pos != len([]rune(g.edit.val)) {
+		t.Fatalf("End pos = %d, want %d", g.edit.pos, len([]rune(g.edit.val)))
 	}
 
 	// Backspace deletes the rune *before* the caret, not the last one.
-	g.editVal, g.editPos = "abc", 2
+	g.edit.val, g.edit.pos = "abc", 2
 	g.editBackspace()
-	if g.editVal != "ac" || g.editPos != 1 {
-		t.Fatalf("mid-string backspace: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
+	if g.edit.val != "ac" || g.edit.pos != 1 {
+		t.Fatalf("mid-string backspace: %q pos %d, want \"ac\" pos 1", g.edit.val, g.edit.pos)
 	}
 
 	// Del (forward delete) removes the rune *at* the caret; the caret stays put.
-	g.editVal, g.editPos = "abc", 1
+	g.edit.val, g.edit.pos = "abc", 1
 	g.editDelete()
-	if g.editVal != "ac" || g.editPos != 1 {
-		t.Fatalf("forward delete: %q pos %d, want \"ac\" pos 1", g.editVal, g.editPos)
+	if g.edit.val != "ac" || g.edit.pos != 1 {
+		t.Fatalf("forward delete: %q pos %d, want \"ac\" pos 1", g.edit.val, g.edit.pos)
 	}
-	g.editVal, g.editPos = "ab", 2 // at end → no-op on the text
+	g.edit.val, g.edit.pos = "ab", 2 // at end → no-op on the text
 	g.editDelete()
-	if g.editVal != "ab" {
-		t.Fatalf("forward delete at end changed the text: %q", g.editVal)
+	if g.edit.val != "ab" {
+		t.Fatalf("forward delete at end changed the text: %q", g.edit.val)
 	}
 
 	// The inverting caret overlays a char (or a trailing space at end), so the field
@@ -929,27 +969,27 @@ func TestQuickEditCursorKeys(t *testing.T) {
 	// PK-desc → row 0 is id=2 (Linus). Edit "name": caret opens at the end.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if app.grid.editVal != "Linus" || app.grid.editPos != 5 {
-		t.Fatalf("start: %q pos %d, want Linus pos 5 (at end)", app.grid.editVal, app.grid.editPos)
+	if app.grid.edit.val != "Linus" || app.grid.edit.pos != 5 {
+		t.Fatalf("start: %q pos %d, want Linus pos 5 (at end)", app.grid.edit.val, app.grid.edit.pos)
 	}
 	// ← twice into the middle, insert, then Ctrl-W wipes back to the word start.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
-	if app.grid.editPos != 3 {
-		t.Fatalf("after End ←←, pos = %d, want 3", app.grid.editPos)
+	if app.grid.edit.pos != 3 {
+		t.Fatalf("after End ←←, pos = %d, want 3", app.grid.edit.pos)
 	}
 	app = typeRunes(t, app, "X") // "LinXus", caret after X
-	if app.grid.editVal != "LinXus" {
-		t.Fatalf("mid insert = %q, want LinXus", app.grid.editVal)
+	if app.grid.edit.val != "LinXus" {
+		t.Fatalf("mid insert = %q, want LinXus", app.grid.edit.val)
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyCtrlW})
-	if app.grid.editVal != "us" || app.grid.editPos != 0 {
-		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.grid.editVal, app.grid.editPos)
+	if app.grid.edit.val != "us" || app.grid.edit.pos != 0 {
+		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.grid.edit.val, app.grid.edit.pos)
 	}
 	// Del removes the rune at the caret.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyDelete})
-	if app.grid.editVal != "s" || app.grid.editPos != 0 {
-		t.Fatalf("after Del: %q pos %d, want \"s\" pos 0", app.grid.editVal, app.grid.editPos)
+	if app.grid.edit.val != "s" || app.grid.edit.pos != 0 {
+		t.Fatalf("after Del: %q pos %d, want \"s\" pos 0", app.grid.edit.val, app.grid.edit.pos)
 	}
 }
 
@@ -1350,9 +1390,9 @@ func TestQuickEditUntouchedNullNoop(t *testing.T) {
 	})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if !app.grid.editing || app.grid.editVal != "" {
+	if !app.grid.editing || app.grid.edit.val != "" {
 		t.Fatalf("editing a NULL cell should open an empty overlay; editing=%v val=%q",
-			app.grid.editing, app.grid.editVal)
+			app.grid.editing, app.grid.edit.val)
 	}
 	// Bare Enter, no typing → no command, cell stays NULL.
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})

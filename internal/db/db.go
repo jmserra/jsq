@@ -85,6 +85,49 @@ func Open(ctx context.Context, dsn string) (Engine, error) {
 	}
 }
 
+// stdEngine is the shared database/sql plumbing embedded by every engine: the
+// dialect-agnostic Query/Exec/Close over a *sql.DB. Each engine embeds it and
+// implements only its dialect methods (quoting, placeholders, introspection).
+type stdEngine struct{ db *sql.DB }
+
+func (e *stdEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
+	return scanQuery(ctx, e.db, query, args...)
+}
+
+func (e *stdEngine) Exec(ctx context.Context, query string, args ...any) (int64, error) {
+	res, err := e.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (e *stdEngine) Close() error { return e.db.Close() }
+
+// openStd opens a database/sql handle for driver+dsn and verifies it with a
+// ping, closing it and wrapping the failure with label on error. Shared by the
+// three engine openers so the open/ping/wrap dance lives in one place.
+func openStd(ctx context.Context, driver, dsn, label string) (*sql.DB, error) {
+	sdb, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := sdb.PingContext(ctx); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	return sdb, nil
+}
+
+// namesToTables wraps bare table names (from a single-schema engine) as Tables.
+func namesToTables(names []string) []Table {
+	out := make([]Table, len(names))
+	for i, n := range names {
+		out[i] = Table{Name: n}
+	}
+	return out
+}
+
 // scanQuery runs a query and scans all rows into a ResultSet ([]byte → string,
 // nil preserved as SQL NULL). Shared by the engine implementations.
 func scanQuery(ctx context.Context, sdb *sql.DB, query string, args ...any) (*ResultSet, error) {

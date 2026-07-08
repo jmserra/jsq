@@ -12,7 +12,7 @@ import (
 )
 
 type myEngine struct {
-	db *sql.DB
+	stdEngine
 }
 
 func openMySQL(ctx context.Context, rawurl string) (Engine, error) {
@@ -20,15 +20,11 @@ func openMySQL(ctx context.Context, rawurl string) (Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	sdb, err := sql.Open("mysql", dsn)
+	sdb, err := openStd(ctx, "mysql", dsn, "connecting to mysql")
 	if err != nil {
 		return nil, err
 	}
-	if err := sdb.PingContext(ctx); err != nil {
-		sdb.Close()
-		return nil, fmt.Errorf("connecting to mysql: %w", err)
-	}
-	return &myEngine{db: sdb}, nil
+	return &myEngine{stdEngine{db: sdb}}, nil
 }
 
 // mysqlDSN converts a mysql:// URL into the go-sql-driver DSN, using the
@@ -66,7 +62,6 @@ func mysqlDSN(rawurl string) (string, error) {
 	return cfg.FormatDSN(), nil
 }
 
-func (e *myEngine) Close() error           { return e.db.Close() }
 func (e *myEngine) Placeholder(int) string { return "?" }
 
 func (e *myEngine) QuoteIdent(s string) string {
@@ -94,11 +89,7 @@ func (e *myEngine) Tables(ctx context.Context) ([]Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Table, len(names))
-	for i, n := range names {
-		out[i] = Table{Name: n}
-	}
-	return out, nil
+	return namesToTables(names), nil
 }
 
 func (e *myEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
@@ -107,7 +98,7 @@ func (e *myEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 		return nil, err
 	}
 	rows, err := e.db.QueryContext(ctx, `
-		SELECT column_name, data_type, is_nullable, column_default, extra, column_key
+		SELECT column_name, data_type, column_default, extra, column_key
 		FROM information_schema.columns
 		WHERE table_schema = DATABASE() AND table_name = ?
 		ORDER BY ordinal_position`, t.Name)
@@ -117,9 +108,9 @@ func (e *myEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	defer rows.Close()
 	var cols []Column
 	for rows.Next() {
-		var name, dtype, nullable, extra, key string
+		var name, dtype, extra, key string
 		var dflt sql.NullString
-		if err := rows.Scan(&name, &dtype, &nullable, &dflt, &extra, &key); err != nil {
+		if err := rows.Scan(&name, &dtype, &dflt, &extra, &key); err != nil {
 			return nil, err
 		}
 		cols = append(cols, Column{
@@ -191,16 +182,4 @@ func (e *myEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 		return nil, err
 	}
 	return acc.result(), nil
-}
-
-func (e *myEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
-	return scanQuery(ctx, e.db, query, args...)
-}
-
-func (e *myEngine) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	res, err := e.db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }

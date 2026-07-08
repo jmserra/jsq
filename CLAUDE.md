@@ -29,7 +29,7 @@ hardcoded in `app.go` (no `keymap`/`meta` unit). What's really here:
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea
 internal/config/config.go   # load connections.toml, read-only (url, cmd, safe)
 internal/db/
-  db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
+  db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + stdEngine base (Query/Exec/Close over *sql.DB, embedded by each engine) + openStd/namesToTables + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
   app.go        # root App Model. Screens: screenPicker (bare `jsq`, `c`), screenTables (full-screen table list, `t`), screenDatabases (database list, `T` → switchDBCmd reopens the engine on another db), screenBrowse (grid). The three list screens (`connList`/`sidebar`/`dbs`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `T` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `T`). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
@@ -278,8 +278,9 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
   (`caretStyle`) that the terminal paints as a block in its normal palette (a light
   block on a dark terminal), legible over any background — no colour-specific block,
   no thin-bar mid-string gap. All open the caret at end-of-text. (The quick-edit
-  cell keeps its own `editVal`/`editPos` + `editDirty`/`editOrigNull`/`editR`/`editC`
-  state, but shares the renderer.)
+  cell holds its text+caret in an embedded `textField` — the same input type the
+  filters use, so the edit ops are one-line delegators — plus its own
+  `editDirty`/`editOrigNull`/`editR`/`editC` state, and shares the renderer.)
 - **NULL vs empty rendering**: `nil` → faint `NULL`; `""` → blank; literal
   `"NULL"` string → normal text. Driven by the `isNull` flag, not string content.
 

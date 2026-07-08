@@ -11,7 +11,7 @@ import (
 )
 
 type pgEngine struct {
-	db *sql.DB
+	stdEngine
 }
 
 func openPostgres(ctx context.Context, dsn string) (Engine, error) {
@@ -19,18 +19,21 @@ func openPostgres(ctx context.Context, dsn string) (Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	sdb, err := sql.Open("pgx", stdlib.RegisterConnConfig(cfg))
+	sdb, err := openStd(ctx, "pgx", stdlib.RegisterConnConfig(cfg), "connecting to postgres")
 	if err != nil {
 		return nil, err
 	}
-	if err := sdb.PingContext(ctx); err != nil {
-		sdb.Close()
-		return nil, fmt.Errorf("connecting to postgres: %w", err)
-	}
-	return &pgEngine{db: sdb}, nil
+	return &pgEngine{stdEngine{db: sdb}}, nil
 }
 
-func (e *pgEngine) Close() error             { return e.db.Close() }
+// pgSchema defaults an unqualified table to the public schema.
+func pgSchema(t TableRef) string {
+	if t.Schema != "" {
+		return t.Schema
+	}
+	return "public"
+}
+
 func (e *pgEngine) Placeholder(i int) string { return fmt.Sprintf("$%d", i) }
 
 func (e *pgEngine) QuoteIdent(s string) string { return quoteIdentDouble(s) }
@@ -89,12 +92,9 @@ func (e *pgEngine) Tables(ctx context.Context) ([]Table, error) {
 }
 
 func (e *pgEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
+	schema := pgSchema(t)
 	rows, err := e.db.QueryContext(ctx, `
-		SELECT column_name, data_type, is_nullable, column_default, is_identity
+		SELECT column_name, data_type, column_default, is_identity
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
 		ORDER BY ordinal_position`, schema, t.Name)
@@ -106,9 +106,9 @@ func (e *pgEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 	var cols []Column
 	idx := map[string]int{}
 	for rows.Next() {
-		var name, dtype, nullable, isIdentity string
+		var name, dtype, isIdentity string
 		var dflt sql.NullString
-		if err := rows.Scan(&name, &dtype, &nullable, &dflt, &isIdentity); err != nil {
+		if err := rows.Scan(&name, &dtype, &dflt, &isIdentity); err != nil {
 			return nil, err
 		}
 		auto := isIdentity == "YES" || (dflt.Valid && strings.HasPrefix(dflt.String, "nextval("))
@@ -150,10 +150,6 @@ func (e *pgEngine) Columns(ctx context.Context, t TableRef) ([]Column, error) {
 // generated inserts). Bare unique indexes aren't included — constraints are the
 // common case and mirror the PrimaryKey query.
 func (e *pgEngine) uniqueColumns(ctx context.Context, t TableRef) ([]string, error) {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
 	return queryStrings(ctx, e.db, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
@@ -161,14 +157,10 @@ func (e *pgEngine) uniqueColumns(ctx context.Context, t TableRef) ([]string, err
 		  ON tc.constraint_name = kcu.constraint_name
 		 AND tc.table_schema = kcu.table_schema
 		WHERE tc.constraint_type = 'UNIQUE'
-		  AND tc.table_schema = $1 AND tc.table_name = $2`, schema, t.Name)
+		  AND tc.table_schema = $1 AND tc.table_name = $2`, pgSchema(t), t.Name)
 }
 
 func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error) {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
 	return queryStrings(ctx, e.db, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
@@ -177,17 +169,13 @@ func (e *pgEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 		 AND tc.table_schema = kcu.table_schema
 		WHERE tc.constraint_type = 'PRIMARY KEY'
 		  AND tc.table_schema = $1 AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position`, schema, t.Name)
+		ORDER BY kcu.ordinal_position`, pgSchema(t), t.Name)
 }
 
 // ForeignKeys reads FK constraints from pg_catalog, walking each constraint's
 // parallel (conkey, confkey) column arrays by subscript so composite keys keep
 // their column order.
 func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error) {
-	schema := t.Schema
-	if schema == "" {
-		schema = "public"
-	}
 	rows, err := e.db.QueryContext(ctx, `
 		SELECT con.conname, att.attname, nsp2.nspname, cl2.relname, att2.attname
 		FROM pg_constraint con
@@ -199,7 +187,7 @@ func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 		JOIN pg_attribute att  ON att.attrelid = con.conrelid  AND att.attnum = con.conkey[s.i]
 		JOIN pg_attribute att2 ON att2.attrelid = con.confrelid AND att2.attnum = con.confkey[s.i]
 		WHERE con.contype = 'f' AND nsp.nspname = $1 AND cl.relname = $2
-		ORDER BY con.conname, s.i`, schema, t.Name)
+		ORDER BY con.conname, s.i`, pgSchema(t), t.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -217,16 +205,4 @@ func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 		return nil, err
 	}
 	return acc.result(), nil
-}
-
-func (e *pgEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
-	return scanQuery(ctx, e.db, query, args...)
-}
-
-func (e *pgEngine) Exec(ctx context.Context, query string, args ...any) (int64, error) {
-	res, err := e.db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }

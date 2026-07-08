@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jmserra/jsq/internal/db"
@@ -71,13 +70,14 @@ type grid struct {
 	filtering   int            // colIndex being edited, or -1
 	filter      textField      // in-progress filter text + caret
 
-	// Quick-path cell edit (§8): a single-line overlay on the cursor cell.
+	// Quick-path cell edit (§8): a single-line overlay on the cursor cell. The
+	// text + caret live in a shared textField (the same input the filters use);
+	// editDirty and the target/origin flags are edit-specific.
 	editing      bool
-	editVal      string // in-progress text
-	editPos      int    // cursor position within editVal, as a rune index
-	editR, editC int    // visible-row / column index being edited
-	editOrigNull bool   // the original cell was SQL NULL
-	editDirty    bool   // the user typed at least one key
+	edit         textField // in-progress text + caret
+	editR, editC int       // visible-row / column index being edited
+	editOrigNull bool      // the original cell was SQL NULL
+	editDirty    bool      // the user typed at least one key
 
 	hasMore bool // last window came back full → more rows may exist
 	loading bool // a continuous-scroll fetch is in flight
@@ -131,9 +131,7 @@ func (g *grid) setResult(rs *db.ResultSet) {
 	// Preserve cursor position across a re-sort/re-filter; clamp to bounds.
 	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
 	g.cursorC = clamp(g.cursorC, 0, len(g.cols)-1)
-	if g.rowOff > g.cursorR {
-		g.rowOff = g.cursorR
-	}
+	g.ensureRowVisible()
 	if g.colOff > g.cursorC {
 		g.colOff = g.cursorC
 	}
@@ -164,11 +162,24 @@ func (g *grid) setPos(p gridPos) {
 	g.cursorR = clamp(p.cursorR, 0, max(len(g.visible)-1, 0))
 	g.cursorC = clamp(p.cursorC, 0, max(len(g.cols)-1, 0))
 	g.rowOff = clamp(p.rowOff, 0, g.cursorR)
+	g.ensureRowVisible()
+	g.colOff = clamp(p.colOff, 0, g.cursorC)
+	g.ensureColVisible()
+}
+
+// ensureRowVisible nudges rowOff so the cursor row stays within the visible
+// window — up when it sits above, down when it sits below (e.g. after the
+// terminal shrinks or fewer rows loaded this time). Bounded to [0, cursorR].
+func (g *grid) ensureRowVisible() {
+	if g.cursorR < g.rowOff {
+		g.rowOff = g.cursorR
+	}
 	if vr := g.visibleRows(); g.cursorR >= g.rowOff+vr {
 		g.rowOff = g.cursorR - vr + 1
 	}
-	g.colOff = clamp(p.colOff, 0, g.cursorC)
-	g.ensureColVisible()
+	if g.rowOff < 0 {
+		g.rowOff = 0
+	}
 }
 
 // gridSnapshot is a value copy of the grid's loaded result + view state, cached
@@ -235,10 +246,18 @@ func (g *grid) restore(s *gridSnapshot) {
 	g.cursorR, g.cursorC, g.rowOff, g.colOff = s.cursorR, s.cursorC, s.rowOff, s.colOff
 	g.filtering = -1
 	g.filter.clear()
-	g.editing, g.editVal, g.editDirty, g.loading = false, "", false, false
+	g.editing, g.editDirty, g.loading = false, false, false
+	g.edit.clear()
 }
 
-func (g *grid) setSize(w, h int)             { g.w, g.h = w, h }
+func (g *grid) setSize(w, h int) {
+	g.w, g.h = w, h
+	// A shrink can push the cursor off the (now smaller) window; revalidate scroll.
+	if len(g.cols) > 0 {
+		g.ensureRowVisible()
+		g.ensureColVisible()
+	}
+}
 func (g *grid) setSort(col string, asc bool) { g.sortCol, g.sortAsc = col, asc }
 
 func (g *grid) rebuildVisible() {
@@ -322,7 +341,7 @@ func (g *grid) effWidth(c int) int {
 		}
 	}
 	if g.editing && c == g.editC {
-		if need := runewidth.StringWidth(g.editVal) + 1; need > w {
+		if need := runewidth.StringWidth(g.edit.val) + 1; need > w {
 			return need
 		}
 	}
@@ -374,11 +393,10 @@ func (g *grid) needSubstring(ci int, raw string) bool {
 	}
 	re := likeToRegex(searchPattern(raw))
 	for i := range g.rows {
-		var cell string
-		if ci < len(g.rows[i]) {
-			cell = cellString(g.rows[i][ci])
+		if ci >= len(g.rows[i]) || g.rows[i][ci] == nil {
+			continue // NULL never matches a LIKE prefix
 		}
-		if re != nil && re.MatchString(cell) {
+		if re != nil && re.MatchString(valueText(g.rows[i][ci])) {
 			return false // the prefix matches something → stay accurate
 		}
 	}
@@ -404,6 +422,10 @@ func (g *grid) clearFilters() {
 	g.filtersWide = map[int]bool{}
 	g.filtering = -1
 	g.filter.clear()
+	// Widen the view back to every row and re-clamp, so the method leaves the grid
+	// consistent on its own rather than relying on a caller's follow-up reload.
+	g.rebuildVisible()
+	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
 }
 
 // clearCurrentFilter clears the committed filter on the cursor's column (if any)
@@ -461,7 +483,9 @@ func (g *grid) applyPreview() {
 }
 
 // matchPreview sets g.visible to the loaded rows whose filtered column matches pat
-// (all rows when pat is empty).
+// (all rows when pat is empty). It matches the raw value (valueText, not the
+// display-substituted cellString) and skips NULL cells — SQL LIKE never matches
+// NULL — so the client preview mirrors exactly what the server filter will return.
 func (g *grid) matchPreview(pat string) {
 	g.visible = g.visible[:0]
 	re := likeToRegex(pat)
@@ -470,11 +494,10 @@ func (g *grid) matchPreview(pat string) {
 			g.visible = append(g.visible, i)
 			continue
 		}
-		var cell string
-		if g.filtering < len(g.rows[i]) {
-			cell = cellString(g.rows[i][g.filtering])
+		if g.filtering >= len(g.rows[i]) || g.rows[i][g.filtering] == nil {
+			continue
 		}
-		if re == nil || re.MatchString(cell) {
+		if re == nil || re.MatchString(valueText(g.rows[i][g.filtering])) {
 			g.visible = append(g.visible, i)
 		}
 	}
@@ -564,97 +587,44 @@ func (g *grid) startEdit() bool {
 	g.editR, g.editC = g.cursorR, g.cursorC
 	g.editOrigNull = v == nil
 	g.editDirty = false
-	if v == nil {
-		g.editVal = ""
-	} else {
-		g.editVal = fmt.Sprintf("%v", v)
-	}
-	// Open with the caret at the end, so typing appends (matching the filter
+	// setVal parks the caret at the end, so typing appends (matching the filter
 	// inputs and a normal text field); move left/Home to edit in place.
-	g.editPos = len([]rune(g.editVal))
+	if v == nil {
+		g.edit.setVal("")
+	} else {
+		g.edit.setVal(fmt.Sprintf("%v", v))
+	}
 	return true
 }
 
-// editInput inserts s at the cursor and advances past it.
-func (g *grid) editInput(s string) {
-	r, ins := []rune(g.editVal), []rune(s)
-	r = append(r[:g.editPos:g.editPos], append(ins, r[g.editPos:]...)...)
-	g.editVal = string(r)
-	g.editPos += len(ins)
-	g.editDirty = true
-}
+// The text-editing ops delegate to the shared textField (and flag the cell
+// dirty, so a bare Enter with no typing stays a no-op); the caret-movement ops
+// only move within the input. Same wiring as the sidebar filter's delegators.
+func (g *grid) editInput(s string) { g.edit.insert(s); g.editDirty = true }
+func (g *grid) editBackspace()     { g.edit.backspace(); g.editDirty = true }
+func (g *grid) editDelete()        { g.edit.del(); g.editDirty = true }
+func (g *grid) editDeleteWord()    { g.edit.deleteWord(); g.editDirty = true }
+func (g *grid) editLeft()          { g.edit.left() }
+func (g *grid) editRight()         { g.edit.right() }
+func (g *grid) editHome()          { g.edit.home() }
+func (g *grid) editEnd()           { g.edit.end() }
 
 func (g *grid) cancelEdit() {
-	g.editing, g.editVal, g.editDirty, g.editPos = false, "", false, 0
-}
-
-// editBackspace deletes the rune before the cursor.
-func (g *grid) editBackspace() {
-	if g.editPos > 0 {
-		r := []rune(g.editVal)
-		r = append(r[:g.editPos-1], r[g.editPos:]...)
-		g.editVal = string(r)
-		g.editPos--
-	}
-	g.editDirty = true
-}
-
-// editDelete removes the rune at the caret (forward delete / Del); a no-op at
-// end-of-text. The caret stays put.
-func (g *grid) editDelete() {
-	r := []rune(g.editVal)
-	if g.editPos < len(r) {
-		r = append(r[:g.editPos], r[g.editPos+1:]...)
-		g.editVal = string(r)
-	}
-	g.editDirty = true
-}
-
-// editLeft / editRight move the cursor within the value; editHome / editEnd jump
-// to the ends. Bounded to [0, len].
-func (g *grid) editLeft() {
-	if g.editPos > 0 {
-		g.editPos--
-	}
-}
-
-func (g *grid) editRight() {
-	if g.editPos < len([]rune(g.editVal)) {
-		g.editPos++
-	}
-}
-
-func (g *grid) editHome() { g.editPos = 0 }
-func (g *grid) editEnd()  { g.editPos = len([]rune(g.editVal)) }
-
-// editDeleteWord deletes from the start of the word before the cursor up to the
-// cursor (Ctrl-W): trailing spaces first, then the run of non-spaces.
-func (g *grid) editDeleteWord() {
-	r := []rune(g.editVal)
-	i := g.editPos
-	for i > 0 && unicode.IsSpace(r[i-1]) {
-		i--
-	}
-	for i > 0 && !unicode.IsSpace(r[i-1]) {
-		i--
-	}
-	r = append(r[:i], r[g.editPos:]...)
-	g.editVal = string(r)
-	g.editPos = i
-	g.editDirty = true
+	g.editing, g.editDirty = false, false
+	g.edit.clear()
 }
 
 // commitEdit ends edit mode and returns the update to run. ok is false when
 // nothing should run: a bare Enter with no typing (untouched cell, including an
 // untouched NULL which stays NULL — §8), or the row can't be keyed.
 func (g *grid) commitEdit() (editReq, bool) {
-	val, dirty := g.editVal, g.editDirty
+	val, dirty := g.edit.val, g.editDirty
 	r, c := g.editR, g.editC
 	g.cancelEdit()
 	if !dirty {
 		return editReq{}, false
 	}
-	if r < 0 || r >= len(g.visible) {
+	if r < 0 || r >= len(g.visible) || c < 0 || c >= len(g.cols) {
 		return editReq{}, false
 	}
 	keys, ok := g.keyPredsAt(r)
@@ -738,6 +708,18 @@ func (g *grid) fkFor(col string) (db.ForeignKey, bool) {
 	return db.ForeignKey{}, false
 }
 
+// rowMap keys a row's values by column name (columns past the row's length are
+// omitted). Shared by lastRowMap and currentRowMap.
+func (g *grid) rowMap(row []any) map[string]any {
+	vals := make(map[string]any, len(g.cols))
+	for i, c := range g.cols {
+		if i < len(row) {
+			vals[c.name] = row[i]
+		}
+	}
+	return vals
+}
+
 // lastRowMap returns the last loaded row (in server sort order — continuous
 // scroll appends in ORDER BY order) as a column→value map. It's the keyset
 // cursor anchor for the next scroll fetch. ok is false when no rows are loaded.
@@ -745,14 +727,7 @@ func (g *grid) lastRowMap() (map[string]any, bool) {
 	if len(g.rows) == 0 {
 		return nil, false
 	}
-	row := g.rows[len(g.rows)-1]
-	vals := make(map[string]any, len(g.cols))
-	for i, c := range g.cols {
-		if i < len(row) {
-			vals[c.name] = row[i]
-		}
-	}
-	return vals, true
+	return g.rowMap(g.rows[len(g.rows)-1]), true
 }
 
 // currentRowMap returns the cursor row as a column→value map, with no editability
@@ -761,14 +736,7 @@ func (g *grid) currentRowMap() (map[string]any, bool) {
 	if g.cursorR >= len(g.visible) {
 		return nil, false
 	}
-	row := g.rows[g.visible[g.cursorR]]
-	vals := make(map[string]any, len(g.cols))
-	for i, c := range g.cols {
-		if i < len(row) {
-			vals[c.name] = row[i]
-		}
-	}
-	return vals, true
+	return g.rowMap(g.rows[g.visible[g.cursorR]]), true
 }
 
 // yankCell returns the cursor cell's value as plain text for the y yank — the
@@ -1026,7 +994,7 @@ func (g *grid) renderRow(r int) string {
 		w := g.effWidth(c)
 		if isEdit {
 			// Block caret overlays a cell instead of inserting a bar glyph.
-			b.WriteString(renderEditCell(g.editVal, g.editPos, w))
+			b.WriteString(renderEditCell(g.edit.val, g.edit.pos, w))
 			b.WriteString(strings.Repeat(" ", colGap))
 			x += w + colGap
 			if x >= g.w {
