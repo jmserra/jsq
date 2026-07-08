@@ -1467,11 +1467,13 @@ func (a App) reloadView() (tea.Model, tea.Cmd) {
 	return a, a.loadCurrentCmd(ctx)
 }
 
+// gridLimit is the fetch window, sized to the viewport: a few screenfuls, so a
+// tall terminal loads more per fetch and a short one less. Floored so we always
+// over-fetch well past the visible rows (smooth scroll, not a fetch per
+// keystroke) and capped to bound a single round-trip. Used for the initial load
+// and each scroll window alike.
 func (a App) gridLimit() int {
-	if n := (a.h - 2) * 4; n >= 200 {
-		return n
-	}
-	return 200
+	return clamp((a.h-1)*4, 100, 500)
 }
 
 func (a App) View() string {
@@ -1543,17 +1545,31 @@ func (a App) statusLine() string {
 		left += faint.Render(" > " + strings.Join(rest, " > "))
 	}
 	left += faint.Render(" ")
-	if a.activity == "" {
+	// Right side: the activity spinner while a DB op runs, else (in the grid, with
+	// rows loaded) a compact paging hint — cursor row / loaded count, with a ↓ when
+	// more rows exist below the loaded buffer.
+	var right string
+	switch {
+	case a.activity != "":
+		// spinner + label + a hint that Esc kills it.
+		frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
+		right = activityStyle.Render(frame + " " + a.activity + " · esc ")
+	case a.screen == screenBrowse && len(a.grid.visible) > 0:
+		row, loaded, more := a.grid.posSummary()
+		s := fmt.Sprintf("%d/%d", row, loaded)
+		if more {
+			s += "↓"
+		}
+		right = faint.Render(s + " ")
+	}
+	if right == "" {
 		return left
 	}
-	// Top-right activity indicator: spinner + label + a hint that Esc kills it.
-	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
-	ind := activityStyle.Render(frame + " " + a.activity + " · esc ")
-	gap := a.w - lipgloss.Width(left) - lipgloss.Width(ind)
+	gap := a.w - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-	return left + strings.Repeat(" ", gap) + ind
+	return left + strings.Repeat(" ", gap) + right
 }
 
 var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))

@@ -146,6 +146,13 @@ type gridPos struct{ cursorR, cursorC, rowOff, colOff int }
 
 func (g *grid) pos() gridPos { return gridPos{g.cursorR, g.cursorC, g.rowOff, g.colOff} }
 
+// posSummary reports the cursor's 1-based row, the loaded (visible) row count,
+// and whether more rows exist beyond the loaded buffer — for the status-line
+// paging hint.
+func (g *grid) posSummary() (row, loaded int, more bool) {
+	return g.cursorR + 1, len(g.visible), g.hasMore
+}
+
 // setPos restores a saved position, clamped to the loaded bounds and nudged so
 // the cursor stays on screen (the saved rowOff/colOff may not fit if fewer rows
 // loaded this time). Used both by the cache restore and the reload-then-reposition

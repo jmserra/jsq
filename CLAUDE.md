@@ -227,14 +227,12 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
 
 ## Code vs. README design — real divergences (not just "not built yet")
 
-Know these before touching scroll/paging:
+Know this before touching scroll/paging:
 
-- **Fetch window isn't viewport-sized.** `app.go:gridLimit()` = `max(200,
-  (h-2)*4)` — a fixed floor of 200, used for both initial load and scroll window.
 - **`G` doesn't fetch a tail window** — `grid.bottom()` just jumps the cursor to
-  the end of the loaded buffer; `maybeLoadMore` may then extend it.
-- **No `(more↓)` / row-position status hint** — `grid.hasMore` is tracked but the
-  status line only shows `conn > db > table/message`.
+  the end of the loaded buffer; `maybeLoadMore` may then extend it. Fetching the
+  true tail would break the "contiguous window from the top" model (it'd need
+  bidirectional windows), so it stays deferred, not a quick fix.
 
 ## Conventions when extending
 

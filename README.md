@@ -32,11 +32,11 @@ duplicate or skip rows. Sorts on a non-PK column fall back to `LIMIT`/`OFFSET` �
 a nullable sort column's NULL group can sit at either end depending on the engine,
 which a keyset cursor could skip, so those aren't keyset'd.
 
-On the roadmap — smaller paging polish, none of it correctness:
+On the roadmap:
 
-- A viewport-sized fetch window (today it's a fixed floor of 200 rows).
-- `G` fetching a genuine tail window rather than jumping to the loaded end.
-- A `(more↓)` / row-position hint in the status line.
+- `G` fetching a genuine tail window (the last rows) rather than jumping to the
+  loaded end — a change to the "one contiguous window from the top" scroll model
+  (it would need bidirectional windows), not just polish.
 - Keyset for non-PK sorts too (needs per-engine NULL-ordering handling).
 
 ---
@@ -456,12 +456,6 @@ resolved a primary key. Otherwise edit keys are inert (status line says why).
 - `go build -o jsq .` → a single static binary. No cgo, so cross-compilation is
   trivial. A `Makefile` provides `build` (stripped/optimized), `run`, `test`,
   `tidy`, and `clean` targets.
-
-## Deferred (post-v1)
-
-Column width adjust · disk-persisted query history (the `b` buffer is in-memory
-only) · vertical row-detail view for wide tables · cross-table duplicate · filter
-stacking as OR / clear-all · keymap override file.
 
 ## Relationship to lazysql
 

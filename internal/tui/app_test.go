@@ -315,6 +315,42 @@ func TestKeysetFallsBackForNonPKSort(t *testing.T) {
 	}
 }
 
+// TestStatusPagingHint checks the status-line row-position hint: cursor/loaded,
+// no ↓ when everything fits, and it tracks the cursor.
+func TestStatusPagingHint(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
+	})
+	if got := app.statusLine(); !strings.Contains(got, "1/3") || strings.Contains(got, "↓") {
+		t.Fatalf("small table hint: want 1/3 and no ↓, got %q", got)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got := app.statusLine(); !strings.Contains(got, "2/3") {
+		t.Fatalf("after j: want 2/3, got %q", got)
+	}
+}
+
+// TestStatusPagingHintMore checks the ↓ marker appears when the loaded window is
+// only a prefix of the table (more rows exist below).
+func TestStatusPagingHintMore(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE nums (id INTEGER PRIMARY KEY, v INTEGER)`)
+		for i := 0; i < 500; i++ {
+			e.Exec(ctx, `INSERT INTO nums (v) VALUES (?)`, i)
+		}
+	})
+	if !app.grid.hasMore {
+		t.Fatal("500 rows should exceed the initial window (hasMore)")
+	}
+	want := fmt.Sprintf("/%d↓", len(app.grid.rows))
+	if got := app.statusLine(); !strings.Contains(got, want) {
+		t.Fatalf("want %q in status line, got %q", want, got)
+	}
+}
+
 // TestSidebarFilter drives the full-screen table list: typing narrows it (no
 // `/`), arrows move within matches, and Enter loads the highlighted table.
 func TestSidebarFilter(t *testing.T) {
