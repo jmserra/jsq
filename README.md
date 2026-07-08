@@ -26,7 +26,6 @@ too.**
 On the roadmap (parts of the design below describe the intended end state, not
 what ships today):
 
-- **Query history** — `Ctrl-r` picker and `Ctrl-o` step-back.
 - A **database picker**.
 - **Dismissible errors** — a failed statement currently shows a full-screen
   error; it should surface in the status line and let you continue.
@@ -133,6 +132,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
+| `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
 | `r` | reload the current view — re-runs the table load (keeping sort, filters, and cursor) or the ad-hoc query behind an `s` result |
 | `t` | go to the table list (a full-screen page) |
 | `T` | go to the database list — jump to another database on the same connection |

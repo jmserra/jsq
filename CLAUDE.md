@@ -40,6 +40,7 @@ internal/tui/
   sidebar.go    # full-screen filterable list Model (type-to-filter, no `/`), laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓ = ∓1, ←→ = ∓rows). Used for both the table list (screenTables) and the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`); `label` is the search placeholder. (Type name is still `sidebar`.)
   picker.go     # connection picker (bare `jsq` at startup, and `c` mid-session)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
+  histview.go   # query-history buffer overlay (b): histEntry + histView list; badge (row/affected count, `+` on a LIMIT hit) + snippet renderers
   confirm.go    # safe-mode (connection safe=true) "run this mutation?" y/n overlay
   help.go       # read-only `?` keybinding cheat sheet (full-area overlay like cellview); helpItems is the hand-kept mirror of the hardcoded keymap
   util.go       # clamp()
@@ -166,6 +167,17 @@ doesn't inherit it), the seed's `remember` field (the table) rides through
 `editorCmd`→`editorSubmitMsg`, and the submit handler stores the SQL back into
 `lastQuery` (even on error) so the next `s` on that table continues the edit-run
 loop. Only `s` sets `remember`; E/o/D/p leave it zero.
+
+**Query history** (`b`, `App.history`): a per-connection, most-recent-first,
+SQL-deduped list of the free-form (`s`) queries. `recordQuery` (called from the
+`editorSubmitMsg` handler when `remember` is set — so E/o/D/p structured edits
+never enter it) promotes a query to the front on submit; `recordQueryCount`
+(from `queryResultMsg`/`execDoneMsg`, matched by `histKey` = whitespace-trimmed
+SQL) fills in its last row/affected count once the run lands. `b` snapshots the
+list into `histView` (an overlay like `jumpView`); Enter runs a read directly
+(`runHist`, re-recording for recency) but opens a write in `$EDITOR` for review
+(`histSeed`, `remember`=current table so a `:wq` re-records + continues the `s`
+loop); `s` opens any entry in `$EDITOR`. History is in-memory only (no persistence).
 
 `r` (`App.reloadView`) re-runs the current view: a table reload is just
 `loadCurrentCmd` (keeps sort, `basePreds`, column filters, and cursor — `setResult`

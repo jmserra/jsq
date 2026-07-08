@@ -80,6 +80,12 @@ type App struct {
 	lastQuery  map[string]string // last scratch (s) query per conn+db+table (queryKey), for the edit loop
 	adHocQuery string            // SQL behind the current adHoc result, so `r` can re-run it
 
+	// Query history: per-connection list of free-form (s) queries, most-recent
+	// first, deduped by SQL. `b` opens the histView buffer over it; each entry's
+	// row/affected count is filled in when its result lands (recordQueryCount).
+	history  map[string][]histEntry
+	histView histView
+
 	dbName         string
 	w, h           int
 	status         string
@@ -110,6 +116,7 @@ func New(conns []config.Conn, direct config.Conn) App {
 		safe:      direct.Safe,
 		pending:   direct,
 		lastQuery: map[string]string{},
+		history:   map[string][]histEntry{},
 		viewIdx:   -1,
 		sidebar:   sidebar{label: "tables"},
 		dbs:       sidebar{label: "databases"},
@@ -419,6 +426,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it (even if it errors) for a tight edit-run-edit loop.
 		if msg.remember.Name != "" {
 			a.lastQuery[a.queryKey(msg.remember)] = msg.sql
+			a.recordQuery(msg.sql) // and into the connection-scoped `b` history
 		}
 		// A read (s) shows its rows directly; a mutation runs via Exec — and on a
 		// safe connection it's held for a y/n confirmation first. A multi-statement
@@ -458,6 +466,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.adHocQuery = msg.sql
 		a.screen = screenBrowse
 		a.layout()
+		a.recordQueryCount(msg.sql, len(msg.rs.Rows), true)
 		a.status = fmt.Sprintf("query — %d row(s)", len(msg.rs.Rows))
 		return a, nil
 
@@ -467,6 +476,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Reload the current view so the change is reflected; the affected count
 		// survives the reload via postExecStatus.
+		a.recordQueryCount(msg.sql, int(msg.affected), false)
 		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
 		ctx := a.begin("reloading")
 		return a, a.loadCurrentCmd(ctx)
@@ -575,6 +585,33 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	// Query-history buffer captures keys while open: Enter runs a read (a write
+	// opens in $EDITOR), `s` opens any entry in $EDITOR to evolve it.
+	if a.histView.active {
+		switch msg.String() {
+		case "esc", "q", "b":
+			a.histView.active = false
+		case "j", "down":
+			a.histView.move(1)
+		case "k", "up":
+			a.histView.move(-1)
+		case "g":
+			a.histView.top()
+		case "G":
+			a.histView.bottom()
+		case "s":
+			if e, ok := a.histView.selected(); ok {
+				a.histView.active = false
+				return a, editorCmd(a.histSeed(e.sql))
+			}
+		case "enter":
+			if e, ok := a.histView.selected(); ok {
+				a.histView.active = false
+				return a.runHist(e)
+			}
+		}
+		return a, nil
+	}
 	// While editing a cell (§8 quick path), keys go to the edit overlay.
 	if a.screen == screenBrowse && a.grid.editing {
 		return a.handleEditKey(msg)
@@ -597,6 +634,19 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.jumps.open(a.jumpEntries(), a.viewIdx, a.w-leftPad, a.h-1)
+		return a, nil
+	}
+	// b opens the query-history buffer: the free-form queries run on this
+	// connection, most-recent first, with their last result counts.
+	if a.screen == screenBrowse && msg.String() == "b" {
+		hist := a.history[a.connName]
+		if len(hist) == 0 {
+			a.status = "no query history yet"
+			return a, nil
+		}
+		snap := make([]histEntry, len(hist))
+		copy(snap, hist)
+		a.histView.open(snap, a.w-leftPad, a.h-1)
 		return a, nil
 	}
 	// Esc kills an in-flight DB op (a slow query, a big load). This takes
@@ -1318,6 +1368,69 @@ func (a App) scratchSeed() editorSeed {
 	return editorSeed{sql: sql, remember: a.currentTable}
 }
 
+// maxHistory bounds a connection's remembered query list.
+const maxHistory = 200
+
+// recordQuery promotes sql to the front of the current connection's query
+// history (deduped by SQL), its result count pending until the run lands. Called
+// for every free-form (s) query as it's submitted, so the b buffer lists it even
+// if it errors.
+func (a *App) recordQuery(sql string) {
+	key := histKey(sql)
+	if key == "" {
+		return
+	}
+	list := a.history[a.connName]
+	kept := make([]histEntry, 0, len(list)+1)
+	kept = append(kept, histEntry{sql: key})
+	for _, e := range list {
+		if e.sql != key { // drop the prior copy; it moves to the front
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) > maxHistory {
+		kept = kept[:maxHistory]
+	}
+	a.history[a.connName] = kept
+}
+
+// recordQueryCount fills in the outcome (rows read or affected) of the most
+// recent run of sql on the current connection — a no-op if it isn't a remembered
+// query (E/o/D/p structured edits never enter the history).
+func (a *App) recordQueryCount(sql string, count int, read bool) {
+	key := histKey(sql)
+	list := a.history[a.connName]
+	for i := range list {
+		if list[i].sql == key {
+			list[i].count, list[i].read, list[i].ran = count, read, true
+			return
+		}
+	}
+}
+
+// runHist executes a history entry on Enter: a read runs directly (and is
+// bumped to most-recent); a write opens in $EDITOR for review rather than
+// running unseen. On a safe connection a multi-statement "read" is treated as a
+// write and opened, mirroring the s submit path.
+func (a App) runHist(e histEntry) (tea.Model, tea.Cmd) {
+	if isReadSQL(e.sql) && !(a.safe && isMultiStatement(e.sql)) {
+		a.recordQuery(e.sql) // bump recency; the count refills on the result
+		ctx := a.begin("running query")
+		a.status = "running query…"
+		return a, runQueryCmd(ctx, a.gen, a.engine, e.sql)
+	}
+	return a, editorCmd(a.histSeed(e.sql))
+}
+
+// histSeed opens a history query in $EDITOR to evolve it: seeded with the SQL
+// and marked (remember) so a :wq re-records it and continues the s edit loop.
+func (a App) histSeed(sql string) editorSeed {
+	if !strings.HasSuffix(sql, "\n") {
+		sql += "\n"
+	}
+	return editorSeed{sql: sql, remember: a.currentTable}
+}
+
 // queryKey scopes a remembered scratch query to the current connection and
 // database as well as the table, so a same-named table in another database or
 // connection doesn't inherit an unrelated last query. The editor blocks the UI
@@ -1394,6 +1507,10 @@ func (a App) browseView() string {
 	}
 	if a.jumps.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.jumps.View())
+		return a.statusLine() + "\n" + body
+	}
+	if a.histView.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.histView.View())
 		return a.statusLine() + "\n" + body
 	}
 	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.grid.View())

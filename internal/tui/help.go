@@ -61,6 +61,7 @@ var helpItems = []helpItem{
 	{key: "p", desc: "duplicate the current row"},
 	{head: "SQL"},
 	{key: "s", desc: "free-form SQL in $EDITOR"},
+	{key: "b", desc: "query-history buffer (enter runs a read, s edits, esc closes)"},
 	{key: "r", desc: "reload the current table / query view"},
 	{head: "Navigate"},
 	{key: "t / Bksp", desc: "go to the table list (type to filter, enter opens)"},

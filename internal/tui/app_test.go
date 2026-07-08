@@ -771,6 +771,102 @@ func TestSafeMultiStatementReadHeld(t *testing.T) {
 	}
 }
 
+// TestQueryHistoryBuffer drives the `b` buffer: an s query is recorded on submit,
+// its row count filled in when the result lands, the buffer lists it, Enter
+// re-runs a read, and `s` opens it in $EDITOR.
+func TestQueryHistoryBuffer(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'), ('Linus')`)
+	})
+
+	// Submit an s query (remember set → it enters the connection history).
+	m, cmd := app.Update(editorSubmitMsg{sql: "SELECT * FROM users LIMIT 1;", remember: db.Table{Name: "users"}})
+	app = m.(App)
+	if got := len(app.history["test"]); got != 1 {
+		t.Fatalf("submit should record 1 history entry, got %d", got)
+	}
+	app = update(t, app, cmd()) // queryResultMsg → count filled in
+
+	e := app.history["test"][0]
+	if !e.ran || !e.read || e.count != 1 {
+		t.Fatalf("history entry outcome wrong: %+v", e)
+	}
+	// The count equals the query's own LIMIT → the badge hints there may be more.
+	if b := histBadge(e); b != "1+ rows" {
+		t.Fatalf("badge = %q, want %q", b, "1+ rows")
+	}
+
+	// `b` opens the buffer; it lists the query and its badge.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	if !app.histView.active {
+		t.Fatal("`b` should open the query-history buffer")
+	}
+	view := app.View()
+	for _, want := range []string{"query history", "SELECT * FROM users LIMIT 1", "1+ rows"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("history view missing %q:\n%s", want, view)
+		}
+	}
+
+	// Enter on a read re-runs it directly (returns a query command).
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if app.histView.active {
+		t.Fatal("Enter should close the buffer")
+	}
+	if cmd == nil {
+		t.Fatal("Enter on a read entry should run it")
+	}
+	if _, ok := cmd().(queryResultMsg); !ok {
+		t.Fatal("Enter on a read entry should produce a query result")
+	}
+
+	// `s` on an entry opens it in $EDITOR (spawns an editor command).
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	app = m.(App)
+	if app.histView.active {
+		t.Fatal("`s` should close the buffer")
+	}
+	if cmd == nil {
+		t.Fatal("`s` on an entry should open $EDITOR")
+	}
+}
+
+// TestQueryHistoryWriteOpensEditor guards that Enter on a non-read history entry
+// opens it in $EDITOR for review rather than running it unseen.
+func TestQueryHistoryWriteOpensEditor(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	// A write query submitted via s runs and is recorded.
+	m, cmd := app.Update(editorSubmitMsg{sql: "UPDATE users SET name = 'Bob' WHERE id = 1;", remember: db.Table{Name: "users"}})
+	app = m.(App)
+	app = update(t, app, cmd()) // execDoneMsg → reload command
+	if got := len(app.history["test"]); got != 1 {
+		t.Fatalf("write submit should record 1 history entry, got %d", got)
+	}
+
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if app.histView.active {
+		t.Fatal("Enter should close the buffer")
+	}
+	if cmd == nil {
+		t.Fatal("Enter on a write entry should open $EDITOR")
+	}
+	// It opens the editor (an exec spawn), not the exec path — the write must not
+	// run unseen.
+	if _, ok := cmd().(execDoneMsg); ok {
+		t.Fatal("Enter on a write entry must not run it directly")
+	}
+}
+
 // TestQuickEditUntouchedNullNoop guards §8: a bare Enter on an untouched NULL
 // cell is a no-op — it must not blank the value to an empty string.
 func TestQuickEditUntouchedNullNoop(t *testing.T) {
