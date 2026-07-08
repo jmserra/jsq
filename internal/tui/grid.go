@@ -386,6 +386,7 @@ func (g *grid) needSubstring(ci int, raw string) bool {
 // clearFilter removes the edited column's filter and ends editing.
 func (g *grid) clearFilter() {
 	delete(g.filters, g.filtering)
+	delete(g.filtersWide, g.filtering) // keep the two maps in lockstep
 	g.endEdit()
 }
 
@@ -670,10 +671,6 @@ func (g *grid) commitEdit() (editReq, bool) {
 	return req, true
 }
 
-// keyPreds builds the WHERE predicates from the edited row's PK values (quick
-// path). Returns false if any PK column is missing or NULL.
-func (g *grid) keyPreds() ([]keyPred, bool) { return g.keyPredsAt(g.editR) }
-
 // keyPredsAt builds the WHERE predicates from the PK values of the given
 // visible-row index. Returns false if any PK column is missing or NULL (can't
 // safely key the statement).
@@ -941,7 +938,12 @@ func cellString(v any) string {
 	if v == nil {
 		return "NULL"
 	}
+	// scanQuery already converts driver []byte to string, but render any that slips
+	// through as text (not fmt's "[104 101 …]") to stay in step with valueText/yank.
 	s := fmt.Sprintf("%v", v)
+	if b, ok := v.([]byte); ok {
+		s = string(b)
+	}
 	s = strings.ReplaceAll(s, "\n", "↵")
 	s = strings.ReplaceAll(s, "\t", "→")
 	s = strings.ReplaceAll(s, "\r", "")

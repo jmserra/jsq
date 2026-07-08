@@ -233,6 +233,38 @@ func TestTableListBackspaceToPicker(t *testing.T) {
 	}
 }
 
+// TestConnSwitchCancelsInflight: switching connection while a DB op is in flight
+// cancels it (startConnect stops the prior op), so no runaway query, phantom
+// spinner, or hijacked Esc survives the switch.
+func TestConnSwitchCancelsInflight(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = connectPicker(t, app, 0) // connect A
+	app = openFirstTable(t, app)   // load ta → grid
+
+	// Begin a sort but don't deliver its result → an op is in flight.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	app = m.(App)
+	if cmd == nil || app.activity == "" || app.cancel == nil {
+		t.Fatalf("sort should put an op in flight; activity=%q cancel=%v", app.activity, app.cancel != nil)
+	}
+
+	// c → picker, select B, Enter → switch. startConnect must cancel the sort.
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	app = m.(App)
+	app.connList.cursor = 1
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("switching connection should dispatch a reconnect")
+	}
+	if app.activity != "" || app.cancel != nil {
+		t.Fatalf("conn switch must cancel the in-flight op; activity=%q cancel=%v",
+			app.activity, app.cancel != nil)
+	}
+}
+
 // TestPickerFilter: the connection picker navigates by default (a bare letter
 // does not filter) and `/` enters filter mode; narrowing to one connection and
 // pressing Enter connects to it.

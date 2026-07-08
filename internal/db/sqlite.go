@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -40,9 +41,7 @@ func sqlitePath(dsn string) string {
 func (e *sqliteEngine) Close() error           { return e.db.Close() }
 func (e *sqliteEngine) Placeholder(int) string { return "?" }
 
-func (e *sqliteEngine) QuoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
+func (e *sqliteEngine) QuoteIdent(s string) string { return quoteIdentDouble(s) }
 
 func (e *sqliteEngine) QualifiedName(t TableRef) string { return e.QuoteIdent(t.Name) }
 
@@ -138,7 +137,9 @@ func (e *sqliteEngine) uniqueColumns(ctx context.Context, t TableRef) (map[strin
 			rows.Close()
 			return nil, err
 		}
-		if unique == 1 {
+		// A partial unique index (… WHERE …) doesn't guarantee global uniqueness,
+		// so it shouldn't flag its columns as unique.
+		if unique == 1 && partial == 0 {
 			uniqueIdx = append(uniqueIdx, name)
 		}
 	}
@@ -210,7 +211,16 @@ func (e *sqliteEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKe
 	}
 	defer rows.Close()
 
-	var acc fkAccum
+	// PRAGMA foreign_key_list doesn't accept ORDER BY, and the `seq` (column order
+	// within a composite key) is only reliable if we sort on it ourselves — so
+	// collect the rows and sort by (id, seq) before assembling, rather than trusting
+	// the emission order (pg/mysql get this from their query's ORDER BY).
+	type fkRow struct {
+		id, seq        int
+		refTable, from string
+		to             string
+	}
+	var raw []fkRow
 	for rows.Next() {
 		var id, seq int
 		var refTable, from, onUpd, onDel, match string
@@ -218,11 +228,22 @@ func (e *sqliteEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKe
 		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpd, &onDel, &match); err != nil {
 			return nil, err
 		}
-		// "" RefColumn (a column-less REFERENCES) is resolved to the PK below.
-		acc.add(strconv.Itoa(id), TableRef{Name: refTable}, from, to.String)
+		raw = append(raw, fkRow{id, seq, refTable, from, to.String})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	sort.SliceStable(raw, func(i, j int) bool {
+		if raw[i].id != raw[j].id {
+			return raw[i].id < raw[j].id
+		}
+		return raw[i].seq < raw[j].seq
+	})
+
+	var acc fkAccum
+	for _, r := range raw {
+		// "" RefColumn (a column-less REFERENCES) is resolved to the PK below.
+		acc.add(strconv.Itoa(r.id), TableRef{Name: r.refTable}, r.from, r.to)
 	}
 
 	out := make([]ForeignKey, 0, len(acc.order))

@@ -189,7 +189,11 @@ type connRestore struct {
 // startConnect marks a cancellable connect as in flight: it snapshots the identity
 // to roll back on cancel, bumps the op token so a late result can be dropped, and
 // sets connecting. Callers invoke it just before overwriting connName/pending/etc.
+// Like begin(), it stops any op already running — a connect/db switch abandons the
+// current view, so its in-flight query must be cancelled (else it keeps running on
+// the server, leaves a phantom spinner, and its `esc` hijacks the next keypress).
 func (a *App) startConnect() int {
+	a.stop()
 	a.preConn = &connRestore{connName: a.connName, safe: a.safe, pending: a.pending, viewIdx: a.viewIdx}
 	a.gen++
 	a.connecting = true
@@ -731,7 +735,9 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 	if a.engine == nil { // initial connect (startup): connectCmd, quits on failure
 		a.beginConnect(c)
 		if a.connCmd != "" {
-			return a, tea.Batch(connectCmd(gen, c), tickCmd())
+			// Picker mode already reserved the spinner loop (New/Init); ensureTick
+			// returns nil so we don't start a second, self-perpetuating tick chain.
+			return a, tea.Batch(connectCmd(gen, c), a.ensureTick())
 		}
 		return a, connectCmd(gen, c)
 	}
@@ -1431,6 +1437,7 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
 		}
+		return a, nil // opening a modal must not fall through to maybeLoadMore
 	case "J":
 		if a.adHoc {
 			a.status = "sort unavailable on a query result"

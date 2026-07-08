@@ -138,6 +138,13 @@ func queryStrings(ctx context.Context, sdb *sql.DB, query string, args ...any) (
 	return out, rows.Err()
 }
 
+// quoteIdentDouble quotes an identifier with double-quotes, doubling any embedded
+// ones — the standard-SQL form shared by Postgres and SQLite (MySQL uses
+// backticks, so it quotes its own way).
+func quoteIdentDouble(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
 // fkAccum groups the per-column rows of a foreign-key introspection query into
 // ForeignKeys, preserving both first-seen constraint order and (within a
 // composite key) the scan order of the columns. Every engine's ForeignKeys walks

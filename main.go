@@ -49,14 +49,17 @@ func run() error {
 		if len(conns) == 0 {
 			return fmt.Errorf("no connections in %s and no URL/path given", cfgPath)
 		}
-	case looksLikeDSN(arg):
-		direct = config.Conn{URL: arg}
 	default:
-		c, ok := findConn(conns, arg)
-		if !ok {
+		// A configured connection name wins; only then fall back to treating the arg
+		// as an ad-hoc DSN/path — so a connection named e.g. "prod.db" isn't misread
+		// as a SQLite file by the DSN heuristic.
+		if c, ok := findConn(conns, arg); ok {
+			direct = c
+		} else if looksLikeDSN(arg) {
+			direct = config.Conn{URL: arg}
+		} else {
 			return fmt.Errorf("unknown connection %q; available: %s", arg, names(conns))
 		}
-		direct = c
 	}
 
 	// Whatever quits us (Esc, error screen, Ctrl-C, panic), reap any `run` helper

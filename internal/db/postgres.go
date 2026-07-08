@@ -33,9 +33,7 @@ func openPostgres(ctx context.Context, dsn string) (Engine, error) {
 func (e *pgEngine) Close() error             { return e.db.Close() }
 func (e *pgEngine) Placeholder(i int) string { return fmt.Sprintf("$%d", i) }
 
-func (e *pgEngine) QuoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
+func (e *pgEngine) QuoteIdent(s string) string { return quoteIdentDouble(s) }
 
 func (e *pgEngine) QualifiedName(t TableRef) string {
 	if t.Schema != "" {
@@ -49,8 +47,10 @@ func (e *pgEngine) FilterPredicate(quotedCol string, i int) string {
 }
 
 func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
+	// datallowconn filters out databases that reject connections (e.g. template0),
+	// which would otherwise be offered in the switcher but fail on select.
 	return queryStrings(ctx, e.db,
-		`SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname`)
+		`SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn ORDER BY datname`)
 }
 
 func (e *pgEngine) Tables(ctx context.Context) ([]Table, error) {

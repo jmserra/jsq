@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jmserra/jsq/internal/db"
 )
@@ -25,6 +26,10 @@ func sqlLiteral(v any) string {
 		uint, uint8, uint16, uint32, uint64,
 		float32, float64:
 		return fmt.Sprintf("%v", x)
+	case time.Time:
+		// fmt's default (`… +0000 UTC`) is not a valid SQL literal; render a
+		// standard datetime string instead so the seed is runnable as-is.
+		return "'" + x.Format("2006-01-02 15:04:05.999999999") + "'"
 	default:
 		return "'" + strings.ReplaceAll(fmt.Sprintf("%v", x), "'", "''") + "'"
 	}

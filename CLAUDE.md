@@ -129,9 +129,11 @@ inline (`buildUpdateStmt`/`buildDeleteStmt`, from in-memory grid PK data); `o` a
 `prepareDuplicateCmd` fetch `Columns()` then `buildInsertStmt`/`buildDuplicateStmt`
 (the latter seeded with the row's captured values), returning an `editorReadyMsg`
 that `Update` turns into `editorCmd`. (`Columns()`
-now also populates `Column.Unique` per engine — pg/sqlite via a unique-constraint
-/ unique-index query, mysql via `column_key`; it's only called for insert prep,
-not on every table open.) For vim-family editors
+now also populates `Column.Unique` per engine via a unique-index/constraint query
+(`uniqueColumns` on each engine — mysql uses `information_schema.statistics
+non_unique=0`, NOT `column_key`, so every column of a composite `UNIQUE(a,b)` is
+flagged, not just the leading one); it's only called for insert prep, not on every
+table open.) For vim-family editors
 (`isVimFamily`), `positionArgs` adds `+call cursor(...)` and a `feedkeys` (not
 `:normal`, which drops the selection) so the editor opens with the value
 selected — `vi'` inside a string's quotes, `v$` for a NULL/number token. On exit
