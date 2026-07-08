@@ -27,10 +27,12 @@ var (
 	nullStyle   = lipgloss.NewStyle().Faint(true)
 	selStyle    = lipgloss.NewStyle().Reverse(true)
 	editStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
-	// editCaretStyle is the block caret inside the edit field: a light block (the
-	// char under it stays dark and readable) that reads as a cursor without
-	// inserting an extra column the way a bar glyph does.
-	editCaretStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("15"))
+	// caretStyle is the shared text-input caret: reverse video, which the terminal
+	// draws by swapping its own default fg/bg — so it's a block in the normal palette
+	// (a light block on a dark terminal), the same in the filters and the quick-edit
+	// cell, over any surrounding style. The char under it stays legible (drawn in the
+	// background colour); at end-of-text it's a reverse-video space (a plain block).
+	caretStyle = lipgloss.NewStyle().Reverse(true)
 )
 
 type column struct {
@@ -567,12 +569,9 @@ func (g *grid) startEdit() bool {
 	} else {
 		g.editVal = fmt.Sprintf("%v", v)
 	}
-	// Open with the caret on the last character (0 for an empty / NULL cell).
-	if n := len([]rune(g.editVal)); n > 0 {
-		g.editPos = n - 1
-	} else {
-		g.editPos = 0
-	}
+	// Open with the caret at the end, so typing appends (matching the filter
+	// inputs and a normal text field); move left/Home to edit in place.
+	g.editPos = len([]rune(g.editVal))
 	return true
 }
 
@@ -913,25 +912,41 @@ func colWidthFor(name string, rows [][]any, i int) int {
 	return max(minColWidth, max(nameW, dataW))
 }
 
-// renderEditCell renders the edit field of width w with a block caret at rune
-// index pos: the character under the caret (or a trailing space at end-of-text)
-// is drawn inverted, and the rest of the field keeps editStyle. The caret
-// overlays a cell rather than inserting one, so moving it never shifts the text
-// or shows a phantom space. w is assumed ≥ value width + 1 (see effWidth).
-func renderEditCell(val string, pos, w int) string {
-	r := []rune(val)
-	pos = clamp(pos, 0, len(r))
-	before := string(r[:pos])
+// renderCaretField renders text into exactly width w, styled with base, with the
+// cell at rune index caretPos drawn as the reverse-video caret (a trailing space at
+// end-of-text, so the caret shows as a block). It overlays a cell rather than
+// inserting one, so the caret never hides a char or shifts the text. Overlong text
+// is trimmed from the left of the caret (then from its right) so the caret stays
+// visible. Shared by the quick-edit cell (base=editStyle) and the filters
+// (base=filterStyle) so every text input's caret looks the same.
+func renderCaretField(text string, caretPos, w int, base lipgloss.Style) string {
+	r := []rune(text)
+	caretPos = clamp(caretPos, 0, len(r))
+	before := string(r[:caretPos])
 	caret, after := " ", ""
-	if pos < len(r) {
-		caret, after = string(r[pos]), string(r[pos+1:])
+	if caretPos < len(r) {
+		caret, after = string(r[caretPos]), string(r[caretPos+1:])
 	}
-	pad := w - runewidth.StringWidth(before) - runewidth.StringWidth(caret) - runewidth.StringWidth(after)
+	cw := runewidth.StringWidth(caret)
+	for runewidth.StringWidth(before)+cw+runewidth.StringWidth(after) > w {
+		if br := []rune(before); len(br) > 0 {
+			before = string(br[1:])
+		} else if ar := []rune(after); len(ar) > 0 {
+			after = string(ar[:len(ar)-1])
+		} else {
+			break
+		}
+	}
+	pad := w - runewidth.StringWidth(before) - cw - runewidth.StringWidth(after)
 	if pad < 0 {
 		pad = 0
 	}
-	return editStyle.Render(before) + editCaretStyle.Render(caret) +
-		editStyle.Render(after+strings.Repeat(" ", pad))
+	return base.Render(before) + caretStyle.Render(caret) + base.Render(after+strings.Repeat(" ", pad))
+}
+
+// renderEditCell renders the quick-edit field (the caret over editStyle).
+func renderEditCell(val string, pos, w int) string {
+	return renderCaretField(val, pos, w, editStyle)
 }
 
 func cellString(v any) string {
@@ -968,14 +983,13 @@ func (g *grid) renderHeader() string {
 	var b strings.Builder
 	x := 0
 	for c := g.colOff; c < len(g.cols); c++ {
-		var cell string
-		style := headerStyle
-		switch {
-		case g.filtering == c:
-			cell = g.filter.render("⌕")
-			style = filterStyle
-		default:
-			cell = g.cols[c].name
+		w := g.effWidth(c)
+		if g.filtering == c {
+			// Live filter input: caret-aware render (reverse-video caret cell).
+			b.WriteString(renderCaretField("⌕"+g.filter.val, 1+g.filter.pos, w, filterStyle))
+		} else {
+			cell := g.cols[c].name
+			style := headerStyle
 			if pat, ok := g.filters[c]; ok {
 				cell = "⌕" + pat
 				style = filterStyle
@@ -989,10 +1003,9 @@ func (g *grid) renderHeader() string {
 					cell = "▼ " + cell
 				}
 			}
+			cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
+			b.WriteString(style.Render(cell))
 		}
-		w := g.effWidth(c)
-		cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
-		b.WriteString(style.Render(cell))
 		b.WriteString(strings.Repeat(" ", colGap))
 		x += w + colGap
 		if x >= g.w {

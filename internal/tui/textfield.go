@@ -5,10 +5,11 @@ import (
 	"unicode"
 )
 
-// textField is a single-line text input with a rune-indexed cursor, shared by the
-// grid column filter and the list (sidebar) filter so both edit the same way
-// (arrows, Home/End, Ctrl-W word-delete). The quick-path cell edit keeps its own
-// richer overlay (block caret) and does not use this.
+// textField is a single-line text input with a rune-indexed cursor (val + pos),
+// shared by the grid column filter and the list (sidebar) filter so both edit the
+// same way (arrows, Home/End, Ctrl-W word-delete). Rendering is done by the callers
+// via the shared renderCaretField (grid.go), the same helper the quick-edit cell
+// uses — so every text input draws the identical reverse-video caret.
 type textField struct {
 	val string
 	pos int // caret as a rune index into val, in [0, len(runes)]
@@ -77,15 +78,6 @@ func (f *textField) right() {
 
 func (f *textField) home() { f.pos = 0 }
 func (f *textField) end()  { f.pos = len([]rune(f.val)) }
-
-// render returns prefix followed by the text with a bar caret at the cursor, e.g.
-// render("⌕") → "⌕ab▏c". Matches the prior end-caret look when the cursor is at
-// the end.
-func (f *textField) render(prefix string) string {
-	r := []rune(f.val)
-	pos := clamp(f.pos, 0, len(r))
-	return prefix + string(r[:pos]) + "▏" + string(r[pos:])
-}
 
 // filterPatterns returns the LIKE pattern(s) to try for raw filter text, in order:
 // the accurate prefix search (`raw%`) first, and — only when the user typed no

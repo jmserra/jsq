@@ -862,12 +862,32 @@ func TestEditCursorMechanics(t *testing.T) {
 		t.Fatalf("forward delete at end changed the text: %q", g.editVal)
 	}
 
-	// The block caret must not add a column: the rendered field stays width w for
-	// every caret position (the old bar glyph shifted text and showed a phantom
-	// space when the caret moved off the end).
+	// The inverting caret overlays a char (or a trailing space at end), so the field
+	// renders to exactly width w for every caret position — no shift, no short-fill.
 	for _, pos := range []int{0, 2, 5} {
 		if got := lipgloss.Width(renderEditCell("hello", pos, 6)); got != 6 {
-			t.Fatalf("renderEditCell width at caret %d = %d, want 6 (no phantom column)", pos, got)
+			t.Fatalf("renderEditCell width at caret %d = %d, want 6", pos, got)
+		}
+	}
+}
+
+// TestRenderCaretFieldWidth: the shared caret renderer (filters + cell edit)
+// always fills exactly width w — for every caret position and for text that
+// overflows (trimmed to keep the caret visible).
+func TestRenderCaretFieldWidth(t *testing.T) {
+	base := lipgloss.NewStyle()
+	cases := []struct {
+		text   string
+		pos, w int
+	}{
+		{"hello", 0, 6}, {"hello", 3, 6}, {"hello", 5, 6},
+		{"", 0, 4},                             // empty → just the caret + padding
+		{"a very long filter pattern", 26, 10}, // overflow, caret at end → trim left
+		{"a very long filter pattern", 0, 10},  // overflow, caret at start → trim right
+	}
+	for _, c := range cases {
+		if got := lipgloss.Width(renderCaretField(c.text, c.pos, c.w, base)); got != c.w {
+			t.Fatalf("renderCaretField(%q, %d, %d) width = %d, want %d", c.text, c.pos, c.w, got, c.w)
 		}
 	}
 }
@@ -880,14 +900,13 @@ func TestQuickEditCursorKeys(t *testing.T) {
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
 	})
-	// PK-desc → row 0 is id=2 (Linus). Edit "name": caret opens on the last char.
+	// PK-desc → row 0 is id=2 (Linus). Edit "name": caret opens at the end.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if app.grid.editVal != "Linus" || app.grid.editPos != 4 {
-		t.Fatalf("start: %q pos %d, want Linus pos 4 (on last char)", app.grid.editVal, app.grid.editPos)
+	if app.grid.editVal != "Linus" || app.grid.editPos != 5 {
+		t.Fatalf("start: %q pos %d, want Linus pos 5 (at end)", app.grid.editVal, app.grid.editPos)
 	}
-	// End, then ← to the middle, insert, then Ctrl-W wipes back to the word start.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd})
+	// ← twice into the middle, insert, then Ctrl-W wipes back to the word start.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	if app.grid.editPos != 3 {

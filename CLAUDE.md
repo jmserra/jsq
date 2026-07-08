@@ -263,8 +263,15 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
   filter (`grid.filter`) and the list filter (`sidebar.filter`) are `textField`s —
   a rune-indexed caret with insert/backspace/del/deleteWord/left/right/home/end,
   wired to `←`/`→`, `Home`/`End`, `Ctrl-a`/`Ctrl-e`, `Ctrl-w`, `Del` in
-  `handleFilterKey` (grid) and `sidebarFilterEdit` (lists). The quick-path cell
-  edit keeps its own richer block-caret overlay and does **not** use `textField`.
+  `handleFilterKey` (grid) and `sidebarFilterEdit` (lists). Rendering is **not** on
+  `textField` — the callers (grid `renderHeader`, sidebar `View`) and the quick-edit
+  cell (`renderEditCell`) all go through the one shared `renderCaretField` (grid.go),
+  so every text input draws the identical caret: a **reverse-video** cell
+  (`caretStyle`) that the terminal paints as a block in its normal palette (a light
+  block on a dark terminal), legible over any background — no colour-specific block,
+  no thin-bar mid-string gap. All open the caret at end-of-text. (The quick-edit
+  cell keeps its own `editVal`/`editPos` + `editDirty`/`editOrigNull`/`editR`/`editC`
+  state, but shares the renderer.)
 - **NULL vs empty rendering**: `nil` → faint `NULL`; `""` → blank; literal
   `"NULL"` string → normal text. Driven by the `isNull` flag, not string content.
 

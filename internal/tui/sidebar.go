@@ -174,18 +174,17 @@ func (s *sidebar) clearFilter() {
 func (s *sidebar) View() string {
 	var b strings.Builder
 	// Prompt line, tri-state (mirrors the grid header): filter-input mode shows the
-	// live pattern with a caret; a committed filter shows the pattern as a standing
-	// hint; otherwise the label placeholder, with a nudge that `/` filters.
-	var txt string
-	switch {
-	case s.filtering:
-		txt = s.filter.render("⌕")
-	case s.filter.val != "":
-		txt = "⌕" + s.filter.val
-	default:
-		txt = "⌕ " + s.label
+	// live pattern with a caret (caret-aware render); a committed filter shows the
+	// pattern as a standing hint; otherwise the label placeholder.
+	if s.filtering {
+		b.WriteString(renderCaretField("⌕"+s.filter.val, 1+s.filter.pos, s.w, filterStyle))
+	} else {
+		txt := "⌕ " + s.label
+		if s.filter.val != "" {
+			txt = "⌕" + s.filter.val
+		}
+		b.WriteString(filterStyle.Render(runewidth.Truncate(txt, s.w, "…")))
 	}
-	b.WriteString(filterStyle.Render(runewidth.Truncate(txt, s.w, "…")))
 	b.WriteByte('\n')
 
 	if len(s.visible) == 0 {
