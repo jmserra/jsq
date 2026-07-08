@@ -23,8 +23,9 @@ filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`) is in
 too.** Navigation is in: follow a foreign key (`f`), step a session-wide jumplist
 (`Ctrl-o`/`` ` ``), switch database (`T`) or connection (`c`), and re-run past
-queries from the history buffer (`b`). A failed statement surfaces in the status
-line and lets you continue — no dead-end error page.
+queries from the history buffer (`b`). A failed statement (a free-form `s` query
+or a quick `e` edit) opens a modal with the full engine error and the query;
+`e`/`Enter` reopens it in `$EDITOR` to fix and re-run — no dead-end, nothing lost.
 
 Continuous scroll pages by a **keyset cursor** on the primary key, so a
 concurrent write mid-scroll can't duplicate or skip rows (a non-PK sort falls
@@ -288,8 +289,8 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
 - **Flat table list — no tree.** jsq opens straight into
   the database named by the connection; the list is a single flat list of that
   database's tables. Navigate with `↑`/`↓` (or `j`/`k`, `Ctrl-p`/`Ctrl-n`); press
-  `/` to filter it live. Names are schema-qualified (`sales.orders`) only
-  for non-default schemas; `public` tables show bare names.
+  `/` to filter it live. Names are schema-qualified (`sales.orders`,
+  `public.users`) so the filter treats every table the same way.
 - **`T` jumps databases.** The same filterable page, but over the databases
   on the connection; `Enter` reopens the engine pointed at that database (the
   `cmd` tunnel stays up) and drops you on its table list.

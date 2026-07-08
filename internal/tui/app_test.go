@@ -238,6 +238,32 @@ func TestSidebarSubstringFallback(t *testing.T) {
 	}
 }
 
+// TestSidebarQualifiesPublicSchema guards the fix for tables vanishing from the
+// list filter. Public tables are now shown schema-qualified like every other
+// schema (tableLabel no longer strips "public."), so a bare-labelled public
+// table can't prefix-match and suppress the substring fallback that a
+// schema-qualified table depends on.
+func TestSidebarQualifiesPublicSchema(t *testing.T) {
+	var s sidebar
+	s.setTables([]db.Table{
+		{Schema: "public", Name: "items"},
+		{Schema: "billing", Name: "invoices"},
+	})
+	if got := tableLabel(s.tables[0]); got != "public.items" {
+		t.Fatalf("public table label = %q, want public.items", got)
+	}
+
+	// Filter for "i": neither label prefix-matches (both lead with a schema name),
+	// so the substring fallback keeps BOTH. Before the fix, the public table's
+	// bare label "items" prefix-matched and dropped billing.invoices.
+	s.filter.val = "i"
+	s.cursor, s.off = 0, 0
+	s.rebuildVisible()
+	if len(s.visible) != 2 {
+		t.Fatalf("/i matched %d tables, want 2 (schema-qualified table vanished)", len(s.visible))
+	}
+}
+
 // TestFilterCursorEditing: the filter input supports a moving caret (←/→) and
 // Ctrl-W word delete, not just append/backspace.
 func TestFilterCursorEditing(t *testing.T) {
@@ -1213,6 +1239,104 @@ func TestQueryHistoryWriteOpensEditor(t *testing.T) {
 	// run unseen.
 	if _, ok := cmd().(execDoneMsg); ok {
 		t.Fatal("Enter on a write entry must not run it directly")
+	}
+}
+
+// TestFailedQueryArmsErrView drives a failing free-form (s) query: instead of
+// collapsing to a one-line status, it arms the errView modal showing the full
+// engine error alongside the query, and `e` reopens it in $EDITOR to fix and
+// re-run.
+func TestFailedQueryArmsErrView(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+
+	const bad = "SELECT * FROM nope;"
+	m, cmd := app.Update(editorSubmitMsg{sql: bad, remember: db.Table{Name: "users"}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("submitting a query should run it")
+	}
+	// The run fails → an errMsg carrying the re-edit seed → the modal.
+	msg := cmd()
+	if em, ok := msg.(errMsg); !ok || em.seed == nil {
+		t.Fatalf("a failed query should return errMsg with a seed, got %#v", msg)
+	}
+	app = update(t, app, msg)
+	if !app.errView.active {
+		t.Fatal("a failed query should arm the errView modal")
+	}
+
+	// The modal shows the full error and the failing statement.
+	view := app.View()
+	for _, want := range []string{"query failed", "nope", bad} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("errView missing %q:\n%s", want, view)
+		}
+	}
+
+	// `e` closes the modal and reopens the query in $EDITOR (spawns a command),
+	// preserving the s remember marker so a re-run continues the edit loop.
+	if app.errView.seed.sql != bad || app.errView.seed.remember.Name != "users" {
+		t.Fatalf("re-edit seed = %+v, want the failing sql + remember users", app.errView.seed)
+	}
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = m.(App)
+	if app.errView.active {
+		t.Fatal("`e` should close the modal")
+	}
+	if cmd == nil {
+		t.Fatal("`e` should reopen the query in $EDITOR")
+	}
+
+	// Re-arm via another failure; Esc just dismisses the modal.
+	m, cmd = app.Update(editorSubmitMsg{sql: bad})
+	app = update(t, m.(App), cmd())
+	if !app.errView.active {
+		t.Fatal("the second failure should re-arm the modal")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.errView.active {
+		t.Fatal("Esc should dismiss the modal")
+	}
+}
+
+// TestFailedQuickEditArmsErrView guards that a failing quick-path cell edit also
+// surfaces the modal, reopening as the equivalent E full-path UPDATE.
+func TestFailedQuickEditArmsErrView(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT UNIQUE)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	})
+
+	// Move to the "name" column and rename row 0 (id=2, Linus) to "Ada" — a UNIQUE
+	// violation.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnd})
+	for range "Linus" {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	app = typeRunes(t, app, "Ada")
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("committing a changed cell should run an UPDATE")
+	}
+	app = update(t, app, cmd()) // the UPDATE fails on the UNIQUE constraint
+
+	if !app.errView.active {
+		t.Fatal("a failed quick edit should arm the errView modal")
+	}
+	// It reopens as an editable, PK-keyed UPDATE with the attempted value.
+	seed := app.errView.seed.sql
+	for _, want := range []string{"UPDATE", "SET", "WHERE", "'Ada'"} {
+		if !strings.Contains(seed, want) {
+			t.Fatalf("re-edit seed missing %q: %q", want, seed)
+		}
 	}
 }
 

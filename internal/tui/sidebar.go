@@ -35,11 +35,17 @@ func (s *sidebar) setTables(t []db.Table) {
 	s.rebuildVisible()
 }
 
-// tableLabel is the schema-qualified display name; a "public." prefix is noise
-// so it's dropped. Used for both rendering and filter matching.
+// tableLabel is the schema-qualified display name, used for both rendering and
+// filter matching. The schema (including "public") is always shown: stripping
+// "public." left public tables with bare labels while other schemas kept their
+// prefix, and that heterogeneity broke the prefix-first filter — a bare-labelled
+// public table would prefix-match and suppress the substring fallback, so
+// schema-qualified tables silently vanished from a search. A uniformly qualified
+// list keeps the filter consistent. Engines without schemas (MySQL/SQLite) leave
+// Schema empty, so their tables still render as the bare name.
 func tableLabel(t db.Table) string {
-	if sch := t.Schema; sch != "" && sch != "public" {
-		return sch + "." + t.Name
+	if t.Schema != "" {
+		return t.Schema + "." + t.Name
 	}
 	return t.Name
 }

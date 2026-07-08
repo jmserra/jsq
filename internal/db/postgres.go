@@ -54,11 +54,25 @@ func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
 }
 
 func (e *pgEngine) Tables(ctx context.Context) ([]Table, error) {
+	// Ordinary + partitioned tables (relkind r/p — same set pg_catalog.pg_tables
+	// exposes), minus two kinds of noise: the system/temp/toast schemas, and any
+	// table owned by an extension (a pg_depend 'e' edge). The latter hides PostGIS
+	// et al. — spatial_ref_sys, the tiger geocoder tables, topology — which the
+	// user can't meaningfully edit and never wants cluttering the list; a real
+	// user table is never extension-owned, so it always survives the filter.
 	rows, err := e.db.QueryContext(ctx, `
-		SELECT schemaname, tablename
-		FROM pg_catalog.pg_tables
-		WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-		ORDER BY schemaname, tablename`)
+		SELECT n.nspname, c.relname
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p')
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname !~ '^pg_'
+		  AND NOT EXISTS (
+			SELECT 1 FROM pg_depend d
+			WHERE d.classid = 'pg_class'::regclass
+			  AND d.objid = c.oid
+			  AND d.deptype = 'e')
+		ORDER BY n.nspname, c.relname`)
 	if err != nil {
 		return nil, err
 	}

@@ -57,6 +57,7 @@ type App struct {
 	cell    cellView
 	help    help
 	confirm confirmView // safe-mode "run this mutation?" overlay
+	errView errView     // failed-statement modal (full error + query, e to re-edit)
 
 	currentTable db.Table
 	basePreds    []eqPred // followed-FK equality filter, AND-ed into every load until the table changes
@@ -291,16 +292,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.stop()
+		a.grid.loading = false
+		// A failed user-authored statement (a free-form s query or a quick-path
+		// cell edit) carries a seed: show the full, untruncated error with the
+		// statement in a modal, so it can be edited and re-run (e/Enter) rather
+		// than lost to a one-line status. Armable from any screen, like confirm.
+		if msg.seed != nil {
+			a.errView.arm(msg.err, *msg.seed, a.w-leftPad, a.h-1)
+			a.status = "query failed — e to edit, Esc to dismiss"
+			return a, nil
+		}
 		a.connCmd, a.connAddr = "", "" // dismiss the waiting view
 		a.connecting = false
-		a.grid.loading = false
 		a.pendingPos = nil  // a failed load never repositions a later one
 		a.pendingView = nil // and never resolves a pending cross-DB jump
 		a.restoreConn()     // a failed mid-session connect rolls back its optimistic identity
-		// A mid-session failure — a typo'd ad-hoc query, a rejected mutation, a
-		// failed reconnect — is recoverable: the engine is still usable (the connect
-		// path fails via connectErrMsg instead). Surface it in the status line and
-		// stay on the current screen rather than trapping on a dead-end error page.
+		// A mid-session failure — a rejected reconnect, a failed table load — is
+		// recoverable: the engine is still usable (the connect path fails via
+		// connectErrMsg instead). Surface it in the status line and stay on the
+		// current screen rather than trapping on a dead-end error page.
 		a.status = "error: " + strings.Join(strings.Fields(msg.err.Error()), " ")
 		return a, nil
 
@@ -448,19 +458,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// safe connection it's held for a y/n confirmation first. A multi-statement
 		// submission on a safe connection is treated as a mutation even if it leads
 		// with a read verb, so a trailing write can't slip past unconfirmed.
+		// The failed statement reopens exactly as submitted, keeping its s remember/
+		// scratch markers so a re-run still continues the edit loop and records.
+		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch}
 		if isReadSQL(msg.sql) && !(a.safe && isMultiStatement(msg.sql)) {
 			ctx := a.begin("running query")
 			a.status = "running query…"
-			return a, runQueryCmd(ctx, a.gen, a.engine, msg.sql)
+			return a, runQueryCmd(ctx, a.gen, a.engine, msg.sql, seed)
 		}
 		sql := msg.sql
 		if a.safe {
 			return a.askMutation(sql, "running",
-				func(ctx context.Context, gen int) tea.Cmd { return execRawCmd(ctx, gen, a.engine, sql) })
+				func(ctx context.Context, gen int) tea.Cmd { return execRawCmd(ctx, gen, a.engine, sql, seed) })
 		}
 		ctx := a.begin("running")
 		a.status = "running…"
-		return a, execRawCmd(ctx, a.gen, a.engine, sql)
+		return a, execRawCmd(ctx, a.gen, a.engine, sql, seed)
 
 	case editorAbortedMsg:
 		a.stop()
@@ -556,6 +569,30 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.confirm.active = false
 		a.status = "cancelled"
+		return a, nil
+	}
+	// A failed statement is shown modally with its query; the modal captures keys.
+	// e/Enter reopens it in $EDITOR to fix and re-run; y yanks the error. Armable
+	// from any screen (a table-list scratch can fail), so it's handled up here.
+	if a.errView.active {
+		switch msg.String() {
+		case "e", "enter":
+			a.errView.active = false
+			return a, editorCmd(a.errView.seed)
+		case "y":
+			return a, yankCmd(a.errView.errText)
+		case "esc", "q":
+			a.errView.active = false
+			a.status = "dismissed"
+		case "j", "down":
+			a.errView.scroll(1)
+		case "k", "up":
+			a.errView.scroll(-1)
+		case "g":
+			a.errView.off = 0
+		case "G":
+			a.errView.scroll(len(a.errView.lines))
+		}
 		return a, nil
 	}
 	// Help cheat sheet captures keys while open; any of ?/Esc/Enter/q closes it.
@@ -1562,7 +1599,7 @@ func (a App) runHist(e histEntry) (tea.Model, tea.Cmd) {
 		a.recordQuery(e.sql) // bump recency; the count refills on the result
 		ctx := a.begin("running query")
 		a.status = "running query…"
-		return a, runQueryCmd(ctx, a.gen, a.engine, e.sql)
+		return a, runQueryCmd(ctx, a.gen, a.engine, e.sql, a.histSeed(e.sql))
 	}
 	return a, editorCmd(a.histSeed(e.sql))
 }
@@ -1601,7 +1638,7 @@ func (a App) reloadView() (tea.Model, tea.Cmd) {
 		}
 		ctx := a.begin("reloading")
 		a.status = "reloading…"
-		return a, runQueryCmd(ctx, a.gen, a.engine, a.adHocQuery)
+		return a, runQueryCmd(ctx, a.gen, a.engine, a.adHocQuery, editorSeed{sql: a.adHocQuery})
 	}
 	if a.currentTable.Name == "" {
 		return a, nil
@@ -1629,6 +1666,12 @@ func (a App) View() string {
 	// here, before the screen switch, rather than only in browseView.
 	if a.confirm.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.confirm.View())
+		return a.statusLine() + "\n" + body
+	}
+	// The failed-statement modal is likewise armable from any screen, so it's
+	// rendered here before the screen switch (cf. confirm).
+	if a.errView.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.errView.View())
 		return a.statusLine() + "\n" + body
 	}
 	switch a.screen {

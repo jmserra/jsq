@@ -45,6 +45,17 @@ func dbErr(ctx context.Context, gen int, err error) tea.Msg {
 	return errMsg{err: err, gen: gen}
 }
 
+// dbErrSeed is dbErr for a failed user-authored statement: it attaches the seed
+// so the errMsg handler can arm the errView modal (full error + statement, with
+// e/Enter to reopen it in $EDITOR) instead of collapsing it to a status line. A
+// cancelled context is still swallowed to nil, exactly as dbErr does.
+func dbErrSeed(ctx context.Context, gen int, err error, seed editorSeed) tea.Msg {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errMsg{err: err, gen: gen, seed: &seed}
+}
+
 // connectCmd runs the whole connect flow off the Update loop (§6 async rule):
 // start the `cmd` helper (if any) and wait for the URL's host:port, then open
 // the engine and list tables. The helper is registered globally the instant
@@ -217,7 +228,13 @@ func execEditCmd(ctx context.Context, gen int, eng db.Engine, req editReq) tea.C
 			eng.QualifiedName(req.table), set, strings.Join(preds, " AND "))
 		n, err := eng.Exec(ctx, q, args...)
 		if err != nil {
-			return dbErr(ctx, gen, err)
+			// A failed quick-path edit reopens as the equivalent E full-path UPDATE
+			// (values inlined) so the user can fix and re-run it in $EDITOR.
+			var val any = req.val
+			if req.null {
+				val = nil
+			}
+			return dbErrSeed(ctx, gen, err, buildUpdateStmt(eng, req.table, req.col, val, req.keys))
 		}
 		return editDoneMsg{col: req.col, val: req.val, null: req.null, affected: n, gen: gen, rowIdx: req.rowIdx, colIdx: req.colIdx}
 	}
@@ -330,12 +347,13 @@ func isVimFamily(editor string) bool {
 }
 
 // execRawCmd runs a full-path statement verbatim — the user authored it in
-// $EDITOR, so it is not parameterized (unlike the keyed quick-path edit).
-func execRawCmd(ctx context.Context, gen int, eng db.Engine, query string) tea.Cmd {
+// $EDITOR, so it is not parameterized (unlike the keyed quick-path edit). seed
+// reopens the statement in $EDITOR if it fails (see errView).
+func execRawCmd(ctx context.Context, gen int, eng db.Engine, query string, seed editorSeed) tea.Cmd {
 	return func() tea.Msg {
 		n, err := eng.Exec(ctx, query)
 		if err != nil {
-			return dbErr(ctx, gen, err)
+			return dbErrSeed(ctx, gen, err, seed)
 		}
 		return execDoneMsg{sql: query, affected: n, gen: gen}
 	}
@@ -357,11 +375,12 @@ func prepareInsertCmd(ctx context.Context, gen int, eng db.Engine, t db.Table) t
 
 // runQueryCmd runs a free-form read (s/S) and returns its result set to display.
 // The result carries no table/PK provenance, so the grid renders it read-only.
-func runQueryCmd(ctx context.Context, gen int, eng db.Engine, query string) tea.Cmd {
+// seed reopens the query in $EDITOR if it fails (see errView).
+func runQueryCmd(ctx context.Context, gen int, eng db.Engine, query string, seed editorSeed) tea.Cmd {
 	return func() tea.Msg {
 		rs, err := eng.Query(ctx, query)
 		if err != nil {
-			return dbErr(ctx, gen, err)
+			return dbErrSeed(ctx, gen, err, seed)
 		}
 		return queryResultMsg{rs: rs, sql: query, gen: gen}
 	}

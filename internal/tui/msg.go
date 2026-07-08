@@ -91,9 +91,15 @@ type databasesMsg struct {
 // stays on the current screen (a genuinely fatal connect failure uses
 // connectErrMsg instead). gen is the dispatching op's token when the failure came
 // from a cancellable DB op (0 for connect/editor errors, which are never stale).
+//
+// seed, when set, means the failure came from a user-authored statement (a
+// free-form s query or a quick-path cell edit): the handler arms the errView
+// modal instead of the status line, showing the full error with the statement
+// and offering to reopen it in $EDITOR (seed) to fix and re-run.
 type errMsg struct {
-	err error
-	gen int
+	err  error
+	gen  int
+	seed *editorSeed
 }
 
 // connectErrMsg is a failure during the initial connect (bad DSN, tunnel never
