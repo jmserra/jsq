@@ -21,8 +21,9 @@ what README's design section describes. Don't duplicate README here.
 
 ## Actual file map (flatter than README's design tree)
 
-README's design section names `sqlgen`/`editor`/`keymap`/`meta` units. **They
-don't exist yet.** What's really here:
+README's design section names `sqlgen`/`editor`/`keymap`/`meta` units. Only
+`sqlgen.go` exists; the `$EDITOR` spawn is inline in `cmd.go` and keybindings are
+hardcoded in `app.go` (no `keymap`/`meta` unit). What's really here:
 
 ```
 main.go                     # flag parse (-c + one positional), resolve conn, boot tea

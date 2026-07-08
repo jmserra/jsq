@@ -234,10 +234,10 @@ internal/db/                # the ONE abstraction (Engine) + one impl per engine
 internal/tui/               # bubbletea: each file is a Model with Update/View
 ```
 
-> The current source layout is flatter than the eventual target — SQL generation
-> lives inline in `internal/tui/cmd.go` and keybindings inline in `app.go` for
-> now. Dedicated `sqlgen`/`editor`/`keymap` units will appear as the `$EDITOR`
-> and help-overlay features land. See `CLAUDE.md` for the exact current file map.
+> The current source layout is flatter than the eventual target: SQL generation
+> is extracted into `internal/tui/sqlgen.go`, but the `$EDITOR` spawn still lives
+> inline in `cmd.go` and keybindings are hardcoded in `app.go` (no dedicated
+> `keymap` unit). See `CLAUDE.md` for the exact current file map.
 
 ### The one abstraction: `db.Engine`
 
