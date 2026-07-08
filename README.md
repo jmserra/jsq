@@ -28,16 +28,7 @@ line and lets you continue — no dead-end error page.
 
 Continuous scroll pages by a **keyset cursor** on the primary key, so a
 concurrent write mid-scroll can't duplicate or skip rows (a non-PK sort falls
-back to `LIMIT`/`OFFSET` — see below).
-
-Deliberately deferred — considered and set aside, not unfinished:
-
-- **`G` jumps to the loaded end**, not a true fetch of the last rows. A real tail
-  window would need bidirectional scrolling (the buffer is a top-anchored window),
-  and `K` already reaches the other extreme by flipping the sort — so it isn't
-  worth the complexity.
-- **Keyset paging is primary-key only.** A non-PK sort falls back to
-  `LIMIT`/`OFFSET`; keyset there would need per-engine NULL-ordering handling.
+back to `LIMIT`/`OFFSET`).
 
 ---
 

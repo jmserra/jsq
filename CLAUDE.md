@@ -225,14 +225,13 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
    not a leak. New `$EDITOR`-authored statements follow it; anything jsq runs
    *without* the user seeing the SQL must be parameter-bound.
 
-## Code vs. README design — real divergences (not just "not built yet")
+## Scroll/paging — intentional behavior, don't "fix"
 
-Know this before touching scroll/paging:
-
-- **`G` doesn't fetch a tail window** — `grid.bottom()` just jumps the cursor to
-  the end of the loaded buffer; `maybeLoadMore` may then extend it. Fetching the
-  true tail would break the "contiguous window from the top" model (it'd need
-  bidirectional windows), so it stays deferred, not a quick fix.
+- **`G` jumps to the loaded end, not a true tail-fetch.** `grid.bottom()` moves
+  the cursor to the last loaded row (`maybeLoadMore` may then extend it); it does
+  not fetch the table's actual last rows. Deliberate: a real tail window would
+  need bidirectional scrolling (the buffer is a top-anchored prefix), and `K`
+  already reaches the other extreme by flipping the sort. Leave it as is.
 
 ## Conventions when extending
 
