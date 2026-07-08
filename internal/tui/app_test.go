@@ -165,6 +165,138 @@ func TestColumnFilter(t *testing.T) {
 	}
 }
 
+// TestGridFilterSubstringFallback: an accurate prefix that matches nothing widens
+// to a substring match, both in the live preview and the committed server query.
+func TestGridFilterSubstringFallback(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // load users
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	// name column, filter "in": prefix "in%" matches no name → falls back to "%in%",
+	// which matches only Linus.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("in")})
+	if len(app.grid.visible) != 1 {
+		t.Fatalf("substring preview matched %d rows, want 1 (Linus)", len(app.grid.visible))
+	}
+
+	// Commit → the decision is recorded and the server query uses the substring.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if !app.grid.filtersWide[1] {
+		t.Fatal("column 1 should be flagged to widen to a substring match")
+	}
+	app = update(t, app, cmd())
+	if len(app.grid.rows) != 1 {
+		t.Fatalf("server substring filter returned %d rows, want 1", len(app.grid.rows))
+	}
+	if v := app.View(); !strings.Contains(v, "Linus") || strings.Contains(v, "Grace") {
+		t.Fatalf("filtered view should show only Linus:\n%s", v)
+	}
+}
+
+// TestSidebarSubstringFallback: the list filter also widens to a substring match
+// when the prefix finds nothing.
+func TestSidebarSubstringFallback(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"users", "orders", "order_items", "products"} {
+		e.Exec(ctx, "CREATE TABLE "+name+" (id INTEGER PRIMARY KEY)")
+	}
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	// "items" has no table with that prefix; "%items%" matches order_items.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("items")})
+	if len(app.sidebar.visible) != 1 {
+		t.Fatalf("substring fallback matched %d tables, want 1", len(app.sidebar.visible))
+	}
+	if sel, _ := app.sidebar.selected(); sel.Name != "order_items" {
+		t.Fatalf("fallback should select order_items, got %q", sel.Name)
+	}
+}
+
+// TestFilterCursorEditing: the filter input supports a moving caret (←/→) and
+// Ctrl-W word delete, not just append/backspace.
+func TestFilterCursorEditing(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, _ := db.Open(ctx, path)
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY)`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	app = typeRunes(t, app, "foo bar")
+	// Ctrl-W deletes the word before the caret (at the end): "bar".
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyCtrlW})
+	if app.sidebar.filter.val != "foo " {
+		t.Fatalf("Ctrl-W should leave %q, got %q", "foo ", app.sidebar.filter.val)
+	}
+	// Move the caret left and insert mid-string.
+	app = typeRunes(t, app, "baz") // "foo baz"
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
+	app = typeRunes(t, app, "X") // caret between 'b' and 'a' → "foo bXaz"
+	if app.sidebar.filter.val != "foo bXaz" {
+		t.Fatalf("caret-aware insert should give %q, got %q", "foo bXaz", app.sidebar.filter.val)
+	}
+}
+
+// TestListHLColumnJump: in the list, h/l jump columns exactly like ←/→.
+func TestListHLColumnJump(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, _ := db.Open(ctx, path)
+	for i := 0; i < 30; i++ { // enough rows to spill into a second grid column
+		e.Exec(ctx, fmt.Sprintf("CREATE TABLE t%02d (id INTEGER PRIMARY KEY)", i))
+	}
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	// l lands on the same cell as →.
+	right := update(t, app, tea.KeyMsg{Type: tea.KeyRight}).sidebar.cursor
+	lKey := update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}).sidebar.cursor
+	if right == 0 || right != lKey {
+		t.Fatalf("l should jump a column like →: →=%d l=%d", right, lKey)
+	}
+	// From that column, h returns like ←.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	left := update(t, app, tea.KeyMsg{Type: tea.KeyLeft}).sidebar.cursor
+	hKey := update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")}).sidebar.cursor
+	if left != hKey {
+		t.Fatalf("h should jump a column like ←: ←=%d h=%d", left, hKey)
+	}
+}
+
 // TestContinuousScroll verifies that reaching the loaded edge fetches more rows.
 func TestContinuousScroll(t *testing.T) {
 	ctx := context.Background()
@@ -351,8 +483,9 @@ func TestStatusPagingHintMore(t *testing.T) {
 	}
 }
 
-// TestSidebarFilter drives the full-screen table list: typing narrows it (no
-// `/`), arrows move within matches, and Enter loads the highlighted table.
+// TestSidebarFilter drives the full-screen table list: `/` enters filter mode,
+// typing narrows it, arrows move within matches, and Enter loads the highlighted
+// table.
 func TestSidebarFilter(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -377,7 +510,17 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatalf("table list should have 4 tables, got %d", len(app.sidebar.tables))
 	}
 
-	// Typing narrows immediately — no `/`. "order" → orders + order_items.
+	// A bare letter must NOT auto-filter anymore — normal mode owns the keys.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	if app.sidebar.hasFilter() || app.sidebar.filtering {
+		t.Fatal("a letter in nav mode must not start a filter")
+	}
+
+	// `/` enters filter mode, then "order" → orders + order_items.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !app.sidebar.filtering {
+		t.Fatal("/ should enter filter mode")
+	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("order")})
 	if len(app.sidebar.visible) != 2 {
 		t.Fatalf("filter %q matched %d tables, want 2", "order", len(app.sidebar.visible))
@@ -425,10 +568,10 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatalf("Esc should clear the filter; hasFilter=%v visible=%d",
 			app.sidebar.hasFilter(), len(app.sidebar.visible))
 	}
-	// Esc again (no filter) returns to the grid.
+	// Esc again (no filter) no longer navigates — it stays on the table list.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
-	if app.screen != screenBrowse {
-		t.Fatal("Esc with no filter should return to the grid")
+	if app.screen != screenTables {
+		t.Fatal("Esc with no filter should stay on the table list, not navigate")
 	}
 }
 
@@ -882,6 +1025,45 @@ func TestSafeConfirmFullPath(t *testing.T) {
 	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 1`)
 	if rs.Rows[0][0] != "X" {
 		t.Fatalf("db row after confirm = %v, want X", rs.Rows[0][0])
+	}
+}
+
+// TestSafeConfirmFromTableList: a write scratch (s) submitted from the table list
+// on a safe connection arms the confirmation overlay AND renders it — regression
+// for the overlay having drawn only on the grid screen.
+func TestSafeConfirmFromTableList(t *testing.T) {
+	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
+
+	// Go to the table list and open a scratch query there.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if app.screen != screenTables {
+		t.Fatalf("t should open the table list, got screen=%d", app.screen)
+	}
+	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd == nil {
+		t.Fatal("s on the table list should open the editor")
+	}
+
+	// Submitting a write arms the confirm overlay, still on the table-list screen.
+	m, cmd := app.Update(editorSubmitMsg{sql: "UPDATE users SET name = 'Z' WHERE id = 1;", scratch: true})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("safe mode must not run the write before confirmation")
+	}
+	if !app.confirm.active || app.screen != screenTables {
+		t.Fatalf("confirm should be armed on the table list; active=%v screen=%d", app.confirm.active, app.screen)
+	}
+	// The dialog must actually render on the table-list screen (the bug: it didn't).
+	view := app.View()
+	for _, want := range []string{"prod", "UPDATE", "Run it?"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("confirm overlay missing %q on the table list:\n%s", want, view)
+		}
+	}
+	// 'y' dismisses it and dispatches the write.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = m.(App)
+	if app.confirm.active || cmd == nil {
+		t.Fatal("'y' should dismiss the overlay and run the write")
 	}
 }
 
@@ -1718,8 +1900,8 @@ func TestHelpOverlay(t *testing.T) {
 	if app.help.active {
 		t.Fatal("`?` while typing a filter must stay literal, not open help")
 	}
-	if app.grid.filterVal != "?" {
-		t.Fatalf("filter should contain the literal ?, got %q", app.grid.filterVal)
+	if app.grid.filter.val != "?" {
+		t.Fatalf("filter should contain the literal ?, got %q", app.grid.filter.val)
 	}
 }
 
@@ -1752,6 +1934,56 @@ func TestSelectTemplate(t *testing.T) {
 
 // TestScratchQuery drives the s read path: submitting a SELECT runs it and shows
 // the rows as a read-only (non-editable, non-sortable) result pane.
+// TestTableListScratchQuery: `s` on the table list opens an empty scratch buffer
+// (a conn/db comment, no table template), runs the submitted query, and records
+// it in the connection's `b` history even though no table is selected.
+func TestTableListScratchQuery(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, _ := db.Open(ctx, path)
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if app.screen != screenTables {
+		t.Fatalf("should be on the table list, got screen=%d", app.screen)
+	}
+
+	// The blank seed is a conn/db comment over an empty body — no SQL, scratch set.
+	seed := app.blankScratchSeed()
+	if !strings.HasPrefix(seed.sql, "-- test") {
+		t.Fatalf("scratch seed should start with a conn/db comment, got %q", seed.sql)
+	}
+	if !seed.scratch {
+		t.Fatal("blank scratch seed should set scratch=true")
+	}
+	if strings.Contains(seed.sql, "SELECT") {
+		t.Fatalf("blank scratch seed should carry no SQL, got %q", seed.sql)
+	}
+
+	// s on the table list opens the editor (an ExecProcess we don't drive).
+	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd == nil {
+		t.Fatal("s on the table list should open the editor")
+	}
+
+	// Submitting a read runs it and files it in the connection's history.
+	m, cmd := app.Update(editorSubmitMsg{sql: "SELECT name FROM users;", scratch: true})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("a read submit should run a query")
+	}
+	app = update(t, app, cmd()) // queryResultMsg
+	if !app.adHoc || len(app.grid.rows) != 1 {
+		t.Fatalf("scratch query should show the adHoc result; adHoc=%v rows=%d", app.adHoc, len(app.grid.rows))
+	}
+	if hist := app.history["test"]; len(hist) != 1 || hist[0].sql != "SELECT name FROM users;" {
+		t.Fatalf("scratch query should enter the connection history, got %+v", hist)
+	}
+}
+
 func TestScratchQuery(t *testing.T) {
 	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()

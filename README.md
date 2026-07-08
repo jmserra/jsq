@@ -56,7 +56,7 @@ jsq -c ~/other.toml <name>     # use a different connections file
 
 - **`jsq <name>`** connects straight to that connection.
 - **`jsq`** (no argument) opens the **connection picker**: a `j`/`k` list of every
-  connection in the file; `Enter` connects, `Esc` / `Ctrl-c` quits.
+  connection in the file (`/` filters it); `Enter` connects, `Ctrl-c` quits.
 - An argument that parses as a **URL or file path** is treated as ad-hoc and
   bypasses the file entirely (engine inferred from the scheme / extension).
 - An unknown `<name>` prints the available names and exits non-zero.
@@ -119,7 +119,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `g` / `G` | first / last row |
 | `0` / `$` | first / last column |
 | `J` / `K` | sort current column ascending / descending |
-| `/` | filter current column (type to preview; `↑`/`↓` browse matches) |
+| `/` | filter current column — type to preview (`↑`/`↓` browse matches); matches by prefix, falling back to substring when the prefix finds nothing. Edit with `←`/`→`, `Home`/`End`, `Ctrl-w`, `Del` |
 | `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
 | `y` / `Y` | yank to the clipboard — `y` the current cell's value, `Y` the whole row as JSON. Uses an OSC 52 escape so it copies through the terminal (works over SSH; no `pbcopy`/`xclip` needed) |
 | `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row). FK columns are flagged with a `→` in the header |
@@ -131,15 +131,15 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `o` | insert a blank row — opens a generated `INSERT` skeleton in `$EDITOR` (auto-generated columns omitted, PK/UNIQUE flagged); `:wq` runs it |
 | `D` | delete the current row — opens the generated PK-keyed `DELETE` in `$EDITOR`; `:wq` confirms, `:q!` aborts |
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
-| `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count) |
+| `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
 | `r` | reload the current view — re-runs the table load (keeping sort, filters, and cursor) or the ad-hoc query behind an `s` result |
 | `t` | go to the table list (a full-screen page) |
 | `T` | go to the database list — jump to another database on the same connection |
 | `c` | open the connection picker — switch to (or open) another connection; its `cmd` tunnel is reused if already up |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
-| *(table / database list)* type | filter the list as you type — no `/` needed |
-| *(table / database list)* `↑`/`↓`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` jump columns); `Enter` opens; `Esc` clears the filter, then goes back |
+| *(picker / table / database list)* `↑`/`↓` or `j`/`k`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` or `h`/`l` jump columns, `g`/`G` to the ends). Navigation is **Connections → Tables → Grid**: `Enter` opens (moves right), `Backspace` steps back (moves left) |
+| *(picker / table / database list)* `/` | start filtering — type to narrow live (prefix, then substring when the prefix finds nothing; `←`/`→`, `Ctrl-w` to edit), `Enter` opens the highlighted match, `Esc` clears the filter |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
@@ -285,12 +285,12 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
   returns to it from the grid, `Enter` opens a table (switching to the grid),
   `Esc` goes back. It fills the screen — the results pane isn't cluttered by a
   permanent sidebar.
-- **Flat, type-to-filter table list — no tree, no `/`.** jsq opens straight into
+- **Flat table list — no tree.** jsq opens straight into
   the database named by the connection; the list is a single flat list of that
-  database's tables and you just start typing to narrow it (`↑`/`↓` or
-  `Ctrl-p`/`Ctrl-n` to move). Names are schema-qualified (`sales.orders`) only
+  database's tables. Navigate with `↑`/`↓` (or `j`/`k`, `Ctrl-p`/`Ctrl-n`); press
+  `/` to filter it live. Names are schema-qualified (`sales.orders`) only
   for non-default schemas; `public` tables show bare names.
-- **`T` jumps databases.** The same type-to-filter page, but over the databases
+- **`T` jumps databases.** The same filterable page, but over the databases
   on the connection; `Enter` reopens the engine pointed at that database (the
   `cmd` tunnel stays up) and drops you on its table list.
 - **Single result pane, no tabs.** Each query replaces what's shown.

@@ -64,9 +64,10 @@ type grid struct {
 	pk  []string        // PK column names (from the ResultSet), for keyed edits (§8)
 	fks []db.ForeignKey // foreign keys on the current table (header marker + follow)
 
-	filters   map[int]string // colIndex → committed LIKE pattern (server-side)
-	filtering int            // colIndex being edited, or -1
-	filterVal string         // in-progress filter text
+	filters     map[int]string // colIndex → committed raw filter text (server-side)
+	filtersWide map[int]bool   // colIndex → widen to a substring match (prefix found nothing)
+	filtering   int            // colIndex being edited, or -1
+	filter      textField      // in-progress filter text + caret
 
 	// Quick-path cell edit (§8): a single-line overlay on the cursor cell.
 	editing      bool
@@ -98,7 +99,7 @@ func (g *grid) wantMore() bool {
 }
 
 func newGrid() grid {
-	return grid{filtering: -1, filters: map[int]string{}}
+	return grid{filtering: -1, filters: map[int]string{}, filtersWide: map[int]bool{}}
 }
 
 func (g *grid) setResult(rs *db.ResultSet) {
@@ -181,6 +182,7 @@ type gridSnapshot struct {
 	pk                               []string
 	fks                              []db.ForeignKey
 	filters                          map[int]string
+	filtersWide                      map[int]bool
 	sortCol                          string
 	sortAsc                          bool
 	hasMore                          bool
@@ -192,18 +194,23 @@ func (g *grid) snapshot() *gridSnapshot {
 	for k, v := range g.filters {
 		filters[k] = v
 	}
+	filtersWide := make(map[int]bool, len(g.filtersWide))
+	for k, v := range g.filtersWide {
+		filtersWide[k] = v
+	}
 	return &gridSnapshot{
-		cols:    g.cols,
-		rows:    g.rows,
-		table:   g.table,
-		visible: append([]int(nil), g.visible...),
-		pk:      g.pk,
-		fks:     g.fks,
-		filters: filters,
-		sortCol: g.sortCol,
-		sortAsc: g.sortAsc,
-		hasMore: g.hasMore,
-		cursorR: g.cursorR, cursorC: g.cursorC, rowOff: g.rowOff, colOff: g.colOff,
+		cols:        g.cols,
+		rows:        g.rows,
+		table:       g.table,
+		visible:     append([]int(nil), g.visible...),
+		pk:          g.pk,
+		fks:         g.fks,
+		filters:     filters,
+		filtersWide: filtersWide,
+		sortCol:     g.sortCol,
+		sortAsc:     g.sortAsc,
+		hasMore:     g.hasMore,
+		cursorR:     g.cursorR, cursorC: g.cursorC, rowOff: g.rowOff, colOff: g.colOff,
 	}
 }
 
@@ -218,9 +225,14 @@ func (g *grid) restore(s *gridSnapshot) {
 	for k, v := range s.filters {
 		g.filters[k] = v
 	}
+	g.filtersWide = make(map[int]bool, len(s.filtersWide))
+	for k, v := range s.filtersWide {
+		g.filtersWide[k] = v
+	}
 	g.sortCol, g.sortAsc, g.hasMore = s.sortCol, s.sortAsc, s.hasMore
 	g.cursorR, g.cursorC, g.rowOff, g.colOff = s.cursorR, s.cursorC, s.rowOff, s.colOff
-	g.filtering, g.filterVal = -1, ""
+	g.filtering = -1
+	g.filter.clear()
 	g.editing, g.editVal, g.editDirty, g.loading = false, "", false, false
 }
 
@@ -303,7 +315,7 @@ func (g *grid) ensureColVisible() {
 func (g *grid) effWidth(c int) int {
 	w := g.cols[c].width
 	if c == g.filtering {
-		if need := runewidth.StringWidth("⌕"+g.filterVal) + 1; need > w {
+		if need := runewidth.StringWidth("⌕"+g.filter.val) + 1; need > w {
 			return need
 		}
 	}
@@ -322,27 +334,53 @@ func (g *grid) startFilter() {
 		return
 	}
 	g.filtering = g.cursorC
-	g.filterVal = g.filters[g.cursorC] // pre-fill any existing pattern
+	g.filter.setVal(g.filters[g.cursorC]) // pre-fill any existing pattern
 	g.applyPreview()
 }
 
-func (g *grid) filterInput(s string) { g.filterVal += s; g.applyPreview() }
+func (g *grid) filterInput(s string) { g.filter.insert(s); g.applyPreview() }
+func (g *grid) filterBackspace()     { g.filter.backspace(); g.applyPreview() }
+func (g *grid) filterDelete()        { g.filter.del(); g.applyPreview() }
+func (g *grid) filterDeleteWord()    { g.filter.deleteWord(); g.applyPreview() }
+func (g *grid) filterLeft()          { g.filter.left() }
+func (g *grid) filterRight()         { g.filter.right() }
+func (g *grid) filterHome()          { g.filter.home() }
+func (g *grid) filterEnd()           { g.filter.end() }
 
-func (g *grid) filterBackspace() {
-	if r := []rune(g.filterVal); len(r) > 0 {
-		g.filterVal = string(r[:len(r)-1])
-		g.applyPreview()
-	}
-}
-
-// commitFilter stores the in-progress pattern (empty clears it) and ends editing.
+// commitFilter stores the in-progress raw text (empty clears it) and ends editing.
+// It also records whether this column's server filter should widen to a substring
+// match — the same accurate-first, lazy-fallback rule the preview uses — decided
+// once here (from the loaded rows) so it stays stable across pagination.
 func (g *grid) commitFilter() {
-	if g.filterVal == "" {
-		delete(g.filters, g.filtering)
+	ci := g.filtering
+	if g.filter.val == "" {
+		delete(g.filters, ci)
+		delete(g.filtersWide, ci)
 	} else {
-		g.filters[g.filtering] = g.filterVal
+		g.filters[ci] = g.filter.val
+		g.filtersWide[ci] = g.needSubstring(ci, g.filter.val)
 	}
 	g.endEdit()
+}
+
+// needSubstring reports whether column ci's filter should widen from an accurate
+// prefix (raw%) to a substring (%raw%) match: true only when the user typed no
+// wildcards of their own and the prefix matches none of the loaded rows.
+func (g *grid) needSubstring(ci int, raw string) bool {
+	if raw == "" || strings.Contains(raw, "%") {
+		return false
+	}
+	re := likeToRegex(searchPattern(raw))
+	for i := range g.rows {
+		var cell string
+		if ci < len(g.rows[i]) {
+			cell = cellString(g.rows[i][ci])
+		}
+		if re != nil && re.MatchString(cell) {
+			return false // the prefix matches something → stay accurate
+		}
+	}
+	return true
 }
 
 // clearFilter removes the edited column's filter and ends editing.
@@ -352,14 +390,17 @@ func (g *grid) clearFilter() {
 }
 
 func (g *grid) endEdit() {
-	g.filtering, g.filterVal = -1, ""
+	g.filtering = -1
+	g.filter.clear()
 	g.rebuildVisible()
 	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
 }
 
 func (g *grid) clearFilters() {
 	g.filters = map[int]string{}
-	g.filtering, g.filterVal = -1, ""
+	g.filtersWide = map[int]bool{}
+	g.filtering = -1
+	g.filter.clear()
 }
 
 // clearCurrentFilter clears the committed filter on the cursor's column (if any)
@@ -369,6 +410,7 @@ func (g *grid) clearCurrentFilter() bool {
 		return false
 	}
 	delete(g.filters, g.cursorC)
+	delete(g.filtersWide, g.cursorC)
 	g.rebuildVisible()
 	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
 	return true
@@ -376,8 +418,12 @@ func (g *grid) clearCurrentFilter() bool {
 
 func (g *grid) filterSpecs() []filterSpec {
 	out := make([]filterSpec, 0, len(g.filters))
-	for ci, pat := range g.filters {
-		out = append(out, filterSpec{col: g.cols[ci].name, pattern: searchPattern(pat)})
+	for ci, raw := range g.filters {
+		pat := searchPattern(raw)
+		if g.filtersWide[ci] { // prefix found nothing at commit → substring match
+			pat = "%" + raw + "%"
+		}
+		out = append(out, filterSpec{col: g.cols[ci].name, pattern: pat})
 	}
 	return out
 }
@@ -394,11 +440,27 @@ func searchPattern(v string) string {
 	return v + "%"
 }
 
-// applyPreview narrows the loaded rows client-side by the in-progress pattern,
-// using the same LIKE semantics as the eventual server query.
+// applyPreview narrows the loaded rows client-side by the in-progress text, using
+// the same LIKE semantics as the eventual server query. It tries an accurate
+// prefix match first and only widens to a substring match when the prefix finds
+// nothing (filterPatterns), so exact typing stays exact until it comes up empty.
 func (g *grid) applyPreview() {
+	for _, pat := range filterPatterns(g.filter.val) {
+		g.matchPreview(pat)
+		if len(g.visible) > 0 || pat == "" {
+			break
+		}
+	}
+	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
+	if g.rowOff > g.cursorR {
+		g.rowOff = g.cursorR
+	}
+}
+
+// matchPreview sets g.visible to the loaded rows whose filtered column matches pat
+// (all rows when pat is empty).
+func (g *grid) matchPreview(pat string) {
 	g.visible = g.visible[:0]
-	pat := searchPattern(g.filterVal)
 	re := likeToRegex(pat)
 	for i := range g.rows {
 		if pat == "" {
@@ -412,10 +474,6 @@ func (g *grid) applyPreview() {
 		if re == nil || re.MatchString(cell) {
 			g.visible = append(g.visible, i)
 		}
-	}
-	g.cursorR = clamp(g.cursorR, 0, len(g.visible)-1)
-	if g.rowOff > g.cursorR {
-		g.rowOff = g.cursorR
 	}
 }
 
@@ -912,7 +970,7 @@ func (g *grid) renderHeader() string {
 		style := headerStyle
 		switch {
 		case g.filtering == c:
-			cell = "⌕" + g.filterVal + "▏"
+			cell = g.filter.render("⌕")
 			style = filterStyle
 		default:
 			cell = g.cols[c].name

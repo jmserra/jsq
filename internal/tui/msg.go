@@ -57,6 +57,7 @@ type editorReadyMsg struct {
 type editorSubmitMsg struct {
 	sql      string
 	remember db.Table
+	scratch  bool // free-form table-list scratch → record in `b` history without a table
 }
 
 // editorAbortedMsg means the editor closed without saving (:q!) or the buffer was

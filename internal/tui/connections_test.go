@@ -30,7 +30,7 @@ func twoConns(t *testing.T) (config.Conn, config.Conn) {
 // selectPickerConn moves the picker cursor to index i and connects.
 func connectPicker(t *testing.T, app App, i int) App {
 	t.Helper()
-	app.picker.cursor = i
+	app.connList.cursor = i
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd == nil {
@@ -126,7 +126,7 @@ func TestReconnectShowsLoader(t *testing.T) {
 	// reconnect is now in flight.
 	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	app = m.(App)
-	app.picker.cursor = 1
+	app.connList.cursor = 1
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd == nil {
@@ -165,7 +165,7 @@ func TestPickerFirstConnectShowsLoader(t *testing.T) {
 
 	// Select the first connection and dispatch the connect, holding the
 	// connectedMsg so the connect is in flight.
-	app.picker.cursor = 0
+	app.connList.cursor = 0
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd == nil {
@@ -207,21 +207,71 @@ func TestTableListBackspaceToPicker(t *testing.T) {
 	if app.screen != screenPicker {
 		t.Fatalf("Backspace on the table list should go to the connection picker, got screen=%d", app.screen)
 	}
-	// Esc back from the picker → the table list (there's no grid yet).
+	// Esc on the picker no longer navigates (it's the leftmost screen); it stays put.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.screen != screenPicker {
+		t.Fatalf("Esc on the picker should stay put, got screen=%d", app.screen)
+	}
+	// Enter re-selects the current connection A (moving right) → the table list.
+	app.connList.cursor = 0
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
 	if app.screen != screenTables {
-		t.Fatalf("Esc from the picker with nothing loaded should return to the table list, got screen=%d", app.screen)
+		t.Fatalf("Enter on the current connection should return to its table list, got screen=%d", app.screen)
 	}
 
-	// With a filter active, Backspace edits it rather than leaving the list.
+	// In filter mode (entered with `/`), Backspace edits the pattern rather than
+	// leaving the list.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	app = typeRunes(t, app, "zz") // no match, but a live filter
 	if !app.sidebar.hasFilter() {
-		t.Fatal("typing should start a filter")
+		t.Fatal("typing in filter mode should build a filter")
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
-	if app.screen != screenTables || app.sidebar.filterVal != "z" {
-		t.Fatalf("Backspace with a filter should delete a char, got screen=%d filter=%q",
-			app.screen, app.sidebar.filterVal)
+	if app.screen != screenTables || app.sidebar.filter.val != "z" {
+		t.Fatalf("Backspace in filter mode should delete a char, got screen=%d filter=%q",
+			app.screen, app.sidebar.filter.val)
+	}
+}
+
+// TestPickerFilter: the connection picker navigates by default (a bare letter
+// does not filter) and `/` enters filter mode; narrowing to one connection and
+// pressing Enter connects to it.
+func TestPickerFilter(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if app.screen != screenPicker {
+		t.Fatalf("bare jsq should open the picker, got screen=%d", app.screen)
+	}
+
+	// A bare letter must not auto-filter — nav mode owns the keys.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if app.connList.hasFilter() || app.connList.filtering {
+		t.Fatal("a letter in the picker must not start a filter")
+	}
+
+	// `/` enters filter mode; "B" narrows to connection B.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !app.connList.filtering {
+		t.Fatal("/ should enter filter mode in the picker")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if len(app.connList.visible) != 1 {
+		t.Fatalf("filter should leave 1 connection, got %d", len(app.connList.visible))
+	}
+
+	// Enter connects to the highlighted connection and leaves filter mode.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("Enter should dispatch a connect")
+	}
+	app = update(t, app, cmd()) // connectedMsg
+	if app.connName != "B" {
+		t.Fatalf("should have connected to B, got %q", app.connName)
+	}
+	if app.connList.filtering {
+		t.Fatal("connecting should leave filter mode")
 	}
 }
 
@@ -239,7 +289,7 @@ func TestCancelReconnect(t *testing.T) {
 	// c → picker, select B, dispatch the switch (in flight, hold the result).
 	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	app = m.(App)
-	app.picker.cursor = 1
+	app.connList.cursor = 1
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if !app.isConnecting() {
@@ -285,7 +335,7 @@ func TestReselectSameConnection(t *testing.T) {
 	// c, then re-pick A (index 0): no reconnect, just its table list.
 	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	app = m.(App)
-	app.picker.cursor = 0
+	app.connList.cursor = 0
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd != nil {

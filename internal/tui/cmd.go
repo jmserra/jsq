@@ -264,6 +264,7 @@ func editorCmd(seed editorSeed) tea.Cmd {
 		msg := editorResult(seed.sql, string(data), mtimeBumped)
 		if sub, ok := msg.(editorSubmitMsg); ok {
 			sub.remember = seed.remember // carry the s "remember for table" marker
+			sub.scratch = seed.scratch   // and the no-table scratch marker
 			return sub
 		}
 		return msg

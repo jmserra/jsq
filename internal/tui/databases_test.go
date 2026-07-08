@@ -30,7 +30,8 @@ func TestDatabaseSwitcher(t *testing.T) {
 		t.Fatalf("expected database list with 2 entries, got screen=%d n=%d", app.screen, len(app.dbs.tables))
 	}
 
-	// Type to filter down to otherdb, then Enter to switch.
+	// `/` enters filter mode, narrow down to otherdb, then Enter to switch.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("other")})
 	if len(app.dbs.visible) != 1 {
 		t.Fatalf("filter should leave 1 database, got %d", len(app.dbs.visible))
@@ -48,11 +49,11 @@ func TestDatabaseSwitcher(t *testing.T) {
 		t.Fatal("engine should be set after the switch")
 	}
 
-	// Esc on the database list with no filter returns to the table list.
+	// Backspace on the database list steps back to the table list.
 	app = update(t, app, databasesMsg{names: []string{"maindb", "otherdb"}})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	if app.screen != screenTables {
-		t.Fatal("Esc with no filter should return to the table list")
+		t.Fatal("Backspace should step back to the table list")
 	}
 }
 

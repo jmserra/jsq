@@ -65,6 +65,11 @@ type editorSeed struct {
 	// is: on submit the SQL is stored as that table's last query, so the next s
 	// on it prefills your last query. Only s sets this; E/o/D/p leave it zero.
 	remember db.Table
+
+	// scratch marks a free-form s query with no table (the table-list `s`): on
+	// submit it's still recorded in the connection's `b` history even though
+	// there's no table to key a last-query against.
+	scratch bool
 }
 
 // previewEditSQL renders the quick-path (e) UPDATE with its values inlined, for

@@ -32,14 +32,13 @@ internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/…) + Open() dispatch + shared scanQuery + DSN/HostPort helpers
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
-  app.go        # root App Model. Screens: screenPicker (bare `jsq`), screenTables (full-screen table list, `t`), screenDatabases (database list, `T` → switchDBCmd reopens the engine on another db), screenBrowse (grid). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
+  app.go        # root App Model. Screens: screenPicker (bare `jsq`, `c`), screenTables (full-screen table list, `t`), screenDatabases (database list, `T` → switchDBCmd reopens the engine on another db), screenBrowse (grid). The three list screens (`connList`/`sidebar`/`dbs`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `T` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `T`). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner. yankCmd (y/Y) copies to the clipboard via an OSC 52 escape (go-osc52) written to stderr — no external binary, works over SSH; not a DB cmd.
   sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
   proc.go       # the connection `cmd` helper (port-forward etc.): startRun (registers in a package-level live set), waitPort, runProc.kill (deregisters + bounded group-kill), KillRunHelpers (exit backstop), tailBuffer. proc_unix.go/proc_other.go = process-group kill (unix) vs single-process fallback. The wait address comes from db.HostPort(url).
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget. yankCell (raw cell text)/currentRowJSON (column-ordered JSON) feed the y/Y clipboard yank.
-  sidebar.go    # full-screen filterable list Model (type-to-filter, no `/`), laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓ = ∓1, ←→ = ∓rows). Used for both the table list (screenTables) and the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`); `label` is the search placeholder. (Type name is still `sidebar`.)
-  picker.go     # connection picker (bare `jsq` at startup, and `c` mid-session)
+  sidebar.go    # full-screen list Model, laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓/j-k = ∓1, ←→/h-l = ∓rows, g/G to the ends). Two modes: navigation (default) and a `/`-triggered filter (`filtering` flag; type to narrow live via `filterPatterns` — prefix then substring; Enter opens the match, Esc clears). Used for the table list (screenTables), the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`), AND the connection picker (`a.connList`, screenPicker — items are `db.Table{Name: conn}`, Enter maps back to a `config.Conn` via `findConn`). `label` is the search placeholder. (No separate picker.go — it was folded in here.)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
   histview.go   # query-history buffer overlay (b): histEntry + histView list; badge (row/affected count, `+` on a LIMIT hit) + snippet renderers
   confirm.go    # safe-mode (connection safe=true) "run this mutation?" y/n overlay
@@ -152,7 +151,10 @@ active connection has `safe=true`, both mutation dispatch points — the quick-p
 `e` (`execEditCmd`) and the full-path write (`execRawCmd`) — first route through
 `App.askMutation`, which arms `confirm.go`'s `confirmView` overlay (connection +
 database + the SQL) instead of running. The `confirm` guard at the top of
-`handleKey` runs the held command on `y` (any other key cancels). The quick-path
+`handleKey` runs the held command on `y` (any other key cancels). The overlay is
+rendered in **`View()` itself** (before the screen switch), not `browseView` —
+it's modal and can be armed from any screen (e.g. a write scratch `s` on the table
+list), so it must draw regardless of `a.screen`. The quick-path
 preview is `previewEditSQL` (values inlined for display only — the statement that
 runs still parameter-binds them; not an invariant-5 exception). On the quick
 path, typing exactly `NULL` (uppercase) in the `e` overlay sets SQL NULL:
@@ -167,7 +169,11 @@ the remembered last query if one was run — `App.lastQuery` is keyed by
 doesn't inherit it), the seed's `remember` field (the table) rides through
 `editorCmd`→`editorSubmitMsg`, and the submit handler stores the SQL back into
 `lastQuery` (even on error) so the next `s` on that table continues the edit-run
-loop. Only `s` sets `remember`; E/o/D/p leave it zero.
+loop. Only `s` sets `remember`; E/o/D/p leave it zero. `s` **from the table list**
+(`App.blankScratchSeed`, screenTables) instead opens an empty buffer headed by a
+`-- conn · db` comment (no table template): `remember` is zero (nothing to key a
+last-query against) but `scratch=true` rides through so the submit still files it
+in the connection's `b` history (`editorSubmitMsg`'s `else if msg.scratch`).
 
 **Query history** (`b`, `App.history`): a per-connection, most-recent-first,
 SQL-deduped list of the free-form (`s`) queries. `recordQuery` (called from the
@@ -242,10 +248,21 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
   correct across all three engines.
 - **Per-engine differences live behind the `Engine` interface** — add a method
   there rather than type-switching on the engine in the TUI.
-- **Filter semantics** (keep grid + sidebar identical): `searchPattern` appends a
-  trailing `%` (prefix search); leading `%` is user-typed. Case-insensitive, any
-  type, via `FilterPredicate`. Client preview uses `likeToRegex` with the same
-  semantics so preview == committed result.
+- **Filter semantics** (keep grid + sidebar identical): `filterPatterns(raw)` is
+  the single source — an accurate prefix (`searchPattern`, trailing `%`) first,
+  then a lazy substring (`%raw%`) fallback tried only when the prefix matches
+  nothing AND the user typed no `%` of their own (a user-typed `%` disables the
+  fallback). Case-insensitive, any type, via `FilterPredicate`. Client preview
+  (`likeToRegex`) walks the same pattern list so preview == committed result. The
+  grid decides prefix-vs-substring **once at commit** (`grid.needSubstring`, over
+  the loaded rows) and stores it in `filtersWide[col]` so `filterSpecs` stays
+  stable across keyset pagination (it rides in the snapshot next to `filters`).
+- **Filter input editing** (`textField` in textfield.go): both the grid column
+  filter (`grid.filter`) and the list filter (`sidebar.filter`) are `textField`s —
+  a rune-indexed caret with insert/backspace/del/deleteWord/left/right/home/end,
+  wired to `←`/`→`, `Home`/`End`, `Ctrl-a`/`Ctrl-e`, `Ctrl-w`, `Del` in
+  `handleFilterKey` (grid) and `sidebarFilterEdit` (lists). The quick-path cell
+  edit keeps its own richer block-caret overlay and does **not** use `textField`.
 - **NULL vs empty rendering**: `nil` → faint `NULL`; `""` → blank; literal
   `"NULL"` string → normal text. Driven by the `isNull` flag, not string content.
 
