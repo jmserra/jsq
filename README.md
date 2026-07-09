@@ -21,7 +21,7 @@ fixed-width results grid with continuous scroll, per-column sort, per-column
 filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 (`e`), plus the `$EDITOR` full paths — cell edit (`E`), blank-row insert (`o`),
 row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`) is in
-too.** Navigation is in: follow a foreign key (`f`), step a session-wide jumplist
+too.** Navigation is in: follow a foreign key (`Enter` on an FK column), step a session-wide jumplist
 (`Ctrl-o`/`` ` ``), switch database (`T`) or connection (`c`), and re-run past
 queries from the history buffer (`b`). A failed statement (a free-form `s` query
 or a quick `e` edit) opens a modal with the full engine error and the query;
@@ -121,9 +121,9 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `0` / `$` | first / last column |
 | `J` / `K` | sort current column ascending / descending |
 | `/` | filter current column — type to preview (`↑`/`↓` browse matches); matches by prefix, falling back to substring when the prefix finds nothing. Edit with `←`/`→`, `Home`/`End`, `Ctrl-w`, `Del` |
-| `Enter` (grid) | commit filter, or — with no filter — inspect the full cell value |
+| `Enter` (grid) | commit filter, or — with no filter — follow the foreign key on the current column (see below), else inspect the full cell value |
 | `y` / `Y` | yank to the clipboard — `y` the current cell's value, `Y` the whole row as JSON. Uses an OSC 52 escape so it copies through the terminal (works over SSH; no `pbcopy`/`xclip` needed) |
-| `f` | follow the foreign key on the current column to the row it references (opens that table filtered to it; a composite key uses the whole row). FK columns are flagged with a `→` in the header |
+| `Enter` (on an FK column) | follow the foreign key to the row it references (opens that table filtered to it; a composite key uses the whole row). Inspecting an FK in the full-cell viewer is never useful, so `Enter` navigates instead. FK columns are flagged with a `→` in the header |
 | `Ctrl-o` / `Ctrl-i` | jump back / forward through visited views (table + FK filter + sort + **cursor position**). Recently-visited views restore instantly from an in-memory cache — no reload — so a jump lands exactly where you left; hit `r` to refresh if it looks stale. Most terminals send `Ctrl-i` as `Tab` — see below |
 | `` ` `` | open the jumplist picker — inspect every visited view and jump to any of them (`j`/`k` to move, `Enter` to go, `Esc` to close). Works regardless of terminal |
 | `Esc` | kill the running query (while one is in flight), else clear the current column's filter |

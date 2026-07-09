@@ -49,12 +49,12 @@ func TestFollowForeignKey(t *testing.T) {
 	}
 
 	// Move the cursor onto author_id and follow. Resolution is synchronous (FKs
-	// came with the load), so f navigates immediately and returns the reload cmd.
+	// came with the load), so Enter navigates immediately and returns the reload cmd.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd == nil {
-		t.Fatal("f should dispatch a reload command")
+		t.Fatal("Enter on an FK column should dispatch a reload command")
 	}
 	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 ||
 		app.basePreds[0].col != "id" || fmt.Sprint(app.basePreds[0].val) != "2" {
@@ -103,7 +103,7 @@ func TestJumplistBackForward(t *testing.T) {
 	m, cmd := app.selectTable(db.Table{Name: "books"})
 	app = update(t, m.(App), cmd())
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	app = update(t, app, cmd()) // rowsMsg
 	if app.currentTable.Name != "authors" || app.baseNote == "" {
@@ -241,7 +241,8 @@ func TestFKColumnMarker(t *testing.T) {
 	}
 }
 
-// TestFollowNoForeignKey confirms following a non-FK column just notices.
+// TestFollowNoForeignKey confirms Enter on a non-FK column opens the full-cell
+// viewer rather than navigating.
 func TestFollowNoForeignKey(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "nofk.db")
@@ -258,15 +259,18 @@ func TestFollowNoForeignKey(t *testing.T) {
 	app = m.(App)
 	app = update(t, app, cmd())
 
-	// Cursor on the "name" column, which has no FK: f is a no-op with a notice
-	// in the status and no navigation.
+	// Cursor on the "name" column, which has no FK: Enter opens the cell viewer
+	// (no navigation, no reload).
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	if cmd != nil {
-		t.Fatal("following a non-FK column should not reload")
+		t.Fatal("Enter on a non-FK column should not reload")
 	}
-	if !strings.Contains(app.status, "no foreign key") {
-		t.Fatalf("expected a no-FK notice, got %q", app.status)
+	if !app.cell.active {
+		t.Fatal("Enter on a non-FK column should open the full-cell viewer")
+	}
+	if app.currentTable.Name != "t" {
+		t.Fatalf("Enter on a non-FK column should not navigate, got %q", app.currentTable.Name)
 	}
 }

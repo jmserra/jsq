@@ -1441,9 +1441,14 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "copied row as JSON"
 			return a, yankCmd(s)
 		}
-	case "f":
-		return a.follow()
 	case "enter":
+		// On an FK column, follow the reference — inspecting a foreign key in
+		// a full-cell viewer is never what you want. Otherwise open the cell.
+		if col, ok := a.grid.currentColName(); ok && !a.adHoc {
+			if _, isFK := a.grid.fkFor(col); isFK {
+				return a.follow()
+			}
+		}
 		if v, col, ok := a.grid.currentCell(); ok {
 			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
 		}

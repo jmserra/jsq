@@ -70,7 +70,8 @@ guarded by `a.pending.URL != ""` so a second Enter during a slow connect can't
 spawn a duplicate engine/helper. `New` takes the resolved `config.Conn`
 (`pending`).
 
-**Follow foreign keys** (`f`, `App.follow`): resolution is **in-memory** — the
+**Follow foreign keys** (`Enter` on an FK column, `App.follow`): resolution is
+**in-memory** — the
 FKs come with the load (`loadCmd` best-effort-fetches `Engine.ForeignKeys` into
 `ResultSet.FKs`, per-engine: sqlite `PRAGMA foreign_key_list`, pg
 `pg_constraint`+`generate_subscripts`, mysql `key_column_usage`; `grid` keeps
