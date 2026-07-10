@@ -73,6 +73,120 @@ func update(t *testing.T, app App, msg tea.Msg) App {
 	return m.(App)
 }
 
+// runeKey feeds a single-rune keypress into the model.
+func runeKey(t *testing.T, app App, r rune) App {
+	t.Helper()
+	return update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+}
+
+// TestVisualRowYank drives the V visual-select flow: V arms it, j extends the
+// selection, o swaps the edge, y yanks the selected rows as a JSON array and
+// exits the mode.
+func TestVisualRowYank(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	// V arms visual mode with the anchor on row 0.
+	app = runeKey(t, app, 'V')
+	if !app.grid.visualMode {
+		t.Fatal("V should enter visual mode")
+	}
+	if app.grid.visualAnchor != 0 || app.grid.cursorR != 0 {
+		t.Fatalf("anchor/cursor = %d/%d, want 0/0", app.grid.visualAnchor, app.grid.cursorR)
+	}
+
+	// j extends the selection down to row 1 (Ada + Linus selected).
+	app = runeKey(t, app, 'j')
+	if lo, hi := app.grid.visualRange(); lo != 0 || hi != 1 {
+		t.Fatalf("range = %d..%d, want 0..1", lo, hi)
+	}
+
+	// o swaps the moving edge: cursor jumps to the anchor end (row 0), anchor
+	// becomes row 1 — the range is unchanged.
+	app = runeKey(t, app, 'o')
+	if app.grid.cursorR != 0 || app.grid.visualAnchor != 1 {
+		t.Fatalf("after o cursor/anchor = %d/%d, want 0/1", app.grid.cursorR, app.grid.visualAnchor)
+	}
+	if lo, hi := app.grid.visualRange(); lo != 0 || hi != 1 {
+		t.Fatalf("range after o = %d..%d, want 0..1", lo, hi)
+	}
+
+	// The yank text is a JSON array of the two selected rows, column-ordered.
+	text, n, ok := app.grid.yankSelectionJSON()
+	if !ok || n != 2 {
+		t.Fatalf("yankSelectionJSON ok=%v n=%d, want true/2", ok, n)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("yank is not a JSON array: %v\n%s", err, text)
+	}
+	// Default sort is PK descending, so rows load newest-first: Grace(3), Linus(2).
+	if len(got) != 2 || got[0]["name"] != "Grace" || got[1]["name"] != "Linus" {
+		t.Fatalf("unexpected yank payload: %s", text)
+	}
+
+	// y yanks and exits visual mode, reporting the row count.
+	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("y in visual mode should return a yank command")
+	}
+	if app.grid.visualMode {
+		t.Fatal("y should exit visual mode")
+	}
+	if !strings.Contains(app.status, "2 rows copied") {
+		t.Fatalf("status = %q, want it to mention 2 rows copied", app.status)
+	}
+}
+
+// TestVisualEscCancels checks Esc leaves visual mode without yanking.
+func TestVisualEscCancels(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	app = update(t, app, cmd())
+
+	app = runeKey(t, app, 'V')
+	app = runeKey(t, app, 'j')
+	if !app.grid.visualMode {
+		t.Fatal("expected visual mode active")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
+	if app.grid.visualMode {
+		t.Fatal("Esc should exit visual mode")
+	}
+	// Screen must stay on the grid — Esc in visual mode is not a screen change.
+	if app.screen != screenBrowse {
+		t.Fatalf("screen = %v, want screenBrowse", app.screen)
+	}
+}
+
 // TestSortUsesCurrentColumn guards the bug where J/K always sorted column 0
 // because a re-sort reset the cursor.
 func TestSortUsesCurrentColumn(t *testing.T) {

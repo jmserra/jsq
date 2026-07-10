@@ -81,6 +81,13 @@ type grid struct {
 
 	hasMore bool // last window came back full → more rows may exist
 	loading bool // a continuous-scroll fetch is in flight
+
+	// Visual row-selection mode (V): j/k move the cursor (the moving edge), the
+	// anchor stays fixed at the row where V was pressed; the selection is the
+	// inclusive range between them. o swaps which edge the cursor holds; y yanks
+	// the whole selection as JSON.
+	visualMode   bool
+	visualAnchor int // visible-row index of the fixed edge
 }
 
 // appendRows extends the buffer with the next window (continuous scroll).
@@ -139,7 +146,10 @@ func (g *grid) setResult(rs *db.ResultSet) {
 }
 
 // reset returns the cursor to the top-left; used when loading a different table.
-func (g *grid) reset() { g.cursorR, g.cursorC, g.rowOff, g.colOff = 0, 0, 0, 0 }
+func (g *grid) reset() {
+	g.cursorR, g.cursorC, g.rowOff, g.colOff = 0, 0, 0, 0
+	g.exitVisual()
+}
 
 // gridPos is the grid's cursor + scroll position — enough to land a jump exactly
 // where it left off (captured into a jumplist viewState).
@@ -248,6 +258,7 @@ func (g *grid) restore(s *gridSnapshot) {
 	g.filter.clear()
 	g.editing, g.editDirty, g.loading = false, false, false
 	g.edit.clear()
+	g.exitVisual()
 }
 
 func (g *grid) setSize(w, h int) {
@@ -750,23 +761,19 @@ func (g *grid) yankCell() (string, bool) {
 	return valueText(v), true
 }
 
-// currentRowJSON renders the cursor row as a JSON object for the Y yank, keeping
-// the column order (a plain map would sort the keys). ok is false when there's
-// no row under the cursor.
-func (g *grid) currentRowJSON() (string, bool) {
-	if g.cursorR >= len(g.visible) {
-		return "", false
-	}
-	row := g.rows[g.visible[g.cursorR]]
-	var compact strings.Builder
-	compact.WriteByte('{')
+// rowJSONCompact renders one row as a compact column-ordered JSON object,
+// keeping the column order (a plain map would sort the keys). Shared by the
+// single-row Y yank and the visual-mode multi-row yank.
+func (g *grid) rowJSONCompact(row []any) string {
+	var b strings.Builder
+	b.WriteByte('{')
 	for i, c := range g.cols {
 		if i > 0 {
-			compact.WriteByte(',')
+			b.WriteByte(',')
 		}
 		key, _ := json.Marshal(c.name)
-		compact.Write(key)
-		compact.WriteByte(':')
+		b.Write(key)
+		b.WriteByte(':')
 		var v any
 		if i < len(row) {
 			v = row[i]
@@ -778,14 +785,88 @@ func (g *grid) currentRowJSON() (string, bool) {
 		if err != nil {
 			val, _ = json.Marshal(valueText(v))
 		}
-		compact.Write(val)
+		b.Write(val)
 	}
-	compact.WriteByte('}')
+	b.WriteByte('}')
+	return b.String()
+}
+
+// currentRowJSON renders the cursor row as a pretty JSON object for the Y yank.
+// ok is false when there's no row under the cursor.
+func (g *grid) currentRowJSON() (string, bool) {
+	if g.cursorR >= len(g.visible) {
+		return "", false
+	}
+	compact := g.rowJSONCompact(g.rows[g.visible[g.cursorR]])
 	var out bytes.Buffer
-	if err := json.Indent(&out, []byte(compact.String()), "", "  "); err != nil {
-		return compact.String(), true
+	if err := json.Indent(&out, []byte(compact), "", "  "); err != nil {
+		return compact, true
 	}
 	return out.String(), true
+}
+
+// --- visual row selection (V) ---
+
+// enterVisual starts visual row-selection mode with the anchor pinned to the
+// current row. No-op when no rows are loaded.
+func (g *grid) enterVisual() {
+	if len(g.visible) == 0 {
+		return
+	}
+	g.visualMode = true
+	g.visualAnchor = g.cursorR
+}
+
+// exitVisual leaves visual mode.
+func (g *grid) exitVisual() {
+	g.visualMode = false
+	g.visualAnchor = 0
+}
+
+// visualSwap moves the cursor to the opposite edge of the selection (vim `o`),
+// so the fixed anchor becomes the moving edge and vice-versa.
+func (g *grid) visualSwap() {
+	if !g.visualMode {
+		return
+	}
+	g.visualAnchor, g.cursorR = g.cursorR, g.visualAnchor
+	g.ensureRowVisible()
+}
+
+// visualRange returns the inclusive [lo, hi] visible-row span of the selection.
+func (g *grid) visualRange() (lo, hi int) {
+	lo, hi = g.visualAnchor, g.cursorR
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return lo, hi
+}
+
+// yankSelectionJSON renders the visual-mode selection as a pretty JSON array of
+// column-ordered objects. Returns the text, the row count, and ok=false when
+// nothing is selected.
+func (g *grid) yankSelectionJSON() (text string, n int, ok bool) {
+	if !g.visualMode || len(g.visible) == 0 {
+		return "", 0, false
+	}
+	lo, hi := g.visualRange()
+	lo = clamp(lo, 0, len(g.visible)-1)
+	hi = clamp(hi, 0, len(g.visible)-1)
+	var compact strings.Builder
+	compact.WriteByte('[')
+	for r := lo; r <= hi; r++ {
+		if n > 0 {
+			compact.WriteByte(',')
+		}
+		compact.WriteString(g.rowJSONCompact(g.rows[g.visible[r]]))
+		n++
+	}
+	compact.WriteByte(']')
+	var out bytes.Buffer
+	if err := json.Indent(&out, []byte(compact.String()), "", "  "); err != nil {
+		return compact.String(), n, true
+	}
+	return out.String(), n, true
 }
 
 // valueText is the plain-text form of a driver value for yanking: the raw string
@@ -985,6 +1066,11 @@ func (g *grid) renderHeader() string {
 
 func (g *grid) renderRow(r int) string {
 	row := g.rows[g.visible[r]]
+	inSel := false
+	if g.visualMode {
+		lo, hi := g.visualRange()
+		inSel = r >= lo && r <= hi
+	}
 	var b strings.Builder
 	x := 0
 	for c := g.colOff; c < len(g.cols); c++ {
@@ -1009,6 +1095,9 @@ func (g *grid) renderRow(r int) string {
 		}
 		cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
 		switch {
+		case inSel:
+			// Visual mode highlights the whole selected row (every column).
+			cell = selStyle.Render(cell)
 		case r == g.cursorR && c == g.cursorC:
 			cell = selStyle.Render(cell)
 		case isNull:

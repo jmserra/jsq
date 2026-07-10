@@ -50,6 +50,7 @@ var helpItems = []helpItem{
 	{head: "Inspect"},
 	{key: "Enter", desc: "follow the FK on this column, else view the full cell value"},
 	{key: "y / Y", desc: "yank cell value / row as JSON to the clipboard"},
+	{key: "V", desc: "visual row select — j/k extend, o swap end, y yank rows as JSON"},
 	{key: "Ctrl-o / Ctrl-i", desc: "jump back / forward (Ctrl-i needs terminal support)"},
 	{key: "`", desc: "jumplist picker — pick any visited view (j/k, enter)"},
 	{head: "Edit"},

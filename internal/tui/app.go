@@ -681,6 +681,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.grid.filtering >= 0 {
 		return a.handleFilterKey(msg)
 	}
+	// Visual row-selection mode (V) is modal: only its movement/yank/exit keys
+	// apply, so screen switches and other commands stay inert until it's left.
+	if a.screen == screenBrowse && a.grid.visualMode {
+		return a.handleVisualKey(msg)
+	}
 	// `?` opens the help cheat sheet — from grid or sidebar, but only once the
 	// modal/typing captures above have had their say (so `?` typed into a filter
 	// stays literal).
@@ -1441,6 +1446,12 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "copied row as JSON"
 			return a, yankCmd(s)
 		}
+	case "V":
+		if len(a.grid.visible) > 0 {
+			a.grid.enterVisual()
+			a.status = "visual row select — j/k extend, o swap end, y yank, Esc cancel"
+		}
+		return a, nil
 	case "enter":
 		// On an FK column, follow the reference — inspecting a foreign key in
 		// a full-cell viewer is never what you want. Otherwise open the cell.
@@ -1481,6 +1492,41 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// After a movement, fetch the next window if the cursor neared the edge.
 	// Evaluate the command first so its state mutation (activity/loading) lands
 	// on the model we return.
+	cmd := a.maybeLoadMore()
+	return a, cmd
+}
+
+// handleVisualKey routes keys while visual row-selection mode is active. Only
+// movement (extends the selection), o (swap the moving edge), y (yank the
+// selection as JSON and exit), and Esc (cancel) apply; everything else is inert.
+func (a App) handleVisualKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		a.grid.moveRow(1)
+	case "k", "up":
+		a.grid.moveRow(-1)
+	case "g":
+		a.grid.top()
+	case "G":
+		a.grid.bottom()
+	case "o":
+		a.grid.visualSwap()
+	case "y":
+		s, n, ok := a.grid.yankSelectionJSON()
+		a.grid.exitVisual()
+		if ok {
+			a.status = fmt.Sprintf("%d rows copied to clipboard", n)
+			return a, yankCmd(s)
+		}
+		return a, nil
+	case "esc":
+		a.grid.exitVisual()
+		a.status = "visual select cancelled"
+		return a, nil
+	default:
+		return a, nil
+	}
+	// Movement may have neared the loaded edge — extend the buffer as usual.
 	cmd := a.maybeLoadMore()
 	return a, cmd
 }
