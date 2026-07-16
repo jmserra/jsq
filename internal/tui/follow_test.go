@@ -73,8 +73,8 @@ func TestFollowForeignKey(t *testing.T) {
 	if !strings.Contains(view, "Linus") || strings.Contains(view, "Ada") {
 		t.Fatalf("followed view should show only Linus:\n%s", view)
 	}
-	if !strings.Contains(app.status, "id = 2") {
-		t.Fatalf("status should note the FK predicate, got %q", app.status)
+	if !strings.Contains(app.tableSegment(), "id = 2") {
+		t.Fatalf("the table crumb should note the FK predicate, got %q", app.tableSegment())
 	}
 }
 

@@ -400,10 +400,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.adHoc = false // a table load leaves any prior s/S result behind
 		a.screen = screenBrowse
 		a.layout()
-		a.status = msg.table.Name
-		if a.baseNote != "" { // a followed-FK view: show the predicate
-			a.status = msg.table.Name + " · " + a.baseNote
-		}
+		// The table itself is a header segment now (tableSegment), so a fresh load
+		// just clears the previous view's transient message.
+		a.status = ""
 		// A reload triggered by a full-path exec keeps its confirmation visible.
 		if a.postExecStatus != "" {
 			a.status = a.postExecStatus
@@ -686,34 +685,38 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.screen == screenBrowse && a.grid.visualMode {
 		return a.handleVisualKey(msg)
 	}
-	// `?` opens the help cheat sheet — from grid or sidebar, but only once the
-	// modal/typing captures above have had their say (so `?` typed into a filter
-	// stays literal).
-	if a.screen == screenBrowse && msg.String() == "?" {
-		a.help.open(a.w-leftPad, a.h-1)
-		return a, nil
-	}
-	// ` opens the jumplist picker (inspect history, jump anywhere).
-	if a.screen == screenBrowse && msg.String() == "`" {
-		if len(a.views) == 0 {
-			a.status = "no navigation history yet"
+	// The overlay commands below work from ANY screen (grid, table list, database
+	// list, picker) — they inspect session-wide state, not the grid. They're gated
+	// only on a.typing(), so a letter meant for a `/` filter stays literal; the
+	// modal captures above have already had their say. Their overlays are drawn in
+	// View() before the screen switch, so they render wherever they're opened.
+	if !a.typing() {
+		switch msg.String() {
+		case "?": // the help cheat sheet
+			a.help.open(a.w-leftPad, a.h-1)
 			return a, nil
-		}
-		a.jumps.open(a.jumpEntries(), a.viewIdx, a.w-leftPad, a.h-1)
-		return a, nil
-	}
-	// b opens the query-history buffer: the free-form queries run on this
-	// connection, most-recent first, with their last result counts.
-	if a.screen == screenBrowse && msg.String() == "b" {
-		hist := a.history[a.connName]
-		if len(hist) == 0 {
-			a.status = "no query history yet"
+		case "`": // the jumplist picker (inspect history, jump anywhere)
+			if len(a.views) == 0 {
+				a.status = "no navigation history yet"
+				return a, nil
+			}
+			a.jumps.open(a.jumpEntries(), a.viewIdx, a.w-leftPad, a.h-1)
 			return a, nil
+		case "b": // the query-history buffer for this connection, most-recent first
+			hist := a.history[a.connName]
+			if len(hist) == 0 {
+				a.status = "no query history yet"
+				return a, nil
+			}
+			snap := make([]histEntry, len(hist))
+			copy(snap, hist)
+			a.histView.open(snap, a.w-leftPad, a.h-1)
+			return a, nil
+		case "ctrl+o": // jumplist back (vim Ctrl-O)
+			return a.jumpBy(-1)
+		case "ctrl+i", "tab": // jumplist forward — terminals send Ctrl-I as Tab
+			return a.jumpBy(1)
 		}
-		snap := make([]histEntry, len(hist))
-		copy(snap, hist)
-		a.histView.open(snap, a.w-leftPad, a.h-1)
-		return a, nil
 	}
 	// Esc kills an in-flight DB op (a slow query, a big load). This takes
 	// precedence over the grid's Esc (clear-filter), which only applies when
@@ -736,10 +739,6 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case screenBrowse:
 		switch msg.String() {
-		case "ctrl+o": // jumplist back (vim Ctrl-O)
-			return a.jumpBy(-1)
-		case "ctrl+i", "tab": // jumplist forward — terminals send Ctrl-I as Tab
-			return a.jumpBy(1)
 		case "backspace": // step left to the table list
 			a.screen = screenTables
 			a.layout()
@@ -750,6 +749,24 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleGridKey(msg)
 	}
 	return a, nil
+}
+
+// typing reports whether a text input currently owns the keyboard: the grid's
+// quick-edit cell or column filter, or a list screen's `/` filter. The global
+// single-letter commands in handleKey are gated on it so a `b` or `?` meant for a
+// filter is typed rather than swallowed as a command.
+func (a App) typing() bool {
+	switch a.screen {
+	case screenBrowse:
+		return a.grid.editing || a.grid.filtering >= 0
+	case screenPicker:
+		return a.connList.filtering
+	case screenTables:
+		return a.sidebar.filtering
+	case screenDatabases:
+		return a.dbs.filtering
+	}
+	return false
 }
 
 // connectTo connects to the selected connection: reusing it if it's the current
@@ -1201,10 +1218,7 @@ func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
 		a.pendingPos, a.resetGrid = nil, false
 		a.screen = screenBrowse
 		a.layout()
-		a.status = v.table.Name
-		if v.baseNote != "" {
-			a.status = v.table.Name + " · " + v.baseNote
-		}
+		a.status = "" // the table crumb comes from tableSegment
 		return a, nil
 	}
 	a.resetGrid = true
@@ -1297,10 +1311,10 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "saving…"
 			return a, execEditCmd(ctx, a.gen, a.engine, req)
 		}
-		a.status = a.currentTable.Name
+		a.status = ""
 	case tea.KeyEsc:
 		a.grid.cancelEdit()
-		a.status = a.currentTable.Name
+		a.status = ""
 	case tea.KeyBackspace:
 		a.grid.editBackspace()
 	case tea.KeyDelete:
@@ -1690,6 +1704,22 @@ func (a App) View() string {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.errView.View())
 		return a.statusLine() + "\n" + body
 	}
+	// The help sheet, jumplist picker, and query-history buffer are opened by
+	// global keys (?, `, b) from any screen, so they too are drawn before the
+	// screen switch — rendering them only in browseView would make them openable
+	// on a list screen but invisible there.
+	if a.help.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.help.View())
+		return a.statusLine() + "\n" + body
+	}
+	if a.jumps.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.jumps.View())
+		return a.statusLine() + "\n" + body
+	}
+	if a.histView.active {
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.histView.View())
+		return a.statusLine() + "\n" + body
+	}
 	switch a.screen {
 	case screenPicker:
 		return lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.connList.View())
@@ -1706,28 +1736,32 @@ func (a App) View() string {
 }
 
 func (a App) browseView() string {
-	// (confirm is handled in View() — it can be armed from any screen.)
-	if a.help.active {
-		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.help.View())
-		return a.statusLine() + "\n" + body
-	}
+	// (confirm/errView and the help/jumplist/history overlays are handled in
+	// View() — they can be armed from any screen. Only the cell viewer is
+	// grid-only: it shows the cell under the grid cursor.)
 	if a.cell.active {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
-		return a.statusLine() + "\n" + body
-	}
-	if a.jumps.active {
-		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.jumps.View())
-		return a.statusLine() + "\n" + body
-	}
-	if a.histView.active {
-		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.histView.View())
 		return a.statusLine() + "\n" + body
 	}
 	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.grid.View())
 	return a.statusLine() + "\n" + body
 }
 
-// statusLine renders "connName > dbName > table" (table = current table / msg).
+// tableSegment is the header's table crumb: the current table, suffixed with the
+// followed-FK predicate when there is one. Empty before anything is opened.
+func (a App) tableSegment() string {
+	if a.currentTable.Name == "" {
+		return ""
+	}
+	if a.baseNote != "" { // a followed-FK view: show the predicate
+		return a.currentTable.Name + " · " + a.baseNote
+	}
+	return a.currentTable.Name
+}
+
+// statusLine renders "connName > dbName > table > message". The table segment is
+// derived from the live view (not from a.status), so a transient message appends
+// a segment rather than overwriting the table — the current table stays visible.
 func (a App) statusLine() string {
 	name := a.connName
 	if name == "" {
@@ -1736,6 +1770,9 @@ func (a App) statusLine() string {
 	rest := []string{}
 	if a.dbName != "" {
 		rest = append(rest, a.dbName)
+	}
+	if seg := a.tableSegment(); seg != "" {
+		rest = append(rest, seg)
 	}
 	if a.status != "" {
 		rest = append(rest, a.status)

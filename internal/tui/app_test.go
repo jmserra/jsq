@@ -727,8 +727,8 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatal("Enter should load the highlighted table")
 	}
 	app = update(t, app, cmd())
-	if app.status != "orders" {
-		t.Fatalf("loaded table = %q, want orders", app.status)
+	if app.tableSegment() != "orders" {
+		t.Fatalf("loaded table = %q, want orders", app.tableSegment())
 	}
 	if app.screen != screenBrowse {
 		t.Fatal("loading a table should switch to the grid screen")
@@ -769,6 +769,96 @@ func TestGridBackspaceToTableList(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	if app.screen != screenTables {
 		t.Fatalf("Backspace in the grid should go to the table list, got screen=%d", app.screen)
+	}
+}
+
+// TestHeaderKeepsTableWhenMessaged: a transient message appends its own header
+// segment instead of overwriting the table crumb, so the current table stays
+// visible while the message is up.
+func TestHeaderKeepsTableWhenMessaged(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	// A freshly loaded table: the crumb is the table, with no message segment.
+	if h := app.statusLine(); !strings.Contains(h, "users") {
+		t.Fatalf("header should name the loaded table:\n%s", h)
+	}
+
+	// y yanks the row and sets a message — the table must survive it.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	if app.status == "" {
+		t.Fatal("Y should set a status message")
+	}
+	h := app.statusLine()
+	if !strings.Contains(h, "users") {
+		t.Fatalf("a message must not replace the table crumb:\n%s", h)
+	}
+	if !strings.Contains(h, app.status) {
+		t.Fatalf("header should still show the message %q:\n%s", app.status, h)
+	}
+	// Both present => the message is a segment after the table, not instead of it.
+	if strings.Index(h, "users") > strings.Index(h, app.status) {
+		t.Fatalf("the message should come after the table crumb:\n%s", h)
+	}
+}
+
+// TestGlobalOverlaysFromTableList: the overlay commands (?, `) are session-wide,
+// not grid-only — they must open AND render from a list screen. Regression: they
+// were gated on screenBrowse and drawn only in browseView.
+func TestGlobalOverlaysFromTableList(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace}) // → table list
+	if app.screen != screenTables {
+		t.Fatalf("setup should leave us on the table list, got screen=%d", app.screen)
+	}
+
+	// ? opens the help sheet and it actually draws over the list.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if !app.help.active {
+		t.Fatal("? should open the help sheet from the table list")
+	}
+	if v := app.View(); !strings.Contains(v, "Keybindings") {
+		t.Fatalf("the help sheet should render on the table list:\n%s", v)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // close
+
+	// ` opens the jumplist picker (we have a visited view) and draws.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'`'}})
+	if !app.jumps.active {
+		t.Fatal("` should open the jumplist picker from the table list")
+	}
+	if v := app.View(); !strings.Contains(v, "jumplist") {
+		t.Fatalf("the jumplist picker should render on the table list:\n%s", v)
+	}
+}
+
+// TestListFilterSwallowsCommandLetters: while a list `/` filter is up, a letter
+// that is also a global command must be typed, not run as the command.
+func TestListFilterSwallowsCommandLetters(t *testing.T) {
+	app := loadTable(t, func(e db.Engine) {
+		ctx := context.Background()
+		e.Exec(ctx, `CREATE TABLE blogs (id INTEGER PRIMARY KEY)`)
+	})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})                 // → table list
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}) // start filtering
+	if !app.sidebar.filtering {
+		t.Fatal("/ should start the list filter")
+	}
+	// b and ? are global commands; inside the filter they're just characters.
+	for _, r := range []rune{'b', '?'} {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if app.histView.active || app.help.active {
+		t.Fatal("a letter typed into the filter must not fire its global command")
+	}
+	if app.sidebar.filter.val != "b?" {
+		t.Fatalf("filter text = %q, want %q", app.sidebar.filter.val, "b?")
 	}
 }
 
