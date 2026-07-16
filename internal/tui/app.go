@@ -559,11 +559,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
 			return a, nil
 		}
-		// Reload the current view so the change is reflected; the affected count
-		// survives the reload via postExecStatus.
+		// Reload the view the write ran against so the change is reflected; the
+		// affected count survives the reload via postExecStatus. Reload p, NOT the
+		// focused pane — focus can have moved while the write was in flight, and
+		// reloading whatever is focused now would both miss the change and stomp an
+		// unrelated view.
 		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
-		ctx := a.begin("reloading", a.p().id)
-		return a, a.loadCurrentCmd(ctx)
+		ctx := a.begin("reloading", p.id)
+		return a, a.loadPaneCmd(ctx, p)
 
 	case tea.KeyMsg:
 		return a.handleKey(msg)
@@ -657,12 +660,17 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 	// The <space> leader is consumed here, before anything else can claim the key:
-	// otherwise `<space>j` would move the grid cursor instead of the focus. It's
-	// only ever armed from a clean grid screen (see the arm site below), so no
-	// modal can be up while it's pending.
+	// otherwise `<space>j` would move the grid cursor instead of the focus.
+	//
+	// It's armed only from a clean grid screen, but a message can land between the
+	// <space> and the next key and put something else on screen — an errMsg arming
+	// the failure modal, say. Re-check rather than assume: if the ground has moved,
+	// drop the leader and let the key go wherever it now belongs.
 	if a.leader {
 		a.leader = false
-		return a.handleLeaderKey(msg)
+		if a.screen == screenBrowse && !a.modalActive() {
+			return a.handleLeaderKey(msg)
+		}
 	}
 	// While a connect is in flight the loader owns the screen. Esc cancels it and
 	// returns to the previous page (or quits if this is the very first connect, with
@@ -882,6 +890,13 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleGridKey(msg)
 	}
 	return a, nil
+}
+
+// modalActive reports whether an overlay currently owns the keyboard. Keep this
+// in step with the captures at the top of handleKey and the renders in View().
+func (a App) modalActive() bool {
+	return a.confirm.active || a.errView.active || a.help.active ||
+		a.cell.active || a.jumps.active || a.histView.active
 }
 
 // typing reports whether a text input currently owns the keyboard: the grid's
@@ -1847,7 +1862,14 @@ func (a App) queryKey(t db.Table) string {
 // loadCurrentCmd (re)loads the current table with the active sort, any followed-FK
 // base predicate, and the column filters.
 func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
-	return loadCmd(ctx, a.gen, a.engine, a.p().currentTable, a.gridLimit(), a.p().sortCol, a.p().sortAsc, a.p().basePreds, a.g().filterSpecs())
+	return a.loadPaneCmd(ctx, a.p())
+}
+
+// loadPaneCmd reloads a specific pane's view. Handlers resolving a result's pane
+// via opTarget must use this rather than loadCurrentCmd: focus can move while an
+// op is in flight, so "current" and "the pane this op belongs to" can differ.
+func (a App) loadPaneCmd(ctx context.Context, p *pane) tea.Cmd {
+	return loadCmd(ctx, a.gen, a.engine, p.currentTable, a.gridLimit(), p.sortCol, p.sortAsc, p.basePreds, p.grid.filterSpecs())
 }
 
 // reloadView re-runs the current view (`r`): a table reload keeps the sort,

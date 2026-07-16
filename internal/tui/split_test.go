@@ -381,6 +381,69 @@ func TestSplitLayoutFillsWidth(t *testing.T) {
 	}
 }
 
+// TestExecReloadsWritingPane: a write's reload must go to the pane the write ran
+// against, even if focus moved while it was in flight. Reloading whatever is
+// focused now would both miss the change and stomp an unrelated view.
+func TestExecReloadsWritingPane(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app) // focus = 1
+
+	// Point the two panes at different tables so the reload target is visible.
+	app.panes[0].currentTable = db.Table{Name: "authors"}
+	app.panes[1].currentTable = db.Table{Name: "users"}
+
+	// A write dispatched from pane 1...
+	ctx := app.begin("running", app.panes[1].id)
+	_ = ctx
+	gen := app.gen
+	// ...then focus moves to pane 0 before the result lands.
+	app.focus = 0
+
+	m, cmd := app.Update(execDoneMsg{sql: "UPDATE users SET name='x'", affected: 1, gen: gen})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("a write should trigger a reload")
+	}
+	if app.opPane != app.panes[1].id {
+		t.Fatalf("the reload should target the pane that wrote (id %d), got opPane=%d",
+			app.panes[1].id, app.opPane)
+	}
+	// And the reload must carry that pane's table, not the focused pane's.
+	msg := cmd()
+	rows, ok := msg.(rowsMsg)
+	if !ok {
+		t.Fatalf("expected a rowsMsg, got %T", msg)
+	}
+	if rows.table.Name != "users" {
+		t.Fatalf("reloaded %q, want the writing pane's table users", rows.table.Name)
+	}
+}
+
+// TestLeaderDroppedWhenScreenChanges: the leader is consumed before the modal
+// captures, so a message landing between <space> and the next key must not let
+// the leader steal a key aimed at whatever is now on screen.
+func TestLeaderDroppedWhenModalArms(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	if !app.leader {
+		t.Fatal("setup: space should arm the leader")
+	}
+	// A slow query fails and arms the failure modal before the next key.
+	seed := editorSeed{sql: "SELECT boom"}
+	app = update(t, app, errMsg{err: context.DeadlineExceeded, seed: &seed, gen: app.gen})
+	if !app.errView.active {
+		t.Fatal("setup: the errMsg should arm the failure modal")
+	}
+	// 'v' now belongs to the modal, not the leader: it must not split.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if len(app.panes) != 1 {
+		t.Fatalf("the leader must not split from behind a modal, got %d panes", len(app.panes))
+	}
+	if app.leader {
+		t.Fatal("the leader should be spent either way")
+	}
+}
+
 // TestLeaderNotArmedWhileTyping: <space> is a literal character inside a filter
 // or a cell edit, never the split leader.
 func TestLeaderNotArmedWhileTyping(t *testing.T) {
