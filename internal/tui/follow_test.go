@@ -40,11 +40,11 @@ func TestFollowForeignKey(t *testing.T) {
 	app = update(t, app, tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	// Load the books table (it sorts after authors alphabetically).
-	app.currentTable = db.Table{Name: "books"}
-	m, cmd := app.selectTable(app.currentTable)
+	app.p().currentTable = db.Table{Name: "books"}
+	m, cmd := app.selectTable(app.p().currentTable)
 	app = m.(App)
 	app = update(t, app, cmd())
-	if got := app.grid.cols[1].name; got != "author_id" {
+	if got := app.g().cols[1].name; got != "author_id" {
 		t.Fatalf("expected column 1 to be author_id, got %q", got)
 	}
 
@@ -56,17 +56,17 @@ func TestFollowForeignKey(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("Enter on an FK column should dispatch a reload command")
 	}
-	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 ||
-		app.basePreds[0].col != "id" || fmt.Sprint(app.basePreds[0].val) != "2" {
-		t.Fatalf("unexpected follow target: table=%q preds=%+v", app.currentTable.Name, app.basePreds)
+	if app.p().currentTable.Name != "authors" || len(app.p().basePreds) != 1 ||
+		app.p().basePreds[0].col != "id" || fmt.Sprint(app.p().basePreds[0].val) != "2" {
+		t.Fatalf("unexpected follow target: table=%q preds=%+v", app.p().currentTable.Name, app.p().basePreds)
 	}
 	app = update(t, app, cmd()) // rowsMsg
 
 	// The grid now shows authors, filtered to id = 2 (Linus only).
-	if app.currentTable.Name != "authors" {
-		t.Fatalf("expected to be on authors, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "authors" {
+		t.Fatalf("expected to be on authors, got %q", app.p().currentTable.Name)
 	}
-	if n := len(app.grid.rows); n != 1 {
+	if n := len(app.g().rows); n != 1 {
 		t.Fatalf("expected 1 row (the referenced author), got %d", n)
 	}
 	view := app.View()
@@ -106,8 +106,8 @@ func TestJumplistBackForward(t *testing.T) {
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	app = update(t, app, cmd()) // rowsMsg
-	if app.currentTable.Name != "authors" || app.baseNote == "" {
-		t.Fatalf("expected filtered authors, got %q note=%q", app.currentTable.Name, app.baseNote)
+	if app.p().currentTable.Name != "authors" || app.p().baseNote == "" {
+		t.Fatalf("expected filtered authors, got %q note=%q", app.p().currentTable.Name, app.p().baseNote)
 	}
 
 	// Ctrl-O → back to books (unfiltered). Both views were cached when we left
@@ -117,8 +117,8 @@ func TestJumplistBackForward(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a cached jump should restore instantly, not reload")
 	}
-	if app.currentTable.Name != "books" || app.baseNote != "" || len(app.basePreds) != 0 {
-		t.Fatalf("back should land on unfiltered books, got %q note=%q", app.currentTable.Name, app.baseNote)
+	if app.p().currentTable.Name != "books" || app.p().baseNote != "" || len(app.p().basePreds) != 0 {
+		t.Fatalf("back should land on unfiltered books, got %q note=%q", app.p().currentTable.Name, app.p().baseNote)
 	}
 
 	// Forward → authors filtered again (also from cache).
@@ -127,8 +127,8 @@ func TestJumplistBackForward(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a cached forward jump should restore instantly")
 	}
-	if app.currentTable.Name != "authors" || len(app.basePreds) != 1 {
-		t.Fatalf("forward should restore filtered authors, got %q preds=%v", app.currentTable.Name, app.basePreds)
+	if app.p().currentTable.Name != "authors" || len(app.p().basePreds) != 1 {
+		t.Fatalf("forward should restore filtered authors, got %q preds=%v", app.p().currentTable.Name, app.p().basePreds)
 	}
 
 	// Nothing further forward.
@@ -140,16 +140,16 @@ func TestJumplistBackForward(t *testing.T) {
 	// a kitty Ctrl-I lands too. Go back first so there's a forward view.
 	m, _ = app.jumpBy(-1)
 	app = m.(App)
-	if app.currentTable.Name != "books" {
-		t.Fatalf("setup: expected books, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "books" {
+		t.Fatalf("setup: expected books, got %q", app.p().currentTable.Name)
 	}
 	if app.screen != screenBrowse {
 		t.Fatal("should be on the grid screen while browsing")
 	}
 	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyTab})
 	app = m.(App)
-	if app.currentTable.Name != "authors" {
-		t.Fatalf("Tab-forward should reach authors, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "authors" {
+		t.Fatalf("Tab-forward should reach authors, got %q", app.p().currentTable.Name)
 	}
 }
 
@@ -170,8 +170,8 @@ func TestJumplistPicker(t *testing.T) {
 		m, cmd := app.selectTable(db.Table{Name: name})
 		app = update(t, m.(App), cmd())
 	}
-	if app.viewIdx != 2 || len(app.views) != 3 {
-		t.Fatalf("expected 3 views at idx 2, got idx=%d len=%d", app.viewIdx, len(app.views))
+	if app.p().viewIdx != 2 || len(app.p().views) != 3 {
+		t.Fatalf("expected 3 views at idx 2, got idx=%d len=%d", app.p().viewIdx, len(app.p().views))
 	}
 
 	// Open the picker, move to the first entry (a), and jump.
@@ -188,14 +188,14 @@ func TestJumplistPicker(t *testing.T) {
 	if cmd != nil { // a was cached when we left it → instant restore
 		t.Fatal("jumping to a cached view should not reload")
 	}
-	if app.currentTable.Name != "a" || app.viewIdx != 0 {
-		t.Fatalf("jumped to wrong view: table=%q idx=%d", app.currentTable.Name, app.viewIdx)
+	if app.p().currentTable.Name != "a" || app.p().viewIdx != 0 {
+		t.Fatalf("jumped to wrong view: table=%q idx=%d", app.p().currentTable.Name, app.p().viewIdx)
 	}
 	// Navigating from the middle truncates the forward tail.
 	m, cmd = app.selectTable(db.Table{Name: "b"})
 	app = update(t, m.(App), cmd())
-	if len(app.views) != 2 || app.viewIdx != 1 {
-		t.Fatalf("new jump from middle should truncate forward: len=%d idx=%d", len(app.views), app.viewIdx)
+	if len(app.p().views) != 2 || app.p().viewIdx != 1 {
+		t.Fatalf("new jump from middle should truncate forward: len=%d idx=%d", len(app.p().views), app.p().viewIdx)
 	}
 }
 
@@ -224,20 +224,20 @@ func TestFKColumnMarker(t *testing.T) {
 	app = update(t, m.(App), cmd())
 
 	fk := map[string]bool{}
-	for _, c := range app.grid.cols {
+	for _, c := range app.g().cols {
 		fk[c.name] = c.fk
 	}
 	if !fk["author_id"] || fk["id"] || fk["title"] {
 		t.Fatalf("only author_id should be marked FK: %+v", fk)
 	}
-	if h := app.grid.renderHeader(); !strings.Contains(h, "author_id"+fkMarker) {
+	if h := app.g().renderHeader(); !strings.Contains(h, "author_id"+fkMarker) {
 		t.Fatalf("header missing FK marker on author_id:\n%s", h)
 	}
 	// A non-FK table shows no markers.
 	m, cmd = app.selectTable(db.Table{Name: "authors"})
 	app = update(t, m.(App), cmd())
-	if strings.Contains(app.grid.renderHeader(), fkMarker) {
-		t.Fatalf("authors header should carry no FK marker:\n%s", app.grid.renderHeader())
+	if strings.Contains(app.g().renderHeader(), fkMarker) {
+		t.Fatalf("authors header should carry no FK marker:\n%s", app.g().renderHeader())
 	}
 }
 
@@ -254,8 +254,8 @@ func TestFollowNoForeignKey(t *testing.T) {
 	app := New(nil, config.Conn{URL: path, Name: "t"})
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
-	app.currentTable = db.Table{Name: "t"}
-	m, cmd := app.selectTable(app.currentTable)
+	app.p().currentTable = db.Table{Name: "t"}
+	m, cmd := app.selectTable(app.p().currentTable)
 	app = m.(App)
 	app = update(t, app, cmd())
 
@@ -270,7 +270,7 @@ func TestFollowNoForeignKey(t *testing.T) {
 	if !app.cell.active {
 		t.Fatal("Enter on a non-FK column should open the full-cell viewer")
 	}
-	if app.currentTable.Name != "t" {
-		t.Fatalf("Enter on a non-FK column should not navigate, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "t" {
+		t.Fatalf("Enter on a non-FK column should not navigate, got %q", app.p().currentTable.Name)
 	}
 }

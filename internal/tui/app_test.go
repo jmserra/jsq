@@ -102,31 +102,31 @@ func TestVisualRowYank(t *testing.T) {
 
 	// V arms visual mode with the anchor on row 0.
 	app = runeKey(t, app, 'V')
-	if !app.grid.visualMode {
+	if !app.g().visualMode {
 		t.Fatal("V should enter visual mode")
 	}
-	if app.grid.visualAnchor != 0 || app.grid.cursorR != 0 {
-		t.Fatalf("anchor/cursor = %d/%d, want 0/0", app.grid.visualAnchor, app.grid.cursorR)
+	if app.g().visualAnchor != 0 || app.g().cursorR != 0 {
+		t.Fatalf("anchor/cursor = %d/%d, want 0/0", app.g().visualAnchor, app.g().cursorR)
 	}
 
 	// j extends the selection down to row 1 (Ada + Linus selected).
 	app = runeKey(t, app, 'j')
-	if lo, hi := app.grid.visualRange(); lo != 0 || hi != 1 {
+	if lo, hi := app.g().visualRange(); lo != 0 || hi != 1 {
 		t.Fatalf("range = %d..%d, want 0..1", lo, hi)
 	}
 
 	// o swaps the moving edge: cursor jumps to the anchor end (row 0), anchor
 	// becomes row 1 — the range is unchanged.
 	app = runeKey(t, app, 'o')
-	if app.grid.cursorR != 0 || app.grid.visualAnchor != 1 {
-		t.Fatalf("after o cursor/anchor = %d/%d, want 0/1", app.grid.cursorR, app.grid.visualAnchor)
+	if app.g().cursorR != 0 || app.g().visualAnchor != 1 {
+		t.Fatalf("after o cursor/anchor = %d/%d, want 0/1", app.g().cursorR, app.g().visualAnchor)
 	}
-	if lo, hi := app.grid.visualRange(); lo != 0 || hi != 1 {
+	if lo, hi := app.g().visualRange(); lo != 0 || hi != 1 {
 		t.Fatalf("range after o = %d..%d, want 0..1", lo, hi)
 	}
 
 	// The yank text is a JSON array of the two selected rows, column-ordered.
-	text, n, ok := app.grid.yankSelectionJSON()
+	text, n, ok := app.g().yankSelectionJSON()
 	if !ok || n != 2 {
 		t.Fatalf("yankSelectionJSON ok=%v n=%d, want true/2", ok, n)
 	}
@@ -145,7 +145,7 @@ func TestVisualRowYank(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("y in visual mode should return a yank command")
 	}
-	if app.grid.visualMode {
+	if app.g().visualMode {
 		t.Fatal("y should exit visual mode")
 	}
 	if !strings.Contains(app.status, "2 rows copied") {
@@ -174,11 +174,11 @@ func TestVisualEscCancels(t *testing.T) {
 
 	app = runeKey(t, app, 'V')
 	app = runeKey(t, app, 'j')
-	if !app.grid.visualMode {
+	if !app.g().visualMode {
 		t.Fatal("expected visual mode active")
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
-	if app.grid.visualMode {
+	if app.g().visualMode {
 		t.Fatal("Esc should exit visual mode")
 	}
 	// Screen must stay on the grid — Esc in visual mode is not a screen change.
@@ -210,24 +210,24 @@ func TestSortUsesCurrentColumn(t *testing.T) {
 
 	// Move cursor to the 2nd column ("name") and sort descending with K.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	if got, _ := app.grid.currentColName(); got != "name" {
+	if got, _ := app.g().currentColName(); got != "name" {
 		t.Fatalf("after moving right, current column = %q, want name", got)
 	}
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
 	app = m.(App)
-	if app.sortCol != "name" || app.sortAsc {
-		t.Fatalf("K should sort current column name desc; got %q asc=%v", app.sortCol, app.sortAsc)
+	if app.p().sortCol != "name" || app.p().sortAsc {
+		t.Fatalf("K should sort current column name desc; got %q asc=%v", app.p().sortCol, app.p().sortAsc)
 	}
 	if cmd == nil {
 		t.Fatal("K should trigger a reload command")
 	}
 	app = update(t, app, cmd())
 	// Cursor column preserved across the re-sort, and header marks "name".
-	if app.grid.cursorC != 1 {
-		t.Fatalf("cursor column not preserved across re-sort: %d", app.grid.cursorC)
+	if app.g().cursorC != 1 {
+		t.Fatalf("cursor column not preserved across re-sort: %d", app.g().cursorC)
 	}
-	if app.grid.sortCol != "name" {
-		t.Fatalf("header sort marker = %q, want name", app.grid.sortCol)
+	if app.g().sortCol != "name" {
+		t.Fatalf("header sort marker = %q, want name", app.g().sortCol)
 	}
 }
 
@@ -254,13 +254,13 @@ func TestColumnFilter(t *testing.T) {
 	// Move to the "name" column, open the filter, type "%a%" (contains 'a').
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
-	if app.grid.filtering != 1 {
-		t.Fatalf("filtering column = %d, want 1", app.grid.filtering)
+	if app.g().filtering != 1 {
+		t.Fatalf("filtering column = %d, want 1", app.g().filtering)
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("%a%")})
 	// Live preview (client-side): Ada + Grace match, Linus doesn't.
-	if len(app.grid.visible) != 2 {
-		t.Fatalf("live preview matched %d rows, want 2", len(app.grid.visible))
+	if len(app.g().visible) != 2 {
+		t.Fatalf("live preview matched %d rows, want 2", len(app.g().visible))
 	}
 
 	// Commit → server re-query.
@@ -270,8 +270,8 @@ func TestColumnFilter(t *testing.T) {
 		t.Fatal("committing a filter should reload")
 	}
 	app = update(t, app, cmd())
-	if len(app.grid.rows) != 2 {
-		t.Fatalf("server filter returned %d rows, want 2", len(app.grid.rows))
+	if len(app.g().rows) != 2 {
+		t.Fatalf("server filter returned %d rows, want 2", len(app.g().rows))
 	}
 	view := app.View()
 	if strings.Contains(view, "Linus") {
@@ -304,19 +304,19 @@ func TestGridFilterSubstringFallback(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("in")})
-	if len(app.grid.visible) != 1 {
-		t.Fatalf("substring preview matched %d rows, want 1 (Linus)", len(app.grid.visible))
+	if len(app.g().visible) != 1 {
+		t.Fatalf("substring preview matched %d rows, want 1 (Linus)", len(app.g().visible))
 	}
 
 	// Commit → the decision is recorded and the server query uses the substring.
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
-	if !app.grid.filtersWide[1] {
+	if !app.g().filtersWide[1] {
 		t.Fatal("column 1 should be flagged to widen to a substring match")
 	}
 	app = update(t, app, cmd())
-	if len(app.grid.rows) != 1 {
-		t.Fatalf("server substring filter returned %d rows, want 1", len(app.grid.rows))
+	if len(app.g().rows) != 1 {
+		t.Fatalf("server substring filter returned %d rows, want 1", len(app.g().rows))
 	}
 	if v := app.View(); !strings.Contains(v, "Linus") || strings.Contains(v, "Grace") {
 		t.Fatalf("filtered view should show only Linus:\n%s", v)
@@ -350,16 +350,16 @@ func TestGridFilterPreviewSkipsNull(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
-	if len(app.grid.visible) != 1 {
-		t.Fatalf("preview matched %d rows, want 1 (Nora only, NULL skipped)", len(app.grid.visible))
+	if len(app.g().visible) != 1 {
+		t.Fatalf("preview matched %d rows, want 1 (Nora only, NULL skipped)", len(app.g().visible))
 	}
 
 	// Commit → the server query agrees: exactly the one non-NULL match.
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
 	app = update(t, app, cmd())
-	if len(app.grid.rows) != 1 {
-		t.Fatalf("server filter returned %d rows, want 1 (preview must equal commit)", len(app.grid.rows))
+	if len(app.g().rows) != 1 {
+		t.Fatalf("server filter returned %d rows, want 1 (preview must equal commit)", len(app.g().rows))
 	}
 }
 
@@ -498,9 +498,9 @@ func TestContinuousScroll(t *testing.T) {
 	app = m.(App)
 	app = update(t, app, cmd())
 
-	initial := len(app.grid.rows)
-	if initial == 0 || !app.grid.hasMore {
-		t.Fatalf("initial load = %d rows, hasMore=%v", initial, app.grid.hasMore)
+	initial := len(app.g().rows)
+	if initial == 0 || !app.g().hasMore {
+		t.Fatalf("initial load = %d rows, hasMore=%v", initial, app.g().hasMore)
 	}
 
 	// Jump to the bottom of the loaded window → should trigger a fetch.
@@ -510,8 +510,8 @@ func TestContinuousScroll(t *testing.T) {
 		t.Fatal("G at the loaded edge should trigger a load-more fetch")
 	}
 	app = update(t, app, cmd())
-	if len(app.grid.rows) <= initial {
-		t.Fatalf("rows did not grow after scroll: %d → %d", initial, len(app.grid.rows))
+	if len(app.g().rows) <= initial {
+		t.Fatalf("rows did not grow after scroll: %d → %d", initial, len(app.g().rows))
 	}
 }
 
@@ -654,10 +654,10 @@ func TestStatusPagingHintMore(t *testing.T) {
 			e.Exec(ctx, `INSERT INTO nums (v) VALUES (?)`, i)
 		}
 	})
-	if !app.grid.hasMore {
+	if !app.g().hasMore {
 		t.Fatal("500 rows should exceed the initial window (hasMore)")
 	}
-	want := fmt.Sprintf("/%d↓", len(app.grid.rows))
+	want := fmt.Sprintf("/%d↓", len(app.g().rows))
 	if got := app.statusLine(); !strings.Contains(got, want) {
 		t.Fatalf("want %q in status line, got %q", want, got)
 	}
@@ -914,11 +914,11 @@ func TestQuickEditCell(t *testing.T) {
 
 	// `e` opens the overlay pre-filled with the current value.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if !app.grid.editing {
+	if !app.g().editing {
 		t.Fatal("`e` should start editing")
 	}
-	if app.grid.edit.val != "Linus" {
-		t.Fatalf("overlay pre-fill = %q, want Linus", app.grid.edit.val)
+	if app.g().edit.val != "Linus" {
+		t.Fatalf("overlay pre-fill = %q, want Linus", app.g().edit.val)
 	}
 
 	// Clear "Linus" and type "Grace", then commit.
@@ -929,7 +929,7 @@ func TestQuickEditCell(t *testing.T) {
 	app = typeRunes(t, app, "Grace")
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
-	if app.grid.editing {
+	if app.g().editing {
 		t.Fatal("Enter should leave edit mode")
 	}
 	if cmd == nil {
@@ -938,7 +938,7 @@ func TestQuickEditCell(t *testing.T) {
 	app = update(t, app, cmd())
 
 	// Grid reflects the new value immediately.
-	if got, _, _ := app.grid.currentCell(); got != "Grace" {
+	if got, _, _ := app.g().currentCell(); got != "Grace" {
 		t.Fatalf("grid cell after edit = %v, want Grace", got)
 	}
 	if !strings.Contains(app.status, "set name") {
@@ -988,18 +988,18 @@ func TestQuickEditWriteBackTargetsEditedCell(t *testing.T) {
 	// is what used to repoint grid.editR/editC at the wrong cell.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyDown})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if !app.grid.editing || app.grid.editR != 1 {
-		t.Fatalf("expected to be editing row 1, editing=%v editR=%d", app.grid.editing, app.grid.editR)
+	if !app.g().editing || app.g().editR != 1 {
+		t.Fatalf("expected to be editing row 1, editing=%v editR=%d", app.g().editing, app.g().editR)
 	}
 
 	// Now the first edit's result arrives while row 1 is being edited.
 	app = update(t, app, done)
 
 	// The write-back must have hit row 0 (Linus→Grace), not the cell under edit.
-	if got := app.grid.rows[0][1]; got != "Grace" {
+	if got := app.g().rows[0][1]; got != "Grace" {
 		t.Fatalf("row 0 name = %v, want Grace (write-back landed on the edited cell)", got)
 	}
-	if got := app.grid.rows[1][1]; got != "Ada" {
+	if got := app.g().rows[1][1]; got != "Ada" {
 		t.Fatalf("row 1 name = %v, want Ada (must not be clobbered by row 0's edit)", got)
 	}
 }
@@ -1031,7 +1031,7 @@ func TestQuickEditNull(t *testing.T) {
 	app = update(t, app, cmd())
 
 	// Grid shows a real NULL (nil cell), not the string "NULL".
-	if got, _, _ := app.grid.currentCell(); got != nil {
+	if got, _, _ := app.g().currentCell(); got != nil {
 		t.Fatalf("grid cell after NULL edit = %#v, want nil", got)
 	}
 	if !strings.Contains(app.status, "set name = NULL") {
@@ -1173,27 +1173,27 @@ func TestQuickEditCursorKeys(t *testing.T) {
 	// PK-desc → row 0 is id=2 (Linus). Edit "name": caret opens at the end.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if app.grid.edit.val != "Linus" || app.grid.edit.pos != 5 {
-		t.Fatalf("start: %q pos %d, want Linus pos 5 (at end)", app.grid.edit.val, app.grid.edit.pos)
+	if app.g().edit.val != "Linus" || app.g().edit.pos != 5 {
+		t.Fatalf("start: %q pos %d, want Linus pos 5 (at end)", app.g().edit.val, app.g().edit.pos)
 	}
 	// ← twice into the middle, insert, then Ctrl-W wipes back to the word start.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyLeft})
-	if app.grid.edit.pos != 3 {
-		t.Fatalf("after End ←←, pos = %d, want 3", app.grid.edit.pos)
+	if app.g().edit.pos != 3 {
+		t.Fatalf("after End ←←, pos = %d, want 3", app.g().edit.pos)
 	}
 	app = typeRunes(t, app, "X") // "LinXus", caret after X
-	if app.grid.edit.val != "LinXus" {
-		t.Fatalf("mid insert = %q, want LinXus", app.grid.edit.val)
+	if app.g().edit.val != "LinXus" {
+		t.Fatalf("mid insert = %q, want LinXus", app.g().edit.val)
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyCtrlW})
-	if app.grid.edit.val != "us" || app.grid.edit.pos != 0 {
-		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.grid.edit.val, app.grid.edit.pos)
+	if app.g().edit.val != "us" || app.g().edit.pos != 0 {
+		t.Fatalf("after Ctrl-W: %q pos %d, want \"us\" pos 0", app.g().edit.val, app.g().edit.pos)
 	}
 	// Del removes the rune at the caret.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyDelete})
-	if app.grid.edit.val != "s" || app.grid.edit.pos != 0 {
-		t.Fatalf("after Del: %q pos %d, want \"s\" pos 0", app.grid.edit.val, app.grid.edit.pos)
+	if app.g().edit.val != "s" || app.g().edit.pos != 0 {
+		t.Fatalf("after Del: %q pos %d, want \"s\" pos 0", app.g().edit.val, app.g().edit.pos)
 	}
 }
 
@@ -1594,9 +1594,9 @@ func TestQuickEditUntouchedNullNoop(t *testing.T) {
 	})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	if !app.grid.editing || app.grid.edit.val != "" {
+	if !app.g().editing || app.g().edit.val != "" {
 		t.Fatalf("editing a NULL cell should open an empty overlay; editing=%v val=%q",
-			app.grid.editing, app.grid.edit.val)
+			app.g().editing, app.g().edit.val)
 	}
 	// Bare Enter, no typing → no command, cell stays NULL.
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1604,7 +1604,7 @@ func TestQuickEditUntouchedNullNoop(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("bare Enter on an untouched NULL cell must not run an UPDATE")
 	}
-	if got, _, _ := app.grid.currentCell(); got != nil {
+	if got, _, _ := app.g().currentCell(); got != nil {
 		t.Fatalf("cell should remain NULL, got %v", got)
 	}
 	rs, _ := app.engine.Query(context.Background(), `SELECT name FROM users WHERE id = 1`)
@@ -1626,11 +1626,11 @@ func TestFullEditRunsEditedSQL(t *testing.T) {
 	// Default PK-descending sort puts id=2 (Linus) on row 0; move to "name".
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 
-	col, val, keys, ok := app.grid.fullEditTarget()
+	col, val, keys, ok := app.g().fullEditTarget()
 	if !ok || col != "name" || val != "Linus" {
 		t.Fatalf("fullEditTarget = (%q, %v, ok=%v), want name/Linus", col, val, ok)
 	}
-	seed := buildUpdateStmt(app.engine, app.grid.table, col, val, keys)
+	seed := buildUpdateStmt(app.engine, app.g().table, col, val, keys)
 	for _, want := range []string{"UPDATE", `SET "name" = 'Linus'`, `WHERE "id" = 2`} {
 		if !strings.Contains(seed.sql, want) {
 			t.Fatalf("generated UPDATE missing %q:\n%s", want, seed.sql)
@@ -1666,7 +1666,7 @@ func TestFullEditRunsEditedSQL(t *testing.T) {
 	}
 	app = update(t, app, cmd()) // rowsMsg
 
-	if got, _, _ := app.grid.currentCell(); got != "Neo" {
+	if got, _, _ := app.g().currentCell(); got != "Neo" {
 		t.Fatalf("grid cell after full edit = %v, want Neo", got)
 	}
 	if !strings.Contains(app.status, "affected") {
@@ -1899,8 +1899,8 @@ func TestBlankInsert(t *testing.T) {
 		t.Fatalf("db rows = %+v, want Ada + a NULL-name row", rs.Rows)
 	}
 	// Default PK-descending order puts the new (id=2) row on top of the reload.
-	if len(app.grid.rows) != 2 {
-		t.Fatalf("grid should show 2 rows after insert, got %d", len(app.grid.rows))
+	if len(app.g().rows) != 2 {
+		t.Fatalf("grid should show 2 rows after insert, got %d", len(app.g().rows))
 	}
 }
 
@@ -1996,7 +1996,7 @@ func TestDeleteRow(t *testing.T) {
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
 	})
 	// Default PK-descending sort puts id=2 (Linus) on row 0.
-	if got, _, _ := app.grid.currentCell(); got != int64(2) {
+	if got, _, _ := app.g().currentCell(); got != int64(2) {
 		t.Fatalf("row 0 should be id=2, got %v", got)
 	}
 
@@ -2007,11 +2007,11 @@ func TestDeleteRow(t *testing.T) {
 	}
 	// D builds its seed inline, so we can't read it from the ExecProcess cmd;
 	// rebuild it the same way to submit verbatim (as if the user :wq'd).
-	keys, ok := app.grid.rowKeys()
+	keys, ok := app.g().rowKeys()
 	if !ok {
 		t.Fatal("row should be keyable")
 	}
-	seed := buildDeleteStmt(app.engine, app.grid.table, keys)
+	seed := buildDeleteStmt(app.engine, app.g().table, keys)
 	if !strings.Contains(seed.sql, `DELETE FROM "users" WHERE "id" = 2;`) {
 		t.Fatalf("delete seed wrong:\n%s", seed.sql)
 	}
@@ -2026,8 +2026,8 @@ func TestDeleteRow(t *testing.T) {
 	if len(rs.Rows) != 1 || rs.Rows[0][0] != int64(1) {
 		t.Fatalf("db rows = %+v, want only id=1", rs.Rows)
 	}
-	if len(app.grid.rows) != 1 {
-		t.Fatalf("grid should show 1 row after delete, got %d", len(app.grid.rows))
+	if len(app.g().rows) != 1 {
+		t.Fatalf("grid should show 1 row after delete, got %d", len(app.g().rows))
 	}
 }
 
@@ -2121,7 +2121,7 @@ func TestMidSessionErrorRecoverable(t *testing.T) {
 	})
 
 	// A mid-session op fails (e.g. a bad SELECT run via `s`).
-	app.begin("running query")
+	app.begin("running query", app.p().id)
 	m, _ := app.Update(errMsg{err: errors.New("near \"SLECT\": syntax error"), gen: app.gen})
 	app = m.(App)
 
@@ -2135,12 +2135,12 @@ func TestMidSessionErrorRecoverable(t *testing.T) {
 		t.Fatalf("a recoverable error must not show the dead-end error screen:\n%s", v)
 	}
 	// The grid is still interactive: a cursor move works and the rows survive.
-	if len(app.grid.rows) != 2 {
-		t.Fatalf("the loaded rows should survive the error, got %d", len(app.grid.rows))
+	if len(app.g().rows) != 2 {
+		t.Fatalf("the loaded rows should survive the error, got %d", len(app.g().rows))
 	}
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if app.grid.cursorR != 1 {
-		t.Fatalf("the grid should stay interactive after an error; cursorR=%d", app.grid.cursorR)
+	if app.g().cursorR != 1 {
+		t.Fatalf("the grid should stay interactive after an error; cursorR=%d", app.g().cursorR)
 	}
 }
 
@@ -2154,8 +2154,8 @@ func TestMoveDuringOpKeepsInFlight(t *testing.T) {
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus')`)
 	})
 	// Pretend more rows exist and an op (e.g. a sort) is already in flight.
-	app.grid.hasMore = true
-	app.begin("sorting")
+	app.g().hasMore = true
+	app.begin("sorting", app.p().id)
 	app.activity = "sorting"
 	opGen := app.gen
 
@@ -2167,7 +2167,7 @@ func TestMoveDuringOpKeepsInFlight(t *testing.T) {
 	if app.gen != opGen {
 		t.Fatalf("a move during an op must not bump gen (cancel it): gen %d != %d", app.gen, opGen)
 	}
-	if app.grid.loading {
+	if app.g().loading {
 		t.Fatal("a move during an op must not flag a scroll fetch as loading")
 	}
 }
@@ -2183,14 +2183,14 @@ func TestStaleResultIgnored(t *testing.T) {
 	})
 
 	// Arm a fresh in-flight op; remember its gen and activity label.
-	app.begin("loading")
+	app.begin("loading", app.p().id)
 	app.activity = "loading"
 	curGen := app.gen
-	rowsBefore := len(app.grid.rows)
+	rowsBefore := len(app.g().rows)
 
 	// A rowsMsg stamped with a superseded gen must be dropped whole.
 	stale := rowsMsg{
-		table: app.grid.table,
+		table: app.g().table,
 		rs:    &db.ResultSet{Cols: []string{"id"}, Rows: [][]any{{int64(99)}}},
 		full:  false,
 		gen:   curGen - 1,
@@ -2203,21 +2203,21 @@ func TestStaleResultIgnored(t *testing.T) {
 	if app.cancel == nil {
 		t.Fatal("a stale result must not cancel the current op")
 	}
-	if len(app.grid.rows) != rowsBefore {
-		t.Fatalf("a stale result must not replace the grid rows: got %d, want %d", len(app.grid.rows), rowsBefore)
+	if len(app.g().rows) != rowsBefore {
+		t.Fatalf("a stale result must not replace the grid rows: got %d, want %d", len(app.g().rows), rowsBefore)
 	}
 
 	// The matching gen still applies.
 	app = update(t, app, rowsMsg{
-		table: app.grid.table,
+		table: app.g().table,
 		rs:    &db.ResultSet{Cols: []string{"id"}, Rows: [][]any{{int64(99)}}},
 		gen:   curGen,
 	})
 	if app.activity != "" {
 		t.Fatalf("the current op's result should clear the activity, got %q", app.activity)
 	}
-	if len(app.grid.rows) != 1 {
-		t.Fatalf("the current op's result should apply, got %d rows", len(app.grid.rows))
+	if len(app.g().rows) != 1 {
+		t.Fatalf("the current op's result should apply, got %d rows", len(app.g().rows))
 	}
 }
 
@@ -2287,8 +2287,8 @@ func TestHelpOverlay(t *testing.T) {
 	if app.help.active {
 		t.Fatal("`?` while typing a filter must stay literal, not open help")
 	}
-	if app.grid.filter.val != "?" {
-		t.Fatalf("filter should contain the literal ?, got %q", app.grid.filter.val)
+	if app.g().filter.val != "?" {
+		t.Fatalf("filter should contain the literal ?, got %q", app.g().filter.val)
 	}
 }
 
@@ -2363,8 +2363,8 @@ func TestTableListScratchQuery(t *testing.T) {
 		t.Fatal("a read submit should run a query")
 	}
 	app = update(t, app, cmd()) // queryResultMsg
-	if !app.adHoc || len(app.grid.rows) != 1 {
-		t.Fatalf("scratch query should show the adHoc result; adHoc=%v rows=%d", app.adHoc, len(app.grid.rows))
+	if !app.p().adHoc || len(app.g().rows) != 1 {
+		t.Fatalf("scratch query should show the adHoc result; adHoc=%v rows=%d", app.p().adHoc, len(app.g().rows))
 	}
 	if hist := app.history["test"]; len(hist) != 1 || hist[0].sql != "SELECT name FROM users;" {
 		t.Fatalf("scratch query should enter the connection history, got %+v", hist)
@@ -2393,14 +2393,14 @@ func TestScratchQuery(t *testing.T) {
 	}
 	app = update(t, app, qr)
 
-	if !app.adHoc {
+	if !app.p().adHoc {
 		t.Fatal("a query result should set adHoc")
 	}
-	if app.grid.editable() {
+	if app.g().editable() {
 		t.Fatal("a query result must be non-editable")
 	}
-	if len(app.grid.rows) != 2 {
-		t.Fatalf("query should show 2 rows, got %d", len(app.grid.rows))
+	if len(app.g().rows) != 2 {
+		t.Fatalf("query should show 2 rows, got %d", len(app.g().rows))
 	}
 	view := app.View()
 	if !strings.Contains(view, "Ada") || !strings.Contains(view, "Linus") {
@@ -2425,8 +2425,8 @@ func TestReloadTable(t *testing.T) {
 		e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
 		e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada')`)
 	})
-	if len(app.grid.rows) != 1 {
-		t.Fatalf("initial load = %d rows, want 1", len(app.grid.rows))
+	if len(app.g().rows) != 1 {
+		t.Fatalf("initial load = %d rows, want 1", len(app.g().rows))
 	}
 
 	// A row appears from elsewhere; the grid doesn't know yet.
@@ -2440,8 +2440,8 @@ func TestReloadTable(t *testing.T) {
 		t.Fatal("`r` should dispatch a reload")
 	}
 	app = update(t, app, cmd())
-	if len(app.grid.rows) != 2 {
-		t.Fatalf("after reload = %d rows, want 2", len(app.grid.rows))
+	if len(app.g().rows) != 2 {
+		t.Fatalf("after reload = %d rows, want 2", len(app.g().rows))
 	}
 	if !strings.Contains(app.View(), "Grace") {
 		t.Fatalf("reloaded view should include the new row:\n%s", app.View())
@@ -2460,8 +2460,8 @@ func TestReloadQuery(t *testing.T) {
 	m, cmd := app.Update(editorSubmitMsg{sql: "SELECT name FROM users ORDER BY id;"})
 	app = m.(App)
 	app = update(t, app, cmd())
-	if !app.adHoc || len(app.grid.rows) != 1 {
-		t.Fatalf("query result: adHoc=%v rows=%d", app.adHoc, len(app.grid.rows))
+	if !app.p().adHoc || len(app.g().rows) != 1 {
+		t.Fatalf("query result: adHoc=%v rows=%d", app.p().adHoc, len(app.g().rows))
 	}
 
 	// Another row lands, then reload re-runs the same query.
@@ -2478,8 +2478,8 @@ func TestReloadQuery(t *testing.T) {
 		t.Fatalf("reload of an ad-hoc view should produce a queryResultMsg, got %T", msg)
 	}
 	app = update(t, app, msg)
-	if !app.adHoc || len(app.grid.rows) != 2 {
-		t.Fatalf("after query reload: adHoc=%v rows=%d, want adHoc + 2 rows", app.adHoc, len(app.grid.rows))
+	if !app.p().adHoc || len(app.g().rows) != 2 {
+		t.Fatalf("after query reload: adHoc=%v rows=%d, want adHoc + 2 rows", app.p().adHoc, len(app.g().rows))
 	}
 }
 
@@ -2497,18 +2497,18 @@ func TestScratchRemembersLastQuery(t *testing.T) {
 	if !strings.Contains(first.sql, `SELECT * FROM "users" LIMIT 100`) {
 		t.Fatalf("first scratch should be the template, got %q", first.sql)
 	}
-	if first.remember != app.currentTable {
+	if first.remember != app.p().currentTable {
 		t.Fatalf("scratch should remember the current table")
 	}
 
 	// Running a custom query remembers it; the next s prefills it.
-	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users WHERE id > 0;", remember: app.currentTable})
+	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users WHERE id > 0;", remember: app.p().currentTable})
 	if got := app.scratchSeed().sql; got != "SELECT name FROM users WHERE id > 0;" {
 		t.Fatalf("scratch should prefill the last query, got %q", got)
 	}
 
 	// It's per table: a different table gets the template, not this query.
-	app.currentTable = db.Table{Name: "other"}
+	app.p().currentTable = db.Table{Name: "other"}
 	if got := app.scratchSeed().sql; !strings.Contains(got, `SELECT * FROM "other" LIMIT 100`) {
 		t.Fatalf("a different table should get the template, got %q", got)
 	}
@@ -2525,7 +2525,7 @@ func TestScratchQueryScopedToDatabase(t *testing.T) {
 	})
 
 	// Remember a custom query for users on the current database.
-	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users;", remember: app.currentTable})
+	app = update(t, app, editorSubmitMsg{sql: "SELECT name FROM users;", remember: app.p().currentTable})
 	if got := app.scratchSeed().sql; got != "SELECT name FROM users;" {
 		t.Fatalf("same db+table should prefill the last query, got %q", got)
 	}
@@ -2578,7 +2578,7 @@ func TestYank(t *testing.T) {
 	app = update(t, app, cmd())
 
 	// Cursor is on col 0 (id) — cell yank is the raw value, no display mangling.
-	cell, ok := app.grid.yankCell()
+	cell, ok := app.g().yankCell()
 	if !ok {
 		t.Fatal("yankCell returned !ok")
 	}
@@ -2592,7 +2592,7 @@ func TestYank(t *testing.T) {
 	}
 
 	// Row yank is column-ordered JSON; its id matches the cell just yanked.
-	got, ok := app.grid.currentRowJSON()
+	got, ok := app.g().currentRowJSON()
 	if !ok {
 		t.Fatal("currentRowJSON returned !ok")
 	}

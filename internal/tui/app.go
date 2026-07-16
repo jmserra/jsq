@@ -53,35 +53,25 @@ type App struct {
 	engine  db.Engine
 	sidebar sidebar // the full-screen table list (screenTables)
 	dbs     sidebar // the full-screen database list (screenDatabases; items are db.Table{Name: db})
-	grid    grid
 	cell    cellView
 	help    help
 	confirm confirmView // safe-mode "run this mutation?" overlay
 	errView errView     // failed-statement modal (full error + query, e to re-edit)
 
-	currentTable db.Table
-	basePreds    []eqPred // followed-FK equality filter, AND-ed into every load until the table changes
-	baseNote     string   // human form of basePreds, shown in the status line
-	sortCol      string
-	sortAsc      bool
+	// panes are the split views (`<space>v`), left→right; focus indexes the live
+	// one. There is always at least one. Each owns its grid, what it's showing,
+	// and its own jumplist — see pane.
+	panes      []pane
+	focus      int
+	nextPaneID int // monotonic source of stable pane ids
 
-	// Jumplist: one session-wide list of visited views (oldest→newest, viewIdx =
-	// current). Ctrl-O/Ctrl-I step it; the ` picker jumps to any entry. It spans
-	// databases — each view records its db and a jump reconnects if needed. A view
-	// is {db, table, FK-filter, sort, cursor pos} plus a cached snapshot of its
-	// loaded rows, so a jump lands exactly where you left and, when the snapshot
-	// is still resident, restores instantly with no DB round-trip.
-	views       []viewState
-	viewIdx     int        // index of the current view; -1 before the first
 	viewSeq     int        // monotonic touch counter → LRU eviction of cached snapshots
 	jumps       jumpView   // the `-key jumplist picker overlay
 	pendingView *viewState // set for a cross-database jump: load it once reconnected
 	pendingPos  *gridPos   // restore this cursor/scroll after the next reload (a jump with no cache)
 	resetGrid   bool       // reset cursor on next rows load (new table, not a re-sort)
-	adHoc       bool       // grid shows a free-form (s) query result, not a table
 
-	lastQuery  map[string]string // last scratch (s) query per conn+db+table (queryKey), for the edit loop
-	adHocQuery string            // SQL behind the current adHoc result, so `r` can re-run it
+	lastQuery map[string]string // last scratch (s) query per conn+db+table (queryKey), for the edit loop
 
 	// Query history: per-connection list of free-form (s) queries, most-recent
 	// first, deduped by SQL. `b` opens the histView buffer over it; each entry's
@@ -107,6 +97,13 @@ type App struct {
 	// produced its result) and is ignored — so a stale result can neither cancel
 	// the current op nor apply its rows over it. Non-op messages carry gen 0.
 	gen int
+
+	// opPane is the id of the pane begin()'s op was dispatched for. There is one
+	// op slot, so the App always knows whose result is coming: a handler applies
+	// the result to THIS pane, not the focused one (focus can move while a query
+	// runs), and drops it if the pane has since been closed. Messages therefore
+	// need no pane field of their own.
+	opPane int
 }
 
 // New builds the root model. If direct.URL != "", it connects to that connection
@@ -115,17 +112,18 @@ func New(conns []config.Conn, direct config.Conn) App {
 	a := App{
 		conns:     conns,
 		connList:  sidebar{label: "connections"},
-		grid:      newGrid(),
 		connName:  direct.Name,
 		safe:      direct.Safe,
 		pending:   direct,
 		lastQuery: map[string]string{},
 		history:   map[string][]histEntry{},
-		viewIdx:   -1,
 		sidebar:   sidebar{label: "tables"},
 		dbs:       sidebar{label: "databases"},
 		tunneled:  map[string]bool{},
 	}
+	// One pane to start; `<space>v` adds more. New is the only constructor, so
+	// panes is never empty and p()/g() can't panic on a zero App.
+	a.panes = []pane{a.newPane()}
 	// The picker is a sidebar over the connection names; Enter maps the selected
 	// name back to its config.Conn via findConn.
 	connItems := make([]db.Table, len(conns))
@@ -195,7 +193,7 @@ type connRestore struct {
 // the server, leaves a phantom spinner, and its `esc` hijacks the next keypress).
 func (a *App) startConnect() int {
 	a.stop()
-	a.preConn = &connRestore{connName: a.connName, safe: a.safe, pending: a.pending, viewIdx: a.viewIdx}
+	a.preConn = &connRestore{connName: a.connName, safe: a.safe, pending: a.pending, viewIdx: a.p().viewIdx}
 	a.gen++
 	a.connecting = true
 	return a.gen
@@ -207,7 +205,7 @@ func (a *App) restoreConn() {
 	if a.preConn == nil {
 		return
 	}
-	a.connName, a.safe, a.pending, a.viewIdx = a.preConn.connName, a.preConn.safe, a.preConn.pending, a.preConn.viewIdx
+	a.connName, a.safe, a.pending, a.p().viewIdx = a.preConn.connName, a.preConn.safe, a.preConn.pending, a.preConn.viewIdx
 	a.preConn = nil
 }
 
@@ -246,14 +244,25 @@ func (a App) isConnecting() bool { return a.connCmd != "" || (a.connecting && a.
 // any previous op, and returns a cancellable context for the op's command. The
 // stored cancel func is what Esc calls (see stop). Callers must set a.activity
 // via this before dispatching a cancellable tea.Cmd.
-func (a *App) begin(label string) context.Context {
+// paneID is which pane the op's result belongs to; see App.opPane. Pass
+// noPane for a session-level op (a databases fetch) whose result isn't a view.
+func (a *App) begin(label string, paneID int) context.Context {
 	a.stop()
 	a.activity = label
 	a.gen++ // supersede any prior op: its late result will no longer match a.gen
+	a.opPane = paneID
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	return ctx
 }
+
+// noPane marks an op whose result isn't destined for a pane.
+const noPane = 0
+
+// opTarget resolves the pane the in-flight op was dispatched for. False once
+// that pane has been closed — its result is then dropped rather than applied to
+// whichever pane happens to be focused now.
+func (a *App) opTarget() (*pane, bool) { return a.paneByID(a.opPane) }
 
 // stale reports whether a gen-stamped result message belongs to a superseded op
 // and should be ignored. Non-op messages carry gen 0 and are never stale.
@@ -272,6 +281,17 @@ func (a *App) stop() {
 var spinnerFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Copy-on-write the panes slice so &a.panes[i] (p()/g()) points into an array
+	// this model owns, and a handler's mutation can't reach back into the App we
+	// were called with. Not strictly required — bubbletea discards that model, so
+	// a leak into it is unobservable — but it makes the p() accessor's contract
+	// true rather than merely-true-in-practice, for one small alloc per message.
+	//
+	// Shallow by design: pane interiors (grid rows, filter maps, views) are still
+	// shared with the previous model. Deep-copying those is pane.clone's job, and
+	// only when splitting.
+	a.panes = append([]pane(nil), a.panes...)
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.w, a.h = msg.Width, msg.Height
@@ -292,7 +312,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.stop()
-		a.grid.loading = false
+		// Clear the loading flag on whichever pane's op failed. A gen-0 errMsg
+		// (an editor spawn failure) has no op, so opPane still names the last
+		// one — harmless, since it isn't loading.
+		if p, ok := a.opTarget(); ok {
+			p.grid.loading = false
+		}
 		// A failed user-authored statement (a free-form s query or a quick-path
 		// cell edit) carries a seed: show the full, untruncated error with the
 		// statement in a modal, so it can be edited and re-run (e/Enter) rather
@@ -343,8 +368,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sidebar.setTables(msg.tables)
 		// The jumplist is session-wide (spans databases) — do NOT reset it. Clear
 		// only the live table state; a jump restores it via pendingView below.
-		a.currentTable = db.Table{}
-		a.basePreds, a.baseNote = nil, ""
+		a.p().currentTable = db.Table{}
+		a.p().basePreds, a.p().baseNote = nil, ""
 		a.layout()
 		if a.pendingView != nil { // a cross-database jump: load that view, not the list
 			v := *a.pendingView
@@ -379,25 +404,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.stale(msg.gen) { // a superseded load landed late — don't apply it
 			return a, nil
 		}
-		a.stop()
-		a.grid.setResult(msg.rs)
-		a.grid.hasMore = msg.full
-		a.grid.loading = false
+		a.stop() // must precede the pane check: this op owns the slot (cf. stale)
+		p, ok := a.opTarget()
+		if !ok { // its pane was closed mid-load — nothing to apply the rows to
+			return a, nil
+		}
+		p.grid.setResult(msg.rs)
+		p.grid.hasMore = msg.full
+		p.grid.loading = false
 		// Header marker: explicit J/K sort, else the default PK-descending order.
-		sc, sa := a.sortCol, a.sortAsc
+		sc, sa := p.sortCol, p.sortAsc
 		if sc == "" && len(msg.rs.PK) > 0 {
 			sc, sa = msg.rs.PK[0], false
 		}
-		a.grid.setSort(sc, sa)
+		p.grid.setSort(sc, sa)
 		switch {
 		case a.pendingPos != nil: // a jump reload: land where we left off
-			a.grid.setPos(*a.pendingPos)
+			p.grid.setPos(*a.pendingPos)
 			a.pendingPos, a.resetGrid = nil, false
 		case a.resetGrid:
-			a.grid.reset()
+			p.grid.reset()
 			a.resetGrid = false
 		}
-		a.adHoc = false // a table load leaves any prior s/S result behind
+		p.adHoc = false // a table load leaves any prior s/S result behind
 		a.screen = screenBrowse
 		a.layout()
 		// The table itself is a header segment now (tableSegment), so a fresh load
@@ -415,7 +444,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.stop()
-		a.grid.appendRows(msg.rows, msg.full)
+		p, ok := a.opTarget()
+		if !ok {
+			return a, nil
+		}
+		p.grid.appendRows(msg.rows, msg.full)
 		return a, nil
 
 	case editDoneMsg:
@@ -423,13 +456,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.stop()
+		p, ok := a.opTarget()
+		if !ok {
+			return a, nil
+		}
 		// A keyed edit must touch exactly one row; anything else is loud (§8).
 		if msg.affected == 1 {
 			if msg.null {
-				a.grid.applyEditNull(msg.rowIdx, msg.colIdx)
+				p.grid.applyEditNull(msg.rowIdx, msg.colIdx)
 				a.status = fmt.Sprintf("set %s = NULL", msg.col)
 			} else {
-				a.grid.applyEdit(msg.rowIdx, msg.colIdx, msg.val)
+				p.grid.applyEdit(msg.rowIdx, msg.colIdx, msg.val)
 				a.status = fmt.Sprintf("set %s = '%s'", msg.col, msg.val)
 			}
 		} else {
@@ -461,7 +498,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// scratch markers so a re-run still continues the edit loop and records.
 		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch}
 		if isReadSQL(msg.sql) && !(a.safe && isMultiStatement(msg.sql)) {
-			ctx := a.begin("running query")
+			ctx := a.begin("running query", a.p().id)
 			a.status = "running query…"
 			return a, runQueryCmd(ctx, a.gen, a.engine, msg.sql, seed)
 		}
@@ -470,7 +507,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.askMutation(sql, "running",
 				func(ctx context.Context, gen int) tea.Cmd { return execRawCmd(ctx, gen, a.engine, sql, seed) })
 		}
-		ctx := a.begin("running")
+		ctx := a.begin("running", a.p().id)
 		a.status = "running…"
 		return a, execRawCmd(ctx, a.gen, a.engine, sql, seed)
 
@@ -484,14 +521,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.stop()
-		a.grid.setResult(msg.rs)
-		a.grid.setSort("", false)
-		a.grid.clearFilters()
-		a.grid.hasMore = false
-		a.grid.loading = false
-		a.grid.reset()
-		a.adHoc = true
-		a.adHocQuery = msg.sql
+		p, ok := a.opTarget()
+		if !ok {
+			return a, nil
+		}
+		p.grid.setResult(msg.rs)
+		p.grid.setSort("", false)
+		p.grid.clearFilters()
+		p.grid.hasMore = false
+		p.grid.loading = false
+		p.grid.reset()
+		p.adHoc = true
+		p.adHocQuery = msg.sql
 		a.screen = screenBrowse
 		a.layout()
 		a.recordQueryCount(msg.sql, len(msg.rs.Rows), true)
@@ -503,9 +544,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.recordQueryCount(msg.sql, int(msg.affected), false)
+		p, ok := a.opTarget()
 		// No table to reload (e.g. a write scratch from the table list before any
-		// table was opened) → just report the result and stay put.
-		if a.currentTable.Name == "" {
+		// table was opened, or the pane went away) → just report and stay put.
+		if !ok || p.currentTable.Name == "" {
 			a.stop()
 			a.status = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
 			return a, nil
@@ -513,7 +555,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload the current view so the change is reflected; the affected count
 		// survives the reload via postExecStatus.
 		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
-		ctx := a.begin("reloading")
+		ctx := a.begin("reloading", a.p().id)
 		return a, a.loadCurrentCmd(ctx)
 
 	case tea.KeyMsg:
@@ -532,7 +574,7 @@ func (a *App) layout() {
 		avail = 1
 	}
 	// Grid and the two lists each own the whole body (separate full-screen pages).
-	a.grid.setSize(avail, bodyH)
+	a.g().setSize(avail, bodyH)
 	a.sidebar.w, a.sidebar.h = avail, bodyH
 	a.dbs.w, a.dbs.h = avail, bodyH
 	a.connList.w, a.connList.h = avail, bodyH
@@ -562,7 +604,10 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.String() == "y" {
 			run, label := a.confirm.run, a.confirm.label
 			a.confirm.active = false
-			ctx := a.begin(label)
+			// The focused pane is the one that armed this: the overlay is modal and
+			// captures every key (including the split leader), so focus cannot have
+			// moved between ask and y.
+			ctx := a.begin(label, a.p().id)
 			a.status = label + "…"
 			return a, run(ctx, a.gen)
 		}
@@ -673,16 +718,16 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	// While editing a cell (§8 quick path), keys go to the edit overlay.
-	if a.screen == screenBrowse && a.grid.editing {
+	if a.screen == screenBrowse && a.g().editing {
 		return a.handleEditKey(msg)
 	}
 	// While editing a column filter, keys go to the filter input.
-	if a.screen == screenBrowse && a.grid.filtering >= 0 {
+	if a.screen == screenBrowse && a.g().filtering >= 0 {
 		return a.handleFilterKey(msg)
 	}
 	// Visual row-selection mode (V) is modal: only its movement/yank/exit keys
 	// apply, so screen switches and other commands stay inert until it's left.
-	if a.screen == screenBrowse && a.grid.visualMode {
+	if a.screen == screenBrowse && a.g().visualMode {
 		return a.handleVisualKey(msg)
 	}
 	// The overlay commands below work from ANY screen (grid, table list, database
@@ -696,11 +741,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.help.open(a.w-leftPad, a.h-1)
 			return a, nil
 		case "`": // the jumplist picker (inspect history, jump anywhere)
-			if len(a.views) == 0 {
+			if len(a.p().views) == 0 {
 				a.status = "no navigation history yet"
 				return a, nil
 			}
-			a.jumps.open(a.jumpEntries(), a.viewIdx, a.w-leftPad, a.h-1)
+			a.jumps.open(a.jumpEntries(), a.p().viewIdx, a.w-leftPad, a.h-1)
 			return a, nil
 		case "b": // the query-history buffer for this connection, most-recent first
 			hist := a.history[a.connName]
@@ -723,7 +768,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// nothing is running.
 	if msg.Type == tea.KeyEsc && a.cancel != nil {
 		a.stop()
-		a.grid.loading = false
+		a.g().loading = false
 		a.status = "cancelled"
 		return a, nil
 	}
@@ -758,7 +803,7 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a App) typing() bool {
 	switch a.screen {
 	case screenBrowse:
-		return a.grid.editing || a.grid.filtering >= 0
+		return a.g().editing || a.g().filtering >= 0
 	case screenPicker:
 		return a.connList.filtering
 	case screenTables:
@@ -802,7 +847,7 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 
 // openDatabases fetches the connection's databases and shows the picker.
 func (a App) openDatabases() (tea.Model, tea.Cmd) {
-	ctx := a.begin("loading databases")
+	ctx := a.begin("loading databases", noPane)
 	a.status = "loading databases…"
 	return a, databasesCmd(ctx, a.gen, a.engine)
 }
@@ -1024,11 +1069,11 @@ func (a App) currentView() viewState {
 	return viewState{
 		conn:      a.connName,
 		db:        a.dbName,
-		table:     a.currentTable,
-		basePreds: a.basePreds,
-		baseNote:  a.baseNote,
-		sortCol:   a.sortCol,
-		sortAsc:   a.sortAsc,
+		table:     a.p().currentTable,
+		basePreds: a.p().basePreds,
+		baseNote:  a.p().baseNote,
+		sortCol:   a.p().sortCol,
+		sortAsc:   a.p().sortAsc,
 	}
 }
 
@@ -1058,23 +1103,23 @@ func (v viewState) label() string {
 // capture. While an s query is on screen (adHoc) the grid holds query rows, not
 // the table's, so the table's cached snapshot/position is preserved as-is.
 func (a *App) syncCurrent() {
-	if a.currentTable.Name == "" {
+	if a.p().currentTable.Name == "" {
 		return
 	}
-	if a.viewIdx < 0 || a.viewIdx >= len(a.views) {
+	if a.p().viewIdx < 0 || a.p().viewIdx >= len(a.p().views) {
 		return
 	}
-	prev := a.views[a.viewIdx]
+	prev := a.p().views[a.p().viewIdx]
 	v := a.currentView()
-	if a.adHoc {
+	if a.p().adHoc {
 		v.pos, v.snap = prev.pos, prev.snap
 	} else {
-		v.pos = a.grid.pos()
-		v.snap = a.grid.snapshot()
+		v.pos = a.g().pos()
+		v.snap = a.g().snapshot()
 	}
 	a.viewSeq++
 	v.seq = a.viewSeq
-	a.views[a.viewIdx] = v
+	a.p().views[a.p().viewIdx] = v
 	a.evictSnaps()
 }
 
@@ -1086,19 +1131,29 @@ const maxCachedViews = 16
 // evictSnaps drops the row cache from all but the maxCachedViews most recently
 // touched views (by seq). The metadata (table, preds, sort, pos) is kept, so an
 // evicted view still reloads and repositions — just not instantly.
+//
+// The bound is GLOBAL across every pane's jumplist, not per-pane: it exists to
+// cap memory (each snapshot holds up to gridLimit() rows), and per-pane budgets
+// would multiply that by the pane count. Note two panes cloned from one view
+// share a *gridSnapshot, so it's counted once per referencing entry and nil-ing
+// one doesn't free it — that only errs toward evicting more, which is safe.
 func (a *App) evictSnaps() {
-	cached := make([]int, 0, len(a.views))
-	for i := range a.views {
-		if a.views[i].snap != nil {
-			cached = append(cached, i)
+	type ref struct{ pane, view int }
+	cached := []ref{}
+	for pi := range a.panes {
+		for vi := range a.panes[pi].views {
+			if a.panes[pi].views[vi].snap != nil {
+				cached = append(cached, ref{pi, vi})
+			}
 		}
 	}
 	if len(cached) <= maxCachedViews {
 		return
 	}
-	sort.Slice(cached, func(i, j int) bool { return a.views[cached[i]].seq < a.views[cached[j]].seq })
-	for _, i := range cached[:len(cached)-maxCachedViews] {
-		a.views[i].snap = nil
+	seq := func(r ref) int { return a.panes[r.pane].views[r.view].seq }
+	sort.Slice(cached, func(i, j int) bool { return seq(cached[i]) < seq(cached[j]) })
+	for _, r := range cached[:len(cached)-maxCachedViews] {
+		a.panes[r.pane].views[r.view].snap = nil
 	}
 }
 
@@ -1107,19 +1162,19 @@ func (a App) navigate(v viewState, label string) (tea.Model, tea.Cmd) {
 	a.syncCurrent()
 	// Truncate the forward tail and append; the 3-index slice forces a fresh
 	// backing array so the prior (value-copied) model isn't mutated.
-	a.views = append(a.views[:a.viewIdx+1:a.viewIdx+1], v)
-	if len(a.views) > 100 { // keep the list bounded
-		a.views = a.views[len(a.views)-100:]
+	a.p().views = append(a.p().views[:a.p().viewIdx+1:a.p().viewIdx+1], v)
+	if len(a.p().views) > 100 { // keep the list bounded
+		a.p().views = a.p().views[len(a.p().views)-100:]
 	}
-	a.viewIdx = len(a.views) - 1
+	a.p().viewIdx = len(a.p().views) - 1
 	return a.loadView(v, label)
 }
 
 // jumpBy steps the jumplist: d=-1 is Ctrl-O (back), d=+1 is Ctrl-I (forward).
 func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
 	a.syncCurrent()
-	ni := a.viewIdx + d
-	if ni < 0 || ni >= len(a.views) {
+	ni := a.p().viewIdx + d
+	if ni < 0 || ni >= len(a.p().views) {
 		where := "back"
 		if d > 0 {
 			where = "forward"
@@ -1136,7 +1191,7 @@ func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
 // pointer here (not in the caller) so a cancelled jump leaves it where it was.
 // pendingView makes connectedMsg load the view rather than the table list.
 func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
-	v := a.views[idx]
+	v := a.p().views[idx]
 	if v.conn != "" && v.conn != a.connName { // cross-connection jump
 		c, ok := a.findConn(v.conn)
 		if !ok {
@@ -1148,7 +1203,7 @@ func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 			dsn = db.WithDatabase(c.URL, v.db)
 		}
 		gen := a.startConnect() // snapshots viewIdx before the move below
-		a.viewIdx = idx
+		a.p().viewIdx = idx
 		a.connName, a.safe, a.pending = c.Name, c.Safe, c
 		vv := v
 		a.pendingView = &vv
@@ -1161,7 +1216,7 @@ func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 	}
 	if v.db != "" && v.db != a.dbName { // same connection, different database
 		gen := a.startConnect()
-		a.viewIdx = idx
+		a.p().viewIdx = idx
 		dsn := db.WithDatabase(a.pending.URL, v.db)
 		a.pending.URL = dsn
 		vv := v
@@ -1169,7 +1224,7 @@ func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 		a.status = "connecting to " + v.db + "…"
 		return a, openEngineCmd(gen, config.Conn{Name: a.connName}, dsn, false)
 	}
-	a.viewIdx = idx
+	a.p().viewIdx = idx
 	return a.loadView(v, "loading "+v.table.Name)
 }
 
@@ -1186,8 +1241,8 @@ func (a App) findConn(name string) (config.Conn, bool) {
 // jumpEntries is the picker's label list, current view synced in first.
 func (a App) jumpEntries() []string {
 	a.syncCurrent()
-	out := make([]string, len(a.views))
-	for i, v := range a.views {
+	out := make([]string, len(a.p().views))
+	for i, v := range a.p().views {
 		out[i] = v.label()
 	}
 	return out
@@ -1196,7 +1251,7 @@ func (a App) jumpEntries() []string {
 // jumpTo loads the view at index i (the picker's Enter). Current/out-of-range → no-op.
 func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
 	a.syncCurrent()
-	if i < 0 || i >= len(a.views) || i == a.viewIdx {
+	if i < 0 || i >= len(a.p().views) || i == a.p().viewIdx {
 		return a, nil
 	}
 	return a.goToView(i)
@@ -1207,14 +1262,14 @@ func (a App) jumpTo(i int) (tea.Model, tea.Cmd) {
 // looks stale. Otherwise it reloads the table and repositions to v.pos once the
 // rows arrive. Shared by selectTable, follow, and the jumplist.
 func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
-	a.currentTable = v.table
-	a.basePreds = v.basePreds
-	a.baseNote = v.baseNote
-	a.sortCol, a.sortAsc = v.sortCol, v.sortAsc
+	a.p().currentTable = v.table
+	a.p().basePreds = v.basePreds
+	a.p().baseNote = v.baseNote
+	a.p().sortCol, a.p().sortAsc = v.sortCol, v.sortAsc
 	if v.snap != nil { // instant restore from the in-memory cache
 		a.stop()
-		a.grid.restore(v.snap)
-		a.adHoc = false
+		a.g().restore(v.snap)
+		a.p().adHoc = false
 		a.pendingPos, a.resetGrid = nil, false
 		a.screen = screenBrowse
 		a.layout()
@@ -1222,10 +1277,10 @@ func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
 		return a, nil
 	}
 	a.resetGrid = true
-	a.grid.clearFilters()
+	a.g().clearFilters()
 	pos := v.pos
 	a.pendingPos = &pos // reposition to where we left, once the rows load
-	ctx := a.begin(label)
+	ctx := a.begin(label, a.p().id)
 	a.status = label + "…"
 	return a, a.loadViewCmd(ctx, pos)
 }
@@ -1235,26 +1290,26 @@ func (a App) loadView(v viewState, label string) (App, tea.Cmd) {
 // row is only there if the window reaches it).
 func (a App) loadViewCmd(ctx context.Context, pos gridPos) tea.Cmd {
 	limit := a.gridLimit()
-	if need := pos.cursorR + a.grid.visibleRows() + 1; need > limit {
+	if need := pos.cursorR + a.g().visibleRows() + 1; need > limit {
 		limit = need
 	}
-	return loadCmd(ctx, a.gen, a.engine, a.currentTable, limit, a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
+	return loadCmd(ctx, a.gen, a.engine, a.p().currentTable, limit, a.p().sortCol, a.p().sortAsc, a.p().basePreds, a.g().filterSpecs())
 }
 
 // follow navigates the foreign key on the cursor's column to the row it points
 // at. Resolution is in-memory (the FKs were fetched at load, on the grid) — the
 // only DB work is loadView's reload, so no engine call happens in Update.
 func (a App) follow() (tea.Model, tea.Cmd) {
-	if a.adHoc {
+	if a.p().adHoc {
 		a.status = "follow unavailable on a query result"
 		return a, nil
 	}
-	col, ok := a.grid.currentColName()
-	row, ok2 := a.grid.currentRowMap()
+	col, ok := a.g().currentColName()
+	row, ok2 := a.g().currentRowMap()
 	if !ok || !ok2 {
 		return a, nil
 	}
-	fk, found := a.grid.fkFor(col)
+	fk, found := a.g().fkFor(col)
 	if !found {
 		a.status = "no foreign key on " + col
 		return a, nil
@@ -1302,37 +1357,37 @@ func (a App) askMutation(sql, label string, run func(context.Context, int) tea.C
 func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
-		if req, ok := a.grid.commitEdit(); ok {
+		if req, ok := a.g().commitEdit(); ok {
 			if a.safe {
 				return a.askMutation(previewEditSQL(a.engine, req), "saving",
 					func(ctx context.Context, gen int) tea.Cmd { return execEditCmd(ctx, gen, a.engine, req) })
 			}
-			ctx := a.begin("saving")
+			ctx := a.begin("saving", a.p().id)
 			a.status = "saving…"
 			return a, execEditCmd(ctx, a.gen, a.engine, req)
 		}
 		a.status = ""
 	case tea.KeyEsc:
-		a.grid.cancelEdit()
+		a.g().cancelEdit()
 		a.status = ""
 	case tea.KeyBackspace:
-		a.grid.editBackspace()
+		a.g().editBackspace()
 	case tea.KeyDelete:
-		a.grid.editDelete()
+		a.g().editDelete()
 	case tea.KeyLeft:
-		a.grid.editLeft()
+		a.g().editLeft()
 	case tea.KeyRight:
-		a.grid.editRight()
+		a.g().editRight()
 	case tea.KeyHome, tea.KeyCtrlA:
-		a.grid.editHome()
+		a.g().editHome()
 	case tea.KeyEnd, tea.KeyCtrlE:
-		a.grid.editEnd()
+		a.g().editEnd()
 	case tea.KeyCtrlW:
-		a.grid.editDeleteWord()
+		a.g().editDeleteWord()
 	case tea.KeySpace:
-		a.grid.editInput(" ")
+		a.g().editInput(" ")
 	case tea.KeyRunes:
-		a.grid.editInput(string(msg.Runes))
+		a.g().editInput(string(msg.Runes))
 	}
 	return a, nil
 }
@@ -1341,35 +1396,35 @@ func (a App) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a App) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
-		a.grid.commitFilter()
-		ctx := a.begin("filtering")
+		a.g().commitFilter()
+		ctx := a.begin("filtering", a.p().id)
 		return a, a.loadCurrentCmd(ctx)
 	case tea.KeyEsc:
-		a.grid.clearFilter()
-		ctx := a.begin("loading")
+		a.g().clearFilter()
+		ctx := a.begin("loading", a.p().id)
 		return a, a.loadCurrentCmd(ctx)
 	case tea.KeyBackspace:
-		a.grid.filterBackspace()
+		a.g().filterBackspace()
 	case tea.KeyDelete:
-		a.grid.filterDelete()
+		a.g().filterDelete()
 	case tea.KeyCtrlW:
-		a.grid.filterDeleteWord()
+		a.g().filterDeleteWord()
 	case tea.KeyLeft:
-		a.grid.filterLeft()
+		a.g().filterLeft()
 	case tea.KeyRight:
-		a.grid.filterRight()
+		a.g().filterRight()
 	case tea.KeyHome, tea.KeyCtrlA:
-		a.grid.filterHome()
+		a.g().filterHome()
 	case tea.KeyEnd, tea.KeyCtrlE:
-		a.grid.filterEnd()
+		a.g().filterEnd()
 	case tea.KeyDown:
-		a.grid.moveRow(1)
+		a.g().moveRow(1)
 	case tea.KeyUp:
-		a.grid.moveRow(-1)
+		a.g().moveRow(-1)
 	case tea.KeySpace:
-		a.grid.filterInput(" ")
+		a.g().filterInput(" ")
 	case tea.KeyRunes:
-		a.grid.filterInput(string(msg.Runes))
+		a.g().filterInput(string(msg.Runes))
 	}
 	return a, nil
 }
@@ -1377,117 +1432,117 @@ func (a App) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
-		a.grid.moveRow(1)
+		a.g().moveRow(1)
 	case "k", "up":
-		a.grid.moveRow(-1)
+		a.g().moveRow(-1)
 	case "h", "left":
-		a.grid.moveCol(-1)
+		a.g().moveCol(-1)
 	case "l", "right":
-		a.grid.moveCol(1)
+		a.g().moveCol(1)
 	case "g":
-		a.grid.top()
+		a.g().top()
 	case "G":
-		a.grid.bottom()
+		a.g().bottom()
 	case "0":
-		a.grid.firstCol()
+		a.g().firstCol()
 	case "$":
-		a.grid.lastCol()
+		a.g().lastCol()
 	case "/":
-		if a.adHoc {
+		if a.p().adHoc {
 			a.status = "filter unavailable on a query result"
 			return a, nil
 		}
-		a.grid.startFilter()
+		a.g().startFilter()
 	case "esc":
-		if a.grid.clearCurrentFilter() {
-			ctx := a.begin("loading")
+		if a.g().clearCurrentFilter() {
+			ctx := a.begin("loading", a.p().id)
 			return a, a.loadCurrentCmd(ctx)
 		}
 	case "e":
-		if !a.grid.editable() {
+		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
-		} else if a.grid.startEdit() {
-			a.status = "editing " + a.grid.cols[a.grid.editC].name + " — Enter saves, Esc cancels"
+		} else if a.g().startEdit() {
+			a.status = "editing " + a.g().cols[a.g().editC].name + " — Enter saves, Esc cancels"
 		}
 		return a, nil
 	case "E":
-		if !a.grid.editable() {
+		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
-		} else if col, val, keys, ok := a.grid.fullEditTarget(); ok {
-			return a, editorCmd(buildUpdateStmt(a.engine, a.grid.table, col, val, keys))
+		} else if col, val, keys, ok := a.g().fullEditTarget(); ok {
+			return a, editorCmd(buildUpdateStmt(a.engine, a.g().table, col, val, keys))
 		}
 		return a, nil
 	case "o":
-		if !a.grid.editable() {
+		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
 		} else {
-			ctx := a.begin("preparing insert")
+			ctx := a.begin("preparing insert", a.p().id)
 			a.status = "preparing insert…"
-			return a, prepareInsertCmd(ctx, a.gen, a.engine, a.currentTable)
+			return a, prepareInsertCmd(ctx, a.gen, a.engine, a.p().currentTable)
 		}
 		return a, nil
 	case "D":
-		if !a.grid.editable() {
+		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
-		} else if keys, ok := a.grid.rowKeys(); ok {
-			return a, editorCmd(buildDeleteStmt(a.engine, a.grid.table, keys))
+		} else if keys, ok := a.g().rowKeys(); ok {
+			return a, editorCmd(buildDeleteStmt(a.engine, a.g().table, keys))
 		}
 		return a, nil
 	case "p":
-		if !a.grid.editable() {
+		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
-		} else if vals, ok := a.grid.currentRowValues(); ok {
-			ctx := a.begin("preparing duplicate")
+		} else if vals, ok := a.g().currentRowValues(); ok {
+			ctx := a.begin("preparing duplicate", a.p().id)
 			a.status = "preparing duplicate…"
-			return a, prepareDuplicateCmd(ctx, a.gen, a.engine, a.currentTable, vals)
+			return a, prepareDuplicateCmd(ctx, a.gen, a.engine, a.p().currentTable, vals)
 		}
 		return a, nil
 	case "y":
-		if s, ok := a.grid.yankCell(); ok {
+		if s, ok := a.g().yankCell(); ok {
 			a.status = fmt.Sprintf("copied cell (%d chars)", len(s))
 			return a, yankCmd(s)
 		}
 	case "Y":
-		if s, ok := a.grid.currentRowJSON(); ok {
+		if s, ok := a.g().currentRowJSON(); ok {
 			a.status = "copied row as JSON"
 			return a, yankCmd(s)
 		}
 	case "V":
-		if len(a.grid.visible) > 0 {
-			a.grid.enterVisual()
+		if len(a.g().visible) > 0 {
+			a.g().enterVisual()
 			a.status = "visual row select — j/k extend, o swap end, y yank, Esc cancel"
 		}
 		return a, nil
 	case "enter":
 		// On an FK column, follow the reference — inspecting a foreign key in
 		// a full-cell viewer is never what you want. Otherwise open the cell.
-		if col, ok := a.grid.currentColName(); ok && !a.adHoc {
-			if _, isFK := a.grid.fkFor(col); isFK {
+		if col, ok := a.g().currentColName(); ok && !a.p().adHoc {
+			if _, isFK := a.g().fkFor(col); isFK {
 				return a.follow()
 			}
 		}
-		if v, col, ok := a.grid.currentCell(); ok {
-			a.cell.open(col, a.grid.cursorR, v, a.grid.w, a.grid.h)
+		if v, col, ok := a.g().currentCell(); ok {
+			a.cell.open(col, a.g().cursorR, v, a.g().w, a.g().h)
 		}
 		return a, nil // opening a modal must not fall through to maybeLoadMore
 	case "J":
-		if a.adHoc {
+		if a.p().adHoc {
 			a.status = "sort unavailable on a query result"
 			return a, nil
 		}
-		if name, ok := a.grid.currentColName(); ok {
-			a.sortCol, a.sortAsc = name, true
-			ctx := a.begin("sorting")
+		if name, ok := a.g().currentColName(); ok {
+			a.p().sortCol, a.p().sortAsc = name, true
+			ctx := a.begin("sorting", a.p().id)
 			return a, a.loadCurrentCmd(ctx)
 		}
 	case "K":
-		if a.adHoc {
+		if a.p().adHoc {
 			a.status = "sort unavailable on a query result"
 			return a, nil
 		}
-		if name, ok := a.grid.currentColName(); ok {
-			a.sortCol, a.sortAsc = name, false
-			ctx := a.begin("sorting")
+		if name, ok := a.g().currentColName(); ok {
+			a.p().sortCol, a.p().sortAsc = name, false
+			ctx := a.begin("sorting", a.p().id)
 			return a, a.loadCurrentCmd(ctx)
 		}
 	case "s":
@@ -1508,25 +1563,25 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a App) handleVisualKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
-		a.grid.moveRow(1)
+		a.g().moveRow(1)
 	case "k", "up":
-		a.grid.moveRow(-1)
+		a.g().moveRow(-1)
 	case "g":
-		a.grid.top()
+		a.g().top()
 	case "G":
-		a.grid.bottom()
+		a.g().bottom()
 	case "o":
-		a.grid.visualSwap()
+		a.g().visualSwap()
 	case "y":
-		s, n, ok := a.grid.yankSelectionJSON()
-		a.grid.exitVisual()
+		s, n, ok := a.g().yankSelectionJSON()
+		a.g().exitVisual()
 		if ok {
 			a.status = fmt.Sprintf("%d rows copied to clipboard", n)
 			return a, yankCmd(s)
 		}
 		return a, nil
 	case "esc":
-		a.grid.exitVisual()
+		a.g().exitVisual()
 		a.status = "visual select cancelled"
 		return a, nil
 	default:
@@ -1542,25 +1597,25 @@ func (a App) handleVisualKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // begin() would cancel that op, so a cursor move during a sort/filter/reload
 // could silently supersede it and append the next window onto the stale rows.
 func (a *App) maybeLoadMore() tea.Cmd {
-	if a.activity != "" || !a.grid.wantMore() {
+	if a.activity != "" || !a.g().wantMore() {
 		return nil
 	}
-	a.grid.loading = true
-	anchor, _ := a.grid.lastRowMap() // keyset cursor; nil falls back to OFFSET
-	ctx := a.begin("loading more")
-	return loadMoreCmd(ctx, a.gen, a.engine, a.currentTable, a.sortCol, a.sortAsc,
-		a.basePreds, a.grid.filterSpecs(), anchor, len(a.grid.rows), a.gridLimit())
+	a.g().loading = true
+	anchor, _ := a.g().lastRowMap() // keyset cursor; nil falls back to OFFSET
+	ctx := a.begin("loading more", a.p().id)
+	return loadMoreCmd(ctx, a.gen, a.engine, a.p().currentTable, a.p().sortCol, a.p().sortAsc,
+		a.p().basePreds, a.g().filterSpecs(), anchor, len(a.g().rows), a.gridLimit())
 }
 
 // scratchSeed is the prefill for s: this table's last scratch query if one was
 // run, else the SELECT template. remember ties the eventual submit back to the
 // table so the loop continues.
 func (a App) scratchSeed() editorSeed {
-	sql := selectTemplate(a.engine, a.currentTable.Ref())
-	if last, ok := a.lastQuery[a.queryKey(a.currentTable)]; ok {
+	sql := selectTemplate(a.engine, a.p().currentTable.Ref())
+	if last, ok := a.lastQuery[a.queryKey(a.p().currentTable)]; ok {
 		sql = last
 	}
-	return editorSeed{sql: sql, remember: a.currentTable}
+	return editorSeed{sql: sql, remember: a.p().currentTable}
 }
 
 // blankScratchSeed is the prefill for s from the table list: an empty scratch
@@ -1627,7 +1682,7 @@ func (a *App) recordQueryCount(sql string, count int, read bool) {
 func (a App) runHist(e histEntry) (tea.Model, tea.Cmd) {
 	if isReadSQL(e.sql) && !(a.safe && isMultiStatement(e.sql)) {
 		a.recordQuery(e.sql) // bump recency; the count refills on the result
-		ctx := a.begin("running query")
+		ctx := a.begin("running query", a.p().id)
 		a.status = "running query…"
 		return a, runQueryCmd(ctx, a.gen, a.engine, e.sql, a.histSeed(e.sql))
 	}
@@ -1640,7 +1695,7 @@ func (a App) histSeed(sql string) editorSeed {
 	if !strings.HasSuffix(sql, "\n") {
 		sql += "\n"
 	}
-	return editorSeed{sql: sql, remember: a.currentTable}
+	return editorSeed{sql: sql, remember: a.p().currentTable}
 }
 
 // queryKey scopes a remembered scratch query to the current connection and
@@ -1655,25 +1710,25 @@ func (a App) queryKey(t db.Table) string {
 // loadCurrentCmd (re)loads the current table with the active sort, any followed-FK
 // base predicate, and the column filters.
 func (a App) loadCurrentCmd(ctx context.Context) tea.Cmd {
-	return loadCmd(ctx, a.gen, a.engine, a.currentTable, a.gridLimit(), a.sortCol, a.sortAsc, a.basePreds, a.grid.filterSpecs())
+	return loadCmd(ctx, a.gen, a.engine, a.p().currentTable, a.gridLimit(), a.p().sortCol, a.p().sortAsc, a.p().basePreds, a.g().filterSpecs())
 }
 
 // reloadView re-runs the current view (`r`): a table reload keeps the sort,
 // followed-FK predicate, column filters, and cursor; an adHoc result re-runs its
 // query. A no-op when there's nothing loaded yet.
 func (a App) reloadView() (tea.Model, tea.Cmd) {
-	if a.adHoc {
-		if a.adHocQuery == "" {
+	if a.p().adHoc {
+		if a.p().adHocQuery == "" {
 			return a, nil
 		}
-		ctx := a.begin("reloading")
+		ctx := a.begin("reloading", a.p().id)
 		a.status = "reloading…"
-		return a, runQueryCmd(ctx, a.gen, a.engine, a.adHocQuery, editorSeed{sql: a.adHocQuery})
+		return a, runQueryCmd(ctx, a.gen, a.engine, a.p().adHocQuery, editorSeed{sql: a.p().adHocQuery})
 	}
-	if a.currentTable.Name == "" {
+	if a.p().currentTable.Name == "" {
 		return a, nil
 	}
-	ctx := a.begin("reloading")
+	ctx := a.begin("reloading", a.p().id)
 	a.status = "reloading…"
 	return a, a.loadCurrentCmd(ctx)
 }
@@ -1743,20 +1798,20 @@ func (a App) browseView() string {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
 		return a.statusLine() + "\n" + body
 	}
-	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.grid.View())
+	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.g().View())
 	return a.statusLine() + "\n" + body
 }
 
 // tableSegment is the header's table crumb: the current table, suffixed with the
 // followed-FK predicate when there is one. Empty before anything is opened.
 func (a App) tableSegment() string {
-	if a.currentTable.Name == "" {
+	if a.p().currentTable.Name == "" {
 		return ""
 	}
-	if a.baseNote != "" { // a followed-FK view: show the predicate
-		return a.currentTable.Name + " · " + a.baseNote
+	if a.p().baseNote != "" { // a followed-FK view: show the predicate
+		return a.p().currentTable.Name + " · " + a.p().baseNote
 	}
-	return a.currentTable.Name
+	return a.p().currentTable.Name
 }
 
 // statusLine renders "connName > dbName > table > message". The table segment is
@@ -1798,8 +1853,8 @@ func (a App) statusLine() string {
 		// spinner + label + a hint that Esc kills it.
 		frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
 		right = activityStyle.Render(frame + " " + a.activity + " · esc ")
-	case a.screen == screenBrowse && len(a.grid.visible) > 0:
-		row, loaded, more := a.grid.posSummary()
+	case a.screen == screenBrowse && len(a.g().visible) > 0:
+		row, loaded, more := a.g().posSummary()
 		s := fmt.Sprintf("%d/%d", row, loaded)
 		if more {
 			s += "↓"

@@ -39,8 +39,8 @@ func TestJumpRestoresPosition(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	if app.grid.cursorR != 2 || app.grid.cursorC != 2 {
-		t.Fatalf("setup: cursor should be at 2,2, got %d,%d", app.grid.cursorR, app.grid.cursorC)
+	if app.g().cursorR != 2 || app.g().cursorC != 2 {
+		t.Fatalf("setup: cursor should be at 2,2, got %d,%d", app.g().cursorR, app.g().cursorC)
 	}
 
 	// Navigate away to u, then Ctrl-O back to t.
@@ -51,15 +51,15 @@ func TestJumpRestoresPosition(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("returning to a cached view should not reload")
 	}
-	if app.currentTable.Name != "t" {
-		t.Fatalf("Ctrl-O should land on t, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "t" {
+		t.Fatalf("Ctrl-O should land on t, got %q", app.p().currentTable.Name)
 	}
-	if app.grid.cursorR != 2 || app.grid.cursorC != 2 {
-		t.Fatalf("jump should restore cursor to 2,2, got %d,%d", app.grid.cursorR, app.grid.cursorC)
+	if app.g().cursorR != 2 || app.g().cursorC != 2 {
+		t.Fatalf("jump should restore cursor to 2,2, got %d,%d", app.g().cursorR, app.g().cursorC)
 	}
 	// The rows came from the cache, not a fresh query.
-	if len(app.grid.rows) != 5 {
-		t.Fatalf("cached view should hold all 5 rows, got %d", len(app.grid.rows))
+	if len(app.g().rows) != 5 {
+		t.Fatalf("cached view should hold all 5 rows, got %d", len(app.g().rows))
 	}
 }
 
@@ -74,7 +74,7 @@ func TestJumpReloadsWhenEvicted(t *testing.T) {
 	app = update(t, m.(App), cmd())
 
 	// Simulate eviction: drop the row cache on t's entry, keeping its metadata.
-	app.views[0].snap = nil
+	app.p().views[0].snap = nil
 
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	app = m.(App)
@@ -85,8 +85,8 @@ func TestJumpReloadsWhenEvicted(t *testing.T) {
 		t.Fatalf("reload should carry the saved cursor row, got %+v", app.pendingPos)
 	}
 	app = update(t, app, cmd()) // rowsMsg
-	if app.currentTable.Name != "t" || app.grid.cursorR != 2 {
-		t.Fatalf("reload should reposition to row 2 on t, got %q row=%d", app.currentTable.Name, app.grid.cursorR)
+	if app.p().currentTable.Name != "t" || app.g().cursorR != 2 {
+		t.Fatalf("reload should reposition to row 2 on t, got %q row=%d", app.p().currentTable.Name, app.g().cursorR)
 	}
 	if app.pendingPos != nil {
 		t.Fatal("pendingPos should be consumed by the load")
@@ -105,8 +105,8 @@ func TestSnapshotCacheBounded(t *testing.T) {
 		app = update(t, m.(App), cmd())
 	}
 	live := 0
-	for i := range app.views {
-		if app.views[i].snap != nil {
+	for i := range app.p().views {
+		if app.p().views[i].snap != nil {
 			live++
 		}
 	}

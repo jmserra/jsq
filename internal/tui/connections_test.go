@@ -83,8 +83,8 @@ func TestMultiConnectionJump(t *testing.T) {
 		t.Fatal("A should be marked tunneled after connecting")
 	}
 	app = openFirstTable(t, app)
-	if app.currentTable.Name != "ta" {
-		t.Fatalf("expected ta, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "ta" {
+		t.Fatalf("expected ta, got %q", app.p().currentTable.Name)
 	}
 
 	// Backspace ×2 → picker, connect B, open tb.
@@ -94,13 +94,13 @@ func TestMultiConnectionJump(t *testing.T) {
 		t.Fatalf("expected to switch to B, got %q", app.connName)
 	}
 	app = openFirstTable(t, app)
-	if app.currentTable.Name != "tb" {
-		t.Fatalf("expected tb, got %q", app.currentTable.Name)
+	if app.p().currentTable.Name != "tb" {
+		t.Fatalf("expected tb, got %q", app.p().currentTable.Name)
 	}
 
 	// The jumplist spans both connections.
-	if len(app.views) != 2 || app.views[0].conn != "A" || app.views[1].conn != "B" {
-		t.Fatalf("jumplist should span A and B, got %+v", app.views)
+	if len(app.p().views) != 2 || app.p().views[0].conn != "A" || app.p().views[1].conn != "B" {
+		t.Fatalf("jumplist should span A and B, got %+v", app.p().views)
 	}
 
 	// Ctrl-O: cross-connection jump back to A/ta (reconnects A). A's view was
@@ -116,9 +116,9 @@ func TestMultiConnectionJump(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("a cached view should restore without a further rows fetch")
 	}
-	if app.connName != "A" || app.currentTable.Name != "ta" || app.screen != screenBrowse {
+	if app.connName != "A" || app.p().currentTable.Name != "ta" || app.screen != screenBrowse {
 		t.Fatalf("Ctrl-O should land on A/ta, got conn=%q table=%q screen=%d",
-			app.connName, app.currentTable.Name, app.screen)
+			app.connName, app.p().currentTable.Name, app.screen)
 	}
 }
 
@@ -200,9 +200,9 @@ func TestTableListBackspaceToPicker(t *testing.T) {
 	app := New([]config.Conn{connA, connB}, config.Conn{})
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 	app = connectPicker(t, app, 0) // lands on the table list, no table opened
-	if app.screen != screenTables || app.currentTable.Name != "" {
+	if app.screen != screenTables || app.p().currentTable.Name != "" {
 		t.Fatalf("expected the table list with nothing opened, screen=%d table=%q",
-			app.screen, app.currentTable.Name)
+			app.screen, app.p().currentTable.Name)
 	}
 
 	// Esc with no filter and no grid → stays on the table list (no double-Esc jump).

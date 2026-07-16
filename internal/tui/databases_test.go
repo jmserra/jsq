@@ -75,7 +75,7 @@ func TestCrossDatabaseJump(t *testing.T) {
 	// another database (as if we'd T-switched and browsed there).
 	m, cmd := app.selectTable(db.Table{Name: "t1"})
 	app = update(t, m.(App), cmd())
-	app.views = append(app.views, viewState{db: "elsewhere", table: db.Table{Name: "t2"}, sortAsc: true})
+	app.p().views = append(app.p().views, viewState{db: "elsewhere", table: db.Table{Name: "t2"}, sortAsc: true})
 
 	// Jump forward to it: a foreign database → must reconnect via pendingView.
 	m, cmd = app.jumpBy(1)
@@ -94,11 +94,11 @@ func TestCrossDatabaseJump(t *testing.T) {
 		t.Fatal("pendingView should be consumed")
 	}
 	app = update(t, app, cmd()) // rowsMsg
-	if app.screen != screenBrowse || app.currentTable.Name != "t2" {
-		t.Fatalf("cross-db jump should land on t2 in the grid, got screen=%d table=%q", app.screen, app.currentTable.Name)
+	if app.screen != screenBrowse || app.p().currentTable.Name != "t2" {
+		t.Fatalf("cross-db jump should land on t2 in the grid, got screen=%d table=%q", app.screen, app.p().currentTable.Name)
 	}
-	if len(app.views) != 2 {
-		t.Fatalf("jumplist should survive the switch, got %d entries", len(app.views))
+	if len(app.p().views) != 2 {
+		t.Fatalf("jumplist should survive the switch, got %d entries", len(app.p().views))
 	}
 }
 
