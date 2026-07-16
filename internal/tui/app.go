@@ -740,20 +740,12 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.jumpBy(-1)
 		case "ctrl+i", "tab": // jumplist forward — terminals send Ctrl-I as Tab
 			return a.jumpBy(1)
-		case "t", "backspace": // go to the table list
+		case "backspace": // step left to the table list
 			a.screen = screenTables
 			a.layout()
 			return a, nil
-		case "T": // go to the database list
+		case "d": // go to the database list
 			return a.openDatabases()
-		case "c": // open the connection picker
-			if len(a.conns) == 0 {
-				a.status = "no configured connections"
-				return a, nil
-			}
-			a.syncCurrent()
-			a.screen = screenPicker
-			return a, nil
 		}
 		return a.handleGridKey(msg)
 	}
@@ -956,14 +948,14 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 }
 
 // handleTablesKey drives the full-screen table list: navigation by default (`/`
-// filters), Enter opens the table (moving right to the grid), `T` jumps to the
+// filters), Enter opens the table (moving right to the grid), `d` jumps to the
 // database list, Backspace steps left to the connection picker, and Esc clears the
 // filter.
 func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if listKeys(&a.sidebar, msg) {
 		return a, nil
 	}
-	// Only Enter, Backspace, and the screen-specific runes (T, s) reach here.
+	// Only Enter, Backspace, and the screen-specific runes (d, s) reach here.
 	switch msg.Type {
 	case tea.KeyEnter:
 		a.sidebar.commitFilter() // an Enter from filter mode opens; leave nav mode
@@ -978,7 +970,7 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
-		case "T": // jump to the database list
+		case "d": // jump to the database list
 			return a.openDatabases()
 		case "s": // free-form scratch query for this connection/database
 			return a, editorCmd(a.blankScratchSeed())

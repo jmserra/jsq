@@ -39,6 +39,20 @@ func connectPicker(t *testing.T, app App, i int) App {
 	return update(t, app, cmd()) // connectedMsg
 }
 
+// backToPicker steps left from the grid to the connection picker: Backspace to
+// the table list, Backspace again to the picker.
+func backToPicker(t *testing.T, app App) App {
+	t.Helper()
+	for i := 0; i < 2; i++ {
+		m, _ := app.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		app = m.(App)
+	}
+	if app.screen != screenPicker {
+		t.Fatalf("two Backspaces from the grid should reach the picker, got screen %d", app.screen)
+	}
+	return app
+}
+
 // openTable selects the first table and loads it.
 func openFirstTable(t *testing.T, app App) App {
 	t.Helper()
@@ -73,12 +87,8 @@ func TestMultiConnectionJump(t *testing.T) {
 		t.Fatalf("expected ta, got %q", app.currentTable.Name)
 	}
 
-	// c → picker, connect B, open tb.
-	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	app = m.(App)
-	if app.screen != screenPicker {
-		t.Fatal("c should open the connection picker")
-	}
+	// Backspace ×2 → picker, connect B, open tb.
+	app = backToPicker(t, app)
 	app = connectPicker(t, app, 1)
 	if app.connName != "B" {
 		t.Fatalf("expected to switch to B, got %q", app.connName)
@@ -122,10 +132,9 @@ func TestReconnectShowsLoader(t *testing.T) {
 	app = connectPicker(t, app, 0) // connect A (starts the perpetual spinner loop)
 	app = openFirstTable(t, app)
 
-	// c → picker, select B and dispatch the switch, but hold the connectedMsg: the
-	// reconnect is now in flight.
-	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	app = m.(App)
+	// Backspace ×2 → picker, select B and dispatch the switch, but hold the
+	// connectedMsg: the reconnect is now in flight.
+	app = backToPicker(t, app)
 	app.connList.cursor = 1
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
@@ -140,7 +149,7 @@ func TestReconnectShowsLoader(t *testing.T) {
 	}
 	// While it's in flight the loader owns the screen: a stray key is swallowed.
 	before := app.screen
-	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	app = m.(App)
 	if app.screen != before {
 		t.Fatal("keys must be swallowed while the connecting loader is up")
@@ -250,9 +259,9 @@ func TestConnSwitchCancelsInflight(t *testing.T) {
 		t.Fatalf("sort should put an op in flight; activity=%q cancel=%v", app.activity, app.cancel != nil)
 	}
 
-	// c → picker, select B, Enter → switch. startConnect must cancel the sort.
-	m, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	app = m.(App)
+	// Backspace ×2 → picker, select B, Enter → switch. startConnect must cancel
+	// the sort.
+	app = backToPicker(t, app)
 	app.connList.cursor = 1
 	m, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
@@ -318,9 +327,8 @@ func TestCancelReconnect(t *testing.T) {
 	app = openFirstTable(t, app)
 	engineA := app.engine
 
-	// c → picker, select B, dispatch the switch (in flight, hold the result).
-	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	app = m.(App)
+	// Backspace ×2 → picker, select B, dispatch the switch (in flight, hold the result).
+	app = backToPicker(t, app)
 	app.connList.cursor = 1
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
@@ -364,9 +372,8 @@ func TestReselectSameConnection(t *testing.T) {
 	app = connectPicker(t, app, 0)
 	app = openFirstTable(t, app)
 
-	// c, then re-pick A (index 0): no reconnect, just its table list.
-	m, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	app = m.(App)
+	// Backspace ×2, then re-pick A (index 0): no reconnect, just its table list.
+	app = backToPicker(t, app)
 	app.connList.cursor = 0
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)

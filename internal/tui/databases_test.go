@@ -114,11 +114,11 @@ func TestNoDatabases(t *testing.T) {
 	app = update(t, app, app.Init()())
 	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	// T from the table list fetches databases (nil for SQLite).
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("T")})
+	// d from the table list fetches databases (nil for SQLite).
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	app = m.(App)
 	if cmd == nil {
-		t.Fatal("T should dispatch a databases fetch")
+		t.Fatal("d should dispatch a databases fetch")
 	}
 	app = update(t, app, cmd())
 	if app.screen != screenTables {

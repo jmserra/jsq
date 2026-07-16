@@ -22,7 +22,8 @@ filter, and a full-cell viewer. **Editing is complete: the quick cell overlay
 (`e`), plus the `$EDITOR` full paths — cell edit (`E`), blank-row insert (`o`),
 row delete (`D`), and row duplicate (`p`). Free-form SQL in `$EDITOR` (`s`) is in
 too.** Navigation is in: follow a foreign key (`Enter` on an FK column), step a session-wide jumplist
-(`Ctrl-o`/`` ` ``), switch database (`T`) or connection (`c`), and re-run past
+(`Ctrl-o`/`` ` ``), switch database (`d`) or connection (`Backspace` to the
+picker), and re-run past
 queries from the history buffer (`b`). A failed statement (a free-form `s` query
 or a quick `e` edit) opens a modal with the full engine error and the query;
 `e`/`Enter` reopens it in `$EDITOR` to fix and re-run — no dead-end, nothing lost.
@@ -136,9 +137,8 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
 | `r` | reload the current view — re-runs the table load (keeping sort, filters, and cursor) or the ad-hoc query behind an `s` result |
-| `t` | go to the table list (a full-screen page) |
-| `T` | go to the database list — jump to another database on the same connection |
-| `c` | open the connection picker — switch to (or open) another connection; its `cmd` tunnel is reused if already up |
+| `Backspace` | step left along the navigation chain: grid → table list → connection picker. Switching connection from the picker reuses its `cmd` tunnel if already up |
+| `d` | go to the database list — jump to another database on the same connection |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
 | *(picker / table / database list)* `↑`/`↓` or `j`/`k`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` or `h`/`l` jump columns, `g`/`G` to the ends). Navigation is **Connections → Tables → Grid**: `Enter` opens (moves right), `Backspace` steps back (moves left) |
 | *(picker / table / database list)* `/` | start filtering — type to narrow live (prefix, then substring when the prefix finds nothing; `←`/`→`, `Ctrl-w` to edit), `Enter` opens the highlighted match, `Esc` clears the filter |
@@ -242,7 +242,7 @@ type Engine interface {
     Tables(ctx) ([]Table, error)
     Columns(ctx, TableRef) ([]Column, error)
     PrimaryKey(ctx, TableRef) ([]string, error)  // empty => read-only view
-    Databases(ctx) ([]string, error)             // the T database picker
+    Databases(ctx) ([]string, error)             // the d database picker
 
     // Data
     Query(ctx, sql string, args ...any) (*ResultSet, error)
@@ -283,16 +283,16 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
 - **Single-line header:** `connection > database > table`, with a top-right
   activity indicator — a spinner and label (`running query`, `loading`, …) that
   appears only while a DB op is in flight and offers `esc` to kill it.
-- **The table list is its own page.** After connecting you land on it; `t`
-  returns to it from the grid, `Enter` opens a table (switching to the grid),
-  `Esc` goes back. It fills the screen — the results pane isn't cluttered by a
+- **The table list is its own page.** After connecting you land on it;
+  `Backspace` returns to it from the grid, `Enter` opens a table (switching to
+  the grid). It fills the screen — the results pane isn't cluttered by a
   permanent sidebar.
 - **Flat table list — no tree.** jsq opens straight into
   the database named by the connection; the list is a single flat list of that
   database's tables. Navigate with `↑`/`↓` (or `j`/`k`, `Ctrl-p`/`Ctrl-n`); press
   `/` to filter it live. Names are schema-qualified (`sales.orders`,
   `public.users`) so the filter treats every table the same way.
-- **`T` jumps databases.** The same filterable page, but over the databases
+- **`d` jumps databases.** The same filterable page, but over the databases
   on the connection; `Enter` reopens the engine pointed at that database (the
   `cmd` tunnel stays up) and drops you on its table list.
 - **Single result pane, no tabs.** Each query replaces what's shown.

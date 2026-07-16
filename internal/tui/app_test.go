@@ -734,10 +734,10 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatal("loading a table should switch to the grid screen")
 	}
 
-	// t returns to the table list, keeping the filter narrowed.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	// Backspace returns to the table list, keeping the filter narrowed.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	if app.screen != screenTables {
-		t.Fatal("t should return to the table list")
+		t.Fatal("Backspace should return to the table list")
 	}
 	if len(app.sidebar.visible) != 2 {
 		t.Fatalf("table list should keep the %q filter (2 matches), got %d", "orde", len(app.sidebar.visible))
@@ -755,8 +755,8 @@ func TestSidebarFilter(t *testing.T) {
 	}
 }
 
-// TestGridBackspaceToTableList: Backspace while navigating the grid jumps to the
-// table list (same as `t`).
+// TestGridBackspaceToTableList: Backspace while navigating the grid steps left to
+// the table list.
 func TestGridBackspaceToTableList(t *testing.T) {
 	app := loadTable(t, func(e db.Engine) {
 		ctx := context.Background()
@@ -1234,9 +1234,9 @@ func TestSafeConfirmFromTableList(t *testing.T) {
 	app := loadTableConn(t, config.Conn{Name: "prod", Safe: true}, safeUsers)
 
 	// Go to the table list and open a scratch query there.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
 	if app.screen != screenTables {
-		t.Fatalf("t should open the table list, got screen=%d", app.screen)
+		t.Fatalf("Backspace should open the table list, got screen=%d", app.screen)
 	}
 	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}); cmd == nil {
 		t.Fatal("s on the table list should open the editor")
