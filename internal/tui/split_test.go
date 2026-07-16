@@ -30,6 +30,12 @@ func paneColsOf(app App) []int {
 	return c
 }
 
+// closePaneKey sends ctrl-d (close the focused pane).
+func closePaneKey(t *testing.T, app App) App {
+	t.Helper()
+	return update(t, app, tea.KeyMsg{Type: tea.KeyCtrlD})
+}
+
 // splitTable is the shared setup: a loaded grid, then `<space>v`.
 func splitTable(t *testing.T, app App) App {
 	t.Helper()
@@ -268,25 +274,23 @@ func TestSplitCloseCollapsesColumn(t *testing.T) {
 	if app.focus != 1 {
 		t.Fatalf("setup: expected focus on the middle column, got %d", app.focus)
 	}
-	app = leaderKey(t, app, 'q')
+	app = closePaneKey(t, app)
 	got := paneColsOf(app)
 	if len(got) != 2 || got[0] != 0 || got[1] != 1 {
 		t.Fatalf("closing a column should leave contiguous columns, got %v", got)
 	}
 }
 
-// TestSplitClose: <space>q drops the focused pane; the last one can't be closed.
+// TestSplitClose: ctrl-d drops the focused pane; the last one can't be closed.
 func TestSplitClose(t *testing.T) {
 	app := loadTable(t, usersTable)
 	app = splitTable(t, app)
 
-	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	app = closePaneKey(t, app)
 	if len(app.panes) != 1 || app.focus != 0 {
-		t.Fatalf("<space>q should leave one focused pane, got %d panes focus=%d", len(app.panes), app.focus)
+		t.Fatalf("ctrl-d should leave one focused pane, got %d panes focus=%d", len(app.panes), app.focus)
 	}
-	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	app = closePaneKey(t, app)
 	if len(app.panes) != 1 {
 		t.Fatal("the last pane must not be closable")
 	}
@@ -307,10 +311,33 @@ func TestSplitRefusesDatabaseSwitch(t *testing.T) {
 		t.Fatalf("the refusal should say how to proceed, got %q", app.status)
 	}
 	// With one pane it goes through as before.
-	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	app = closePaneKey(t, app)
 	if _, cmd := app.switchDatabase("elsewhere"); cmd == nil {
 		t.Fatal("unsplit, a database switch should dispatch a reconnect again")
+	}
+}
+
+// TestClosePaneInertWhileTyping: ctrl-d must not close a pane out from under a
+// cell edit or a column filter — that's why it's handled in handleKey's grid
+// branch, after the capture guards, rather than in handleGridKey.
+func TestClosePaneInertWhileTyping(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start tea.KeyMsg
+	}{
+		{"column filter", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}},
+		{"cell edit", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}},
+	} {
+		app := loadTable(t, usersTable)
+		app = splitTable(t, app)
+		app = update(t, app, tc.start)
+		if !app.typing() {
+			t.Fatalf("%s: setup should be capturing keys", tc.name)
+		}
+		app = closePaneKey(t, app)
+		if len(app.panes) != 2 {
+			t.Fatalf("%s: ctrl-d must not close a pane while typing", tc.name)
+		}
 	}
 }
 
@@ -354,7 +381,7 @@ func TestSplitRefusesAtTheAsk(t *testing.T) {
 	// Close the split and both open normally again.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter}) // back into the grid
 	app = update(t, app, rowsMsg{rs: &db.ResultSet{Cols: []string{"id"}}, gen: app.gen})
-	app = leaderKey(t, app, 'q')
+	app = closePaneKey(t, app)
 	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}); cmd == nil {
 		t.Fatal("unsplit, `d` should fetch databases again")
 	}

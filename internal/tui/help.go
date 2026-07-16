@@ -67,7 +67,7 @@ var helpItems = []helpItem{
 	{key: "Space v", desc: "split vertically — a copy of this view on the right"},
 	{key: "Space s", desc: "split horizontally — a copy of this view below"},
 	{key: "Space hjkl", desc: "move focus between panes"},
-	{key: "Space q", desc: "close this pane"},
+	{key: "Ctrl-d", desc: "close this pane"},
 	{head: "Navigate"},
 	{key: "Bksp", desc: "step left: grid → table list → connection picker"},
 	{key: "d", desc: "go to the database list (jump to another database)"},

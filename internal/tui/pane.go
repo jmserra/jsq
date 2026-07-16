@@ -115,8 +115,6 @@ func (a App) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.splitVertical()
 	case "s": // horizontal split: a copy of this pane, below
 		return a.splitHorizontal()
-	case "q": // close this pane (without it, a split couldn't be undone)
-		return a.closePane()
 	case "h", "j", "k", "l":
 		a.focusDir(msg.String())
 		return a, nil

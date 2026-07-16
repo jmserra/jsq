@@ -886,6 +886,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "d": // go to the database list
 			return a.openDatabases()
+		case "ctrl+d": // close the focused pane
+			// Not on the <space> leader with the other split commands: closing is
+			// frequent enough to want one keystroke. Reached here rather than in
+			// handleGridKey so it's inert while a cell edit or filter is capturing.
+			return a.closePane()
 		}
 		return a.handleGridKey(msg)
 	}
@@ -1381,7 +1386,7 @@ func (a *App) allowSessionMove(what string) bool {
 	if len(a.panes) == 1 {
 		return true
 	}
-	a.status = "close the split (<space>q) to " + what
+	a.status = "close the split (ctrl-d) to " + what
 	return false
 }
 

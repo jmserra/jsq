@@ -140,7 +140,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `Space v` | **split vertically** — a second pane on the right showing exactly what you're looking at (same table, sort, filters, scroll position; an `s` query result clones as the result). The new pane takes focus, so you can navigate away and leave the original behind |
 | `Space s` | **split horizontally** — the same copy, stacked below instead. Splits are columns of stacked panes: `Space v` opens a new column, `Space s` adds to the current one |
 | `Space h/j/k/l` | move focus between panes (by position, so `j` only reaches a pane actually below). The focused pane's header is highlighted |
-| `Space q` | close the focused pane (the last one stays) |
+| `Ctrl-d` | close the focused pane (the last one stays). Not on the `Space` leader — closing is frequent enough to want one keystroke |
 | `Backspace` | step left along the navigation chain: grid → table list → connection picker. Switching connection from the picker reuses its `cmd` tunnel if already up |
 | `d` | go to the database list — jump to another database on the same connection |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
@@ -313,7 +313,7 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
   while you're split, switching connection or database (`d`, the picker, or a
   `Ctrl-o` to a view in another database) is refused — reopening the engine would
   leave the other panes showing rows from a database that's no longer open. Close
-  the split (`Space q`) first. Lifting this needs per-pane engines.
+  the split (`Ctrl-d`) first. Lifting this needs per-pane engines.
 - **Single result pane, no tabs.** Each query replaces what's shown within a pane.
 
 ### Results grid (fixed-width)
