@@ -587,36 +587,67 @@ func (a *App) layout() {
 	a.layoutPanes(avail, bodyH)
 }
 
-// layoutPanes assigns each pane its rect within the body.
-//
-// v1 splits are vertical only, so this is a single left→right row: equal widths
-// over what's left after the dividers, with the remainder handed to the leftmost
-// panes so the row fills the body exactly. When `<space>s` (horizontal) lands,
-// only this function changes — focus movement works off the rects, not the order.
-func (a *App) layoutPanes(avail, bodyH int) {
-	n := len(a.panes)
-	// Split panes each carry their own header line naming the table (unsplit, the
-	// one global status line already does that).
-	paneH := bodyH
-	if n > 1 {
-		paneH = bodyH - 1
-		if paneH < 1 {
-			paneH = 1
+// paneCols groups the panes into their columns, left→right, each listed
+// top→bottom. a.panes is maintained in that order, so a column is a contiguous
+// run — but this indexes by pane.col rather than assuming it, so a stale
+// ordering shows up as a misplaced pane instead of silent corruption.
+func (a *App) paneCols() [][]int {
+	n := 0
+	for i := range a.panes {
+		if a.panes[i].col+1 > n {
+			n = a.panes[i].col + 1
 		}
 	}
-	inner := avail - (n - 1) // the │ dividers between panes
+	cols := make([][]int, n)
+	for i := range a.panes {
+		c := a.panes[i].col
+		cols[c] = append(cols[c], i)
+	}
+	return cols
+}
+
+// layoutPanes assigns each pane its rect within the body.
+//
+// The layout is columns of stacked panes: widths split across the columns
+// (minus the dividers), heights split within each column. Remainders go to the
+// leftmost/topmost so the body is filled exactly rather than leaving a ragged
+// edge. A stacked pane's own header line is part of its slot, so its grid gets
+// one row less.
+func (a *App) layoutPanes(avail, bodyH int) {
+	cols := a.paneCols()
+	n := len(cols)
+	inner := avail - (n - 1) // the │ dividers between columns
 	if inner < n {
 		inner = n // degenerate width: 1 col each and let the clamp truncate
 	}
-	base, extra := inner/n, inner%n
+	wBase, wExtra := inner/n, inner%n
 	x := 0
-	for i := range a.panes {
-		w := base
-		if i < extra { // spread the remainder so the row fills avail exactly
+	for ci, idxs := range cols {
+		w := wBase
+		if ci < wExtra {
 			w++
 		}
-		a.panes[i].x, a.panes[i].y, a.panes[i].w, a.panes[i].h = x, 0, w, paneH
-		a.panes[i].grid.setSize(w, paneH)
+		m := len(idxs)
+		hBase, hExtra := bodyH/m, bodyH%m
+		y := 0
+		for k, i := range idxs {
+			slot := hBase
+			if k < hExtra {
+				slot++
+			}
+			// Split panes each carry a header line naming their table; unsplit, the
+			// one global status line already does that, so the grid gets the lot.
+			gh := slot
+			if len(a.panes) > 1 {
+				gh = slot - 1
+			}
+			if gh < 1 {
+				gh = 1
+			}
+			a.panes[i].x, a.panes[i].y, a.panes[i].w, a.panes[i].h = x, y, w, gh
+			a.panes[i].grid.setSize(w, gh)
+			y += slot
+		}
 		x += w + 1 // + divider
 	}
 }
@@ -1908,18 +1939,27 @@ func (a App) browseView() string {
 	return a.statusLine() + "\n" + body
 }
 
-// panesView renders the pane row: each pane clamped to its rect, joined
-// left→right with a divider. Unsplit it's just the grid, exactly as before.
+// panesView renders the layout: each pane clamped to its rect, stacked within
+// its column, the columns joined left→right with a divider between them.
+// Unsplit it's just the grid, exactly as before.
+//
+// Stacked panes need no horizontal rule — each pane's own header line already
+// separates it from the one above.
 func (a App) panesView() string {
 	if len(a.panes) == 1 {
 		return a.g().View()
 	}
-	blocks := make([]string, 0, len(a.panes)*2-1)
-	for i := range a.panes {
-		if i > 0 {
-			blocks = append(blocks, a.dividerView(i))
+	cols := a.paneCols()
+	blocks := make([]string, 0, len(cols)*2-1)
+	for ci, idxs := range cols {
+		if ci > 0 {
+			blocks = append(blocks, a.dividerView())
 		}
-		blocks = append(blocks, a.paneView(i))
+		parts := make([]string, 0, len(idxs))
+		for _, i := range idxs {
+			parts = append(parts, a.paneView(i))
+		}
+		blocks = append(blocks, lipgloss.JoinVertical(lipgloss.Left, parts...))
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
 }
@@ -1943,9 +1983,14 @@ func (a App) paneView(i int) string {
 	return a.paneHeader(i) + "\n" + body
 }
 
-func (a App) dividerView(i int) string {
-	// Full-height rule: the pane header line + the body.
-	col := strings.TrimSuffix(strings.Repeat("│\n", a.panes[i].h+1), "\n")
+// dividerView is the rule between two columns: full body height, since a column
+// spans the body however many panes are stacked in it.
+func (a App) dividerView() string {
+	h := a.h - 1 // the global status line
+	if h < 1 {
+		h = 1
+	}
+	col := strings.TrimSuffix(strings.Repeat("│\n", h), "\n")
 	return lipgloss.NewStyle().Foreground(dividerColor).Render(col)
 }
 

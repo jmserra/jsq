@@ -10,14 +10,29 @@ import (
 	"github.com/jmserra/jsq/internal/db"
 )
 
-// splitTable is the shared setup: a loaded grid, then `<space>v`.
-func splitTable(t *testing.T, app App) App {
+// leaderKey sends <space> then k.
+func leaderKey(t *testing.T, app App, k rune) App {
 	t.Helper()
 	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
 	if !app.leader {
 		t.Fatal("space should arm the leader")
 	}
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	return update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
+}
+
+// paneCols reports each pane's column, for asserting on the arrangement.
+func paneColsOf(app App) []int {
+	c := make([]int, len(app.panes))
+	for i := range app.panes {
+		c[i] = app.panes[i].col
+	}
+	return c
+}
+
+// splitTable is the shared setup: a loaded grid, then `<space>v`.
+func splitTable(t *testing.T, app App) App {
+	t.Helper()
+	app = leaderKey(t, app, 'v')
 	if len(app.panes) != 2 {
 		t.Fatalf("<space>v should split, got %d panes", len(app.panes))
 	}
@@ -166,21 +181,96 @@ func TestSplitFocusMovement(t *testing.T) {
 	app := loadTable(t, usersTable)
 	app = splitTable(t, app) // focus = 1 (the new right-hand pane)
 
-	leader := func(app App, k rune) App {
-		app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
-		return update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
-	}
-	if app = leader(app, 'h'); app.focus != 0 {
+	if app = leaderKey(t, app, 'h'); app.focus != 0 {
 		t.Fatalf("<space>h should focus the left pane, got %d", app.focus)
 	}
-	if app = leader(app, 'h'); app.focus != 0 {
+	if app = leaderKey(t, app, 'h'); app.focus != 0 {
 		t.Fatalf("<space>h at the left edge should stay put, got %d", app.focus)
 	}
-	if app = leader(app, 'l'); app.focus != 1 {
+	if app = leaderKey(t, app, 'l'); app.focus != 1 {
 		t.Fatalf("<space>l should focus the right pane, got %d", app.focus)
 	}
-	if app = leader(app, 'j'); app.focus != 1 {
+	if app = leaderKey(t, app, 'j'); app.focus != 1 {
 		t.Fatalf("<space>j with no pane below should stay put, got %d", app.focus)
+	}
+}
+
+// TestSplitHorizontal: <space>s stacks a copy below, in the same column and at
+// full width, and it duplicates the view like <space>v does.
+func TestSplitHorizontal(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 20})
+	app = leaderKey(t, app, 's')
+
+	if len(app.panes) != 2 || app.focus != 1 {
+		t.Fatalf("<space>s should stack a focused pane, got %d panes focus=%d", len(app.panes), app.focus)
+	}
+	if got := paneColsOf(app); got[0] != 0 || got[1] != 0 {
+		t.Fatalf("a horizontal split stays in one column, got cols=%v", got)
+	}
+	top, bot := app.panes[0], app.panes[1]
+	if top.w != bot.w {
+		t.Fatalf("stacked panes should be the same width, got %d and %d", top.w, bot.w)
+	}
+	if bot.y <= top.y {
+		t.Fatalf("the new pane should sit below: top y=%d bottom y=%d", top.y, bot.y)
+	}
+	if bot.currentTable.Name != top.currentTable.Name {
+		t.Fatalf("<space>s should duplicate the view, got %q vs %q",
+			bot.currentTable.Name, top.currentTable.Name)
+	}
+}
+
+// TestSplitGridFocusMovement: v then s gives a full-height left column and a
+// stacked right one. Focus must move by geometry — in particular `j` from the
+// left pane must not jump into the right column's lower pane just because it
+// sits lower, and `h` from either right-hand pane reaches the left one.
+func TestSplitGridFocusMovement(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 20})
+	app = leaderKey(t, app, 'v') // panes: 0 | 1        focus=1
+	app = leaderKey(t, app, 's') // panes: 0 | 1,2      focus=2
+
+	if got := paneColsOf(app); len(got) != 3 || got[0] != 0 || got[1] != 1 || got[2] != 1 {
+		t.Fatalf("expected one pane left and two right, got cols=%v", got)
+	}
+	// From the bottom-right pane: k reaches the top-right, h reaches the left.
+	if app = leaderKey(t, app, 'k'); app.focus != 1 {
+		t.Fatalf("<space>k should reach the pane above, got %d", app.focus)
+	}
+	if app = leaderKey(t, app, 'h'); app.focus != 0 {
+		t.Fatalf("<space>h should reach the left column, got %d", app.focus)
+	}
+	// The left pane spans the full height, so nothing is above or below it: j must
+	// stay put rather than jumping across to the right column's lower pane.
+	if app = leaderKey(t, app, 'j'); app.focus != 0 {
+		t.Fatalf("<space>j must not cross columns, got %d", app.focus)
+	}
+	// l from the left lands on the nearest overlapping pane — the top-right one.
+	if app = leaderKey(t, app, 'l'); app.focus != 1 {
+		t.Fatalf("<space>l should reach the top-right pane, got %d", app.focus)
+	}
+}
+
+// TestSplitCloseCollapsesColumn: closing a column's last pane must not leave a
+// hole — paneCols indexes by col, so a gap would render as an empty column.
+func TestSplitCloseCollapsesColumn(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 20})
+	app = leaderKey(t, app, 'v') // panes: 0 | 1   focus=1
+	app = leaderKey(t, app, 'v') // panes: 0 | 1 | 2, focus=2 (middle-right)
+	if got := paneColsOf(app); len(got) != 3 || got[2] != 2 {
+		t.Fatalf("expected three columns, got cols=%v", got)
+	}
+	// Close the middle column; the right one must slide left into the gap.
+	app = leaderKey(t, app, 'h')
+	if app.focus != 1 {
+		t.Fatalf("setup: expected focus on the middle column, got %d", app.focus)
+	}
+	app = leaderKey(t, app, 'q')
+	got := paneColsOf(app)
+	if len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Fatalf("closing a column should leave contiguous columns, got %v", got)
 	}
 }
 
@@ -238,35 +328,55 @@ func TestUnsplitHeaderUnchanged(t *testing.T) {
 	}
 }
 
-// TestSplitLayoutFillsWidth: every rendered line spans the terminal exactly and
-// the divider sits in one straight column. Measured in display cells, not runes —
-// the sort marker (▼) and the more-rows arrow (↓) are one rune but two columns.
+// TestSplitLayoutFillsWidth: every rendered line spans the terminal exactly, the
+// body is exactly as tall as the screen allows, and the divider sits in one
+// straight column all the way down. Measured in display cells, not runes — the
+// sort marker (▼) and the more-rows arrow (↓) are one rune but two columns.
+//
+// Run over each arrangement: a plain vertical split, a plain horizontal one, and
+// the v-then-s grid where a full-height column sits beside a stacked one.
 func TestSplitLayoutFillsWidth(t *testing.T) {
+	arrangements := map[string][]rune{
+		"v":   {'v'},
+		"s":   {'s'},
+		"v+s": {'v', 's'},
+		"s+v": {'s', 'v'},
+	}
 	for _, size := range []struct{ w, h int }{{80, 24}, {160, 40}, {90, 12}} {
-		app := loadTable(t, usersTable)
-		app = update(t, app, tea.WindowSizeMsg{Width: size.w, Height: size.h})
-		app = splitTable(t, app)
+		for name, keys := range arrangements {
+			app := loadTable(t, usersTable)
+			app = update(t, app, tea.WindowSizeMsg{Width: size.w, Height: size.h})
+			for _, k := range keys {
+				app = leaderKey(t, app, k)
+			}
 
-		var col = -1
-		for i, ln := range strings.Split(app.View(), "\n") {
-			plain := ansi.Strip(ln)
-			if w := ansi.StringWidth(plain); i > 0 && w != size.w {
-				t.Fatalf("%dx%d: line %d is %d cells wide, want %d: %q", size.w, size.h, i, w, size.w, plain)
+			lines := strings.Split(app.View(), "\n")
+			if len(lines) != size.h {
+				t.Fatalf("%s @%dx%d: rendered %d lines, want %d", name, size.w, size.h, len(lines), size.h)
 			}
-			idx := strings.IndexRune(plain, '│')
-			if idx < 0 {
-				continue
+			col := -1
+			for i, ln := range lines {
+				plain := ansi.Strip(ln)
+				if w := ansi.StringWidth(plain); i > 0 && w != size.w {
+					t.Fatalf("%s @%dx%d: line %d is %d cells wide, want %d: %q",
+						name, size.w, size.h, i, w, size.w, plain)
+				}
+				idx := strings.IndexRune(plain, '│')
+				if idx < 0 {
+					continue
+				}
+				at := ansi.StringWidth(plain[:idx])
+				if col < 0 {
+					col = at
+				} else if at != col {
+					t.Fatalf("%s @%dx%d: divider jumps to column %d (expected %d) on line %d: %q",
+						name, size.w, size.h, at, col, i, plain)
+				}
 			}
-			at := ansi.StringWidth(plain[:idx])
-			if col < 0 {
-				col = at
-			} else if at != col {
-				t.Fatalf("%dx%d: divider jumps to column %d (expected %d) on line %d: %q",
-					size.w, size.h, at, col, i, plain)
+			// A horizontal-only split has no columns, so no divider to check.
+			if col < 0 && name != "s" {
+				t.Fatalf("%s @%dx%d: no divider rendered", name, size.w, size.h)
 			}
-		}
-		if col < 0 {
-			t.Fatalf("%dx%d: no divider rendered", size.w, size.h)
 		}
 	}
 }
