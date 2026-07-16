@@ -1,0 +1,286 @@
+package tui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/jmserra/jsq/internal/db"
+)
+
+// splitTable is the shared setup: a loaded grid, then `<space>v`.
+func splitTable(t *testing.T, app App) App {
+	t.Helper()
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	if !app.leader {
+		t.Fatal("space should arm the leader")
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if len(app.panes) != 2 {
+		t.Fatalf("<space>v should split, got %d panes", len(app.panes))
+	}
+	return app
+}
+
+func usersTable(e db.Engine) {
+	ctx := context.Background()
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `INSERT INTO users (name) VALUES ('Ada'),('Linus'),('Grace')`)
+}
+
+// TestGridCloneRowAliasing is the one that matters: two grids cloned from one
+// must not share a rows backing array. rows arrive from scanQuery's append loop
+// with spare capacity, and appendRows appends in place — so a shared array means
+// each pane's scroll silently overwrites the other's rows past len.
+func TestGridCloneRowAliasing(t *testing.T) {
+	g := newGrid()
+	g.cols = []column{{name: "id"}}
+	g.rows = make([][]any, 0, 8) // cap > len, exactly as scanQuery leaves it
+	g.rows = append(g.rows, []any{int64(1)})
+	g.rebuildVisible()
+
+	c := g.clone()
+
+	// Both scroll: each appends its own next window.
+	g.appendRows([][]any{{int64(2)}}, false)
+	c.appendRows([][]any{{int64(99)}}, false)
+
+	if got := g.rows[1][0]; got != int64(2) {
+		t.Fatalf("the clone's append overwrote the source's row: got %v, want 2", got)
+	}
+	if got := c.rows[1][0]; got != int64(99) {
+		t.Fatalf("clone lost its own appended row: got %v, want 99", got)
+	}
+}
+
+// TestGridCloneFilterAliasing: the filter maps are mutated in place, so a shared
+// map would let one pane's committed filter rewrite the other's WHERE clause.
+func TestGridCloneFilterAliasing(t *testing.T) {
+	g := newGrid()
+	g.filters[0] = "ada"
+	g.filtersWide[0] = true
+
+	c := g.clone()
+	c.filters[0] = "linus"
+	c.filtersWide[0] = false
+	c.filters[1] = "extra"
+
+	if g.filters[0] != "ada" || !g.filtersWide[0] {
+		t.Fatalf("clone rewrote the source's filters: %v %v", g.filters, g.filtersWide)
+	}
+	if _, ok := g.filters[1]; ok {
+		t.Fatal("clone leaked a new filter into the source")
+	}
+}
+
+// TestSplitJumplistAliasing: views is deep-copied, so the two panes' jumplists
+// are independent. syncCurrent writes views[viewIdx], and a clone starts at an
+// identical viewIdx — a shared array would have the first navigation in either
+// pane clobber the other's history at that index.
+func TestSplitJumplistAliasing(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app)
+
+	if len(app.panes[0].views) != 1 || len(app.panes[1].views) != 1 {
+		t.Fatalf("both panes should start with the source's one view, got %d/%d",
+			len(app.panes[0].views), len(app.panes[1].views))
+	}
+	// Rewrite the focused pane's entry; the other pane's must not move.
+	app.panes[1].views[0].table = db.Table{Name: "clobbered"}
+	if app.panes[0].views[0].table.Name != "users" {
+		t.Fatalf("panes share a jumplist backing array: pane 0 now shows %q",
+			app.panes[0].views[0].table.Name)
+	}
+}
+
+// TestSplitDuplicatesView: `<space>v` shows exactly what was on screen, and the
+// new pane is focused so navigating leaves the original behind.
+func TestSplitDuplicatesView(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app.g().moveRow(1) // put the cursor somewhere non-default
+	app = splitTable(t, app)
+
+	if app.focus != 1 {
+		t.Fatalf("the split should focus the new pane, got focus=%d", app.focus)
+	}
+	src, dst := app.panes[0], app.panes[1]
+	if dst.currentTable.Name != src.currentTable.Name {
+		t.Fatalf("clone shows %q, source shows %q", dst.currentTable.Name, src.currentTable.Name)
+	}
+	if dst.grid.cursorR != src.grid.cursorR {
+		t.Fatalf("clone should keep the cursor at %d, got %d", src.grid.cursorR, dst.grid.cursorR)
+	}
+	if len(dst.grid.rows) != len(src.grid.rows) {
+		t.Fatalf("clone has %d rows, source has %d", len(dst.grid.rows), len(src.grid.rows))
+	}
+	if dst.id == src.id {
+		t.Fatal("the clone must get its own pane id")
+	}
+}
+
+// TestSplitDuplicatesAdHocQuery: splitting a free-form (s) query result must
+// clone the RESULT, not silently fall back to the underlying table. This is why
+// the clone goes through the live pane and not viewState (which has no adHoc).
+func TestSplitDuplicatesAdHocQuery(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, queryResultMsg{
+		rs:  &db.ResultSet{Cols: []string{"n"}, Rows: [][]any{{int64(7)}}},
+		sql: "SELECT 7 AS n", gen: app.gen,
+	})
+	if !app.p().adHoc {
+		t.Fatal("setup: the query result should be adHoc")
+	}
+	app = splitTable(t, app)
+
+	if !app.p().adHoc || app.p().adHocQuery != "SELECT 7 AS n" {
+		t.Fatalf("clone lost the query result: adHoc=%v sql=%q", app.p().adHoc, app.p().adHocQuery)
+	}
+	if len(app.g().rows) != 1 || app.g().rows[0][0] != int64(7) {
+		t.Fatalf("clone should show the query's rows, got %v", app.g().rows)
+	}
+}
+
+// TestSplitPanesNavigateIndependently: the whole point — moving in one pane
+// leaves the other exactly where it was.
+func TestSplitPanesNavigateIndependently(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app)
+
+	before := app.panes[0].grid.cursorR
+	for i := 0; i < 2; i++ {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	if app.panes[1].grid.cursorR == before {
+		t.Fatal("j should have moved the focused pane's cursor")
+	}
+	if app.panes[0].grid.cursorR != before {
+		t.Fatalf("the unfocused pane's cursor moved: %d -> %d", before, app.panes[0].grid.cursorR)
+	}
+}
+
+// TestSplitFocusMovement: <space>h/l walk the pane row; j/k are inert with only
+// vertical splits, and movement stops at the ends rather than wrapping.
+func TestSplitFocusMovement(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app) // focus = 1 (the new right-hand pane)
+
+	leader := func(app App, k rune) App {
+		app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+		return update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{k}})
+	}
+	if app = leader(app, 'h'); app.focus != 0 {
+		t.Fatalf("<space>h should focus the left pane, got %d", app.focus)
+	}
+	if app = leader(app, 'h'); app.focus != 0 {
+		t.Fatalf("<space>h at the left edge should stay put, got %d", app.focus)
+	}
+	if app = leader(app, 'l'); app.focus != 1 {
+		t.Fatalf("<space>l should focus the right pane, got %d", app.focus)
+	}
+	if app = leader(app, 'j'); app.focus != 1 {
+		t.Fatalf("<space>j with no pane below should stay put, got %d", app.focus)
+	}
+}
+
+// TestSplitClose: <space>q drops the focused pane; the last one can't be closed.
+func TestSplitClose(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app)
+
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if len(app.panes) != 1 || app.focus != 0 {
+		t.Fatalf("<space>q should leave one focused pane, got %d panes focus=%d", len(app.panes), app.focus)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if len(app.panes) != 1 {
+		t.Fatal("the last pane must not be closable")
+	}
+}
+
+// TestSplitRefusesDatabaseSwitch: panes share one engine, so a conn/db change
+// while split would pull the database out from under the other panes.
+func TestSplitRefusesDatabaseSwitch(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = splitTable(t, app)
+
+	m, cmd := app.switchDatabase("elsewhere")
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("a database switch while split must not dispatch a reconnect")
+	}
+	if !strings.Contains(app.status, "close the split") {
+		t.Fatalf("the refusal should say how to proceed, got %q", app.status)
+	}
+	// With one pane it goes through as before.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if _, cmd := app.switchDatabase("elsewhere"); cmd == nil {
+		t.Fatal("unsplit, a database switch should dispatch a reconnect again")
+	}
+}
+
+// TestUnsplitHeaderUnchanged: the split must cost nothing when you aren't using
+// it — one pane renders the same single header line (conn > db > table + paging)
+// and no pane header.
+func TestUnsplitHeaderUnchanged(t *testing.T) {
+	app := loadTable(t, usersTable)
+	h := ansi.Strip(app.statusLine())
+	if !strings.Contains(h, "users") || !strings.Contains(h, "1/3") {
+		t.Fatalf("unsplit header should carry the table crumb and paging: %q", h)
+	}
+	body := app.panesView()
+	if strings.Contains(body, "│") {
+		t.Fatalf("unsplit body should have no divider:\n%s", body)
+	}
+}
+
+// TestSplitLayoutFillsWidth: every rendered line spans the terminal exactly and
+// the divider sits in one straight column. Measured in display cells, not runes —
+// the sort marker (▼) and the more-rows arrow (↓) are one rune but two columns.
+func TestSplitLayoutFillsWidth(t *testing.T) {
+	for _, size := range []struct{ w, h int }{{80, 24}, {160, 40}, {90, 12}} {
+		app := loadTable(t, usersTable)
+		app = update(t, app, tea.WindowSizeMsg{Width: size.w, Height: size.h})
+		app = splitTable(t, app)
+
+		var col = -1
+		for i, ln := range strings.Split(app.View(), "\n") {
+			plain := ansi.Strip(ln)
+			if w := ansi.StringWidth(plain); i > 0 && w != size.w {
+				t.Fatalf("%dx%d: line %d is %d cells wide, want %d: %q", size.w, size.h, i, w, size.w, plain)
+			}
+			idx := strings.IndexRune(plain, '│')
+			if idx < 0 {
+				continue
+			}
+			at := ansi.StringWidth(plain[:idx])
+			if col < 0 {
+				col = at
+			} else if at != col {
+				t.Fatalf("%dx%d: divider jumps to column %d (expected %d) on line %d: %q",
+					size.w, size.h, at, col, i, plain)
+			}
+		}
+		if col < 0 {
+			t.Fatalf("%dx%d: no divider rendered", size.w, size.h)
+		}
+	}
+}
+
+// TestLeaderNotArmedWhileTyping: <space> is a literal character inside a filter
+// or a cell edit, never the split leader.
+func TestLeaderNotArmedWhileTyping(t *testing.T) {
+	app := loadTable(t, usersTable)
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}) // filter the column
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
+	if app.leader {
+		t.Fatal("space inside a column filter must not arm the leader")
+	}
+	if !strings.Contains(app.g().filter.val, " ") {
+		t.Fatalf("space should have been typed into the filter, got %q", app.g().filter.val)
+	}
+}

@@ -261,6 +261,49 @@ func (g *grid) restore(s *gridSnapshot) {
 	g.exitVisual()
 }
 
+// clone returns an independent copy of the grid for a new split pane (`<space>v`),
+// showing exactly what this one shows.
+//
+// It is deliberately NOT restore(snapshot()): that path shares the rows slice
+// (see restore), and two grids sharing a rows backing array corrupt each other
+// the moment either scrolls. appendRows does `g.rows = append(g.rows, ...)`, and
+// rows arrive from scanQuery's append loop with spare capacity, so both grids
+// would write the same indices past len and each would see the other's rows.
+//
+// Deep-copied — each is mutated in place, so sharing is corruption:
+//   - rows (outer): appendRows, as above.
+//   - visible: rebuildVisible does visible[:0] + append.
+//   - filters/filtersWide: maps; the other pane's commit would rewrite this
+//     pane's WHERE clause.
+//
+// Shared by reference, deliberately:
+//   - the inner []any rows: applyEdit writes row[col] in place. Both panes are on
+//     one connection looking at one row, so an edit in either SHOULD show in both.
+//     Copying them would let two panes disagree about a row that really changed.
+//   - cols/pk/fks/table: replaced wholesale by setResult, never element-wise.
+//
+// Transient typing state (edit/filter/visual) is not carried over — you can't
+// split mid-edit anyway, since the leader is gated on !typing().
+func (g *grid) clone() grid {
+	c := *g
+	c.rows = append([][]any(nil), g.rows...)
+	c.visible = append([]int(nil), g.visible...)
+	c.filters = make(map[int]string, len(g.filters))
+	for k, v := range g.filters {
+		c.filters[k] = v
+	}
+	c.filtersWide = make(map[int]bool, len(g.filtersWide))
+	for k, v := range g.filtersWide {
+		c.filtersWide[k] = v
+	}
+	c.filtering = -1
+	c.filter.clear()
+	c.editing, c.editDirty, c.loading = false, false, false
+	c.edit.clear()
+	c.exitVisual()
+	return c
+}
+
 func (g *grid) setSize(w, h int) {
 	g.w, g.h = w, h
 	// A shrink can push the cursor off the (now smaller) window; revalidate scroll.

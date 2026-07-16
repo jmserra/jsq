@@ -137,6 +137,9 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
 | `r` | reload the current view — re-runs the table load (keeping sort, filters, and cursor) or the ad-hoc query behind an `s` result |
+| `Space v` | **split vertically** — a second pane on the right showing exactly what you're looking at (same table, sort, filters, scroll position; an `s` query result clones as the result). The new pane takes focus, so you can navigate away and leave the original behind |
+| `Space h` / `Space l` | move focus between panes (`j`/`k` too, once horizontal splits land). The focused pane's header is highlighted |
+| `Space q` | close the focused pane (the last one stays) |
 | `Backspace` | step left along the navigation chain: grid → table list → connection picker. Switching connection from the picker reuses its `cmd` tunnel if already up |
 | `d` | go to the database list — jump to another database on the same connection |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
@@ -295,7 +298,18 @@ Two full-screen pages — a declutter-first layout, one buffer at a time:
 - **`d` jumps databases.** The same filterable page, but over the databases
   on the connection; `Enter` reopens the engine pointed at that database (the
   `cmd` tunnel stays up) and drops you on its table list.
-- **Single result pane, no tabs.** Each query replaces what's shown.
+- **Splits are panes, not tabs.** `Space v` duplicates the current view into a
+  second pane on the right; each pane then navigates independently — its own
+  table, sort, filters, scroll, and its own jumplist (`Ctrl-o` in one pane walks
+  only that pane's history), exactly like vim windows. Unsplit, nothing changes:
+  one pane renders the same single header line, so the feature costs no screen
+  room when you aren't using it.
+- **All panes share one connection and database.** The engine is session-wide, so
+  while you're split, switching connection or database (`d`, the picker, or a
+  `Ctrl-o` to a view in another database) is refused — reopening the engine would
+  leave the other panes showing rows from a database that's no longer open. Close
+  the split (`Space q`) first. Lifting this needs per-pane engines.
+- **Single result pane, no tabs.** Each query replaces what's shown within a pane.
 
 ### Results grid (fixed-width)
 

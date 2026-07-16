@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/jmserra/jsq/internal/db"
+import (
+	"fmt"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jmserra/jsq/internal/db"
+)
 
 // pane is one independently-navigable view of the database: a grid plus the
 // metadata describing what it's showing. Panes are the unit `<space>v` splits.
@@ -33,12 +38,42 @@ type pane struct {
 	// before the first). See App.views' old doc comment for the semantics.
 	views   []viewState
 	viewIdx int
+
+	// Rect within the body, assigned by layoutPanes. Focus movement (`<space>h/l`)
+	// is computed from these rather than from pane order, so it keeps working when
+	// `<space>s` adds a second axis.
+	x, y, w, h int
 }
 
 // newPane builds an empty pane with a fresh id and an empty jumplist.
 func (a *App) newPane() pane {
 	a.nextPaneID++
 	return pane{id: a.nextPaneID, grid: newGrid(), viewIdx: -1}
+}
+
+// clone returns an independent copy of the pane under a fresh id — what
+// `<space>v` puts on the right. It duplicates exactly what the pane is showing,
+// including a free-form (s) query result and committed column filters.
+//
+// It clones the live pane rather than going through viewState because viewState
+// models a *jumplist entry*, not a view: it has no adHoc/adHocQuery (so an s
+// result would silently clone as the underlying table) and no committed filters
+// (those live in gridSnapshot, and are lost once it's evicted).
+//
+// views must be deep-copied. syncCurrent writes `views[viewIdx] = v`, and the
+// clone starts at an identical viewIdx, so a shared backing array would have the
+// first navigation in either pane overwrite the other's history. The *gridSnapshot
+// pointers inside are shared, which is fine — nothing writes one in place except
+// the intentional edit reflection.
+func (a *App) clonePane(src *pane) pane {
+	c := *src
+	c.id = 0 // assigned below; never inherit the source's identity
+	c.grid = src.grid.clone()
+	c.basePreds = append([]eqPred(nil), src.basePreds...)
+	c.views = append([]viewState(nil), src.views...)
+	a.nextPaneID++
+	c.id = a.nextPaneID
+	return c
 }
 
 // p returns a pointer to the focused pane, for mutation.
@@ -64,4 +99,102 @@ func (a *App) paneByID(id int) (*pane, bool) {
 		}
 	}
 	return nil, false
+}
+
+// handleLeaderKey runs the key that followed <space>. The leader flag is already
+// cleared by the caller, so every path here is one-shot.
+func (a App) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "v": // vertical split: a copy of this pane, to the right
+		return a.splitVertical()
+	case "q": // close this pane (without it, a split couldn't be undone)
+		return a.closePane()
+	case "h", "j", "k", "l":
+		a.focusDir(msg.String())
+		return a, nil
+	}
+	// Anything else (including <space><esc>) just cancels the leader. Esc must not
+	// fall through to the op-kill: it was aimed at the leader, not a query.
+	return a, nil
+}
+
+// maxPanes bounds the split count. Past this the panes are too narrow to read,
+// and every pane costs a cached snapshot budget.
+const maxPanes = 4
+
+// splitVertical duplicates the focused pane to its right and focuses the copy —
+// so `<space>v` then navigating leaves the original untouched behind you.
+func (a App) splitVertical() (tea.Model, tea.Cmd) {
+	if len(a.panes) >= maxPanes {
+		a.status = fmt.Sprintf("at most %d panes", maxPanes)
+		return a, nil
+	}
+	c := a.clonePane(a.p())
+	// Insert right of the focused pane, then re-take any pane pointer: this append
+	// may reallocate, and a *pane held across it would aim at the orphaned array.
+	i := a.focus + 1
+	a.panes = append(a.panes, pane{})
+	copy(a.panes[i+1:], a.panes[i:])
+	a.panes[i] = c
+	a.focus = i
+	a.layout() // after the append: the clone's rowOff was sized for the old height
+	return a, nil
+}
+
+// closePane drops the focused pane, focusing its left neighbour. A no-op on the
+// last pane — there's always at least one, so p()/g() can't fail.
+func (a App) closePane() (tea.Model, tea.Cmd) {
+	if len(a.panes) == 1 {
+		a.status = "only pane"
+		return a, nil
+	}
+	a.panes = append(a.panes[:a.focus], a.panes[a.focus+1:]...)
+	if a.focus >= len(a.panes) {
+		a.focus = len(a.panes) - 1
+	}
+	a.layout()
+	return a, nil
+}
+
+// focusDir moves focus to the nearest pane in the given direction, by rect
+// geometry rather than by pane order — so it keeps working unchanged once
+// `<space>s` introduces a second axis.
+func (a *App) focusDir(dir string) {
+	cur := a.panes[a.focus]
+	best, bestDist := -1, 0
+	for i := range a.panes {
+		if i == a.focus {
+			continue
+		}
+		p := a.panes[i]
+		var d int
+		switch dir {
+		case "h":
+			if p.x >= cur.x {
+				continue
+			}
+			d = cur.x - p.x
+		case "l":
+			if p.x <= cur.x {
+				continue
+			}
+			d = p.x - cur.x
+		case "k":
+			if p.y >= cur.y {
+				continue
+			}
+			d = cur.y - p.y
+		case "j":
+			if p.y <= cur.y {
+				continue
+			}
+			d = p.y - cur.y
+		}
+		if best < 0 || d < bestDist {
+			best, bestDist = i, d
+		}
+	}
+	if best >= 0 {
+		a.focus = best
+	}
 }

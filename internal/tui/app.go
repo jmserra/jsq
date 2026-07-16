@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
+	"github.com/mattn/go-runewidth"
 )
 
 type screen int
@@ -63,7 +64,8 @@ type App struct {
 	// and its own jumplist — see pane.
 	panes      []pane
 	focus      int
-	nextPaneID int // monotonic source of stable pane ids
+	nextPaneID int  // monotonic source of stable pane ids
+	leader     bool // <space> pressed; the next key is a split/focus command
 
 	viewSeq     int        // monotonic touch counter → LRU eviction of cached snapshots
 	jumps       jumpView   // the `-key jumplist picker overlay
@@ -366,8 +368,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tunneled[a.connName] = true // its cmd (if any) is now running — reuse it
 		a.dbName = msg.dbName
 		a.sidebar.setTables(msg.tables)
-		// The jumplist is session-wide (spans databases) — do NOT reset it. Clear
-		// only the live table state; a jump restores it via pendingView below.
+		// Each pane keeps its own jumplist across the switch (it spans databases) —
+		// do NOT reset it. Clear only the live table state; a jump restores it via
+		// pendingView below.
+		//
+		// Touching just the focused pane is sound because allowSessionMove refuses
+		// every conn/db change while split: a connectedMsg can only land when there
+		// is exactly one pane, which is therefore the focused one.
 		a.p().currentTable = db.Table{}
 		a.p().basePreds, a.p().baseNote = nil, ""
 		a.layout()
@@ -573,16 +580,58 @@ func (a *App) layout() {
 	if avail < 1 {
 		avail = 1
 	}
-	// Grid and the two lists each own the whole body (separate full-screen pages).
-	a.g().setSize(avail, bodyH)
+	// The two lists each own the whole body (separate full-screen pages).
 	a.sidebar.w, a.sidebar.h = avail, bodyH
 	a.dbs.w, a.dbs.h = avail, bodyH
 	a.connList.w, a.connList.h = avail, bodyH
+	a.layoutPanes(avail, bodyH)
+}
+
+// layoutPanes assigns each pane its rect within the body.
+//
+// v1 splits are vertical only, so this is a single left→right row: equal widths
+// over what's left after the dividers, with the remainder handed to the leftmost
+// panes so the row fills the body exactly. When `<space>s` (horizontal) lands,
+// only this function changes — focus movement works off the rects, not the order.
+func (a *App) layoutPanes(avail, bodyH int) {
+	n := len(a.panes)
+	// Split panes each carry their own header line naming the table (unsplit, the
+	// one global status line already does that).
+	paneH := bodyH
+	if n > 1 {
+		paneH = bodyH - 1
+		if paneH < 1 {
+			paneH = 1
+		}
+	}
+	inner := avail - (n - 1) // the │ dividers between panes
+	if inner < n {
+		inner = n // degenerate width: 1 col each and let the clamp truncate
+	}
+	base, extra := inner/n, inner%n
+	x := 0
+	for i := range a.panes {
+		w := base
+		if i < extra { // spread the remainder so the row fills avail exactly
+			w++
+		}
+		a.panes[i].x, a.panes[i].y, a.panes[i].w, a.panes[i].h = x, 0, w, paneH
+		a.panes[i].grid.setSize(w, paneH)
+		x += w + 1 // + divider
+	}
 }
 
 func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return a, tea.Quit
+	}
+	// The <space> leader is consumed here, before anything else can claim the key:
+	// otherwise `<space>j` would move the grid cursor instead of the focus. It's
+	// only ever armed from a clean grid screen (see the arm site below), so no
+	// modal can be up while it's pending.
+	if a.leader {
+		a.leader = false
+		return a.handleLeaderKey(msg)
 	}
 	// While a connect is in flight the loader owns the screen. Esc cancels it and
 	// returns to the previous page (or quits if this is the very first connect, with
@@ -737,6 +786,14 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// View() before the screen switch, so they render wherever they're opened.
 	if !a.typing() {
 		switch msg.String() {
+		case " ": // arm the <space> leader (splits + focus movement)
+			// Armed only here, never earlier: this sits after the modal captures, so
+			// <space> can't arm behind the help sheet or the jumplist picker (typing()
+			// is false while those are open). Grid-only, like the splits themselves.
+			if a.screen == screenBrowse {
+				a.leader = true
+				return a, nil
+			}
 		case "?": // the help cheat sheet
 			a.help.open(a.w-leftPad, a.h-1)
 			return a, nil
@@ -822,6 +879,9 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 	if a.engine != nil && c.Name == a.connName {
 		a.screen = screenTables // already here → just show its tables
 		a.layout()
+		return a, nil
+	}
+	if !a.allowSessionMove(c.Name) { // the engine is shared by every pane
 		return a, nil
 	}
 	a.syncCurrent()         // capture the current view before changing identity
@@ -999,6 +1059,9 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 	if name == a.dbName { // already here → just go back to its tables
 		a.screen = screenTables
 		a.layout()
+		return a, nil
+	}
+	if !a.allowSessionMove(name) { // the engine is shared by every pane
 		return a, nil
 	}
 	a.syncCurrent()         // save the current view into the session jumplist before leaving
@@ -1192,6 +1255,15 @@ func (a App) jumpBy(d int) (tea.Model, tea.Cmd) {
 // pendingView makes connectedMsg load the view rather than the table list.
 func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 	v := a.p().views[idx]
+	// A jumplist entry can live in another database (the list spans them), but
+	// panes share one engine — so reconnecting for this pane would pull the
+	// database out from under the others, leaving them rendering rows from a
+	// closed database under a header naming the new one. Refuse instead.
+	if elsewhere, where := a.sessionMove(v.conn, v.db); elsewhere {
+		if !a.allowSessionMove(where) {
+			return a, nil
+		}
+	}
 	if v.conn != "" && v.conn != a.connName { // cross-connection jump
 		c, ok := a.findConn(v.conn)
 		if !ok {
@@ -1226,6 +1298,35 @@ func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 	}
 	a.p().viewIdx = idx
 	return a.loadView(v, "loading "+v.table.Name)
+}
+
+// sessionMove reports whether targeting conn/db would move the whole session
+// (reopen the engine), and names where it's going. Empty conn/db mean "wherever
+// we already are".
+func (a App) sessionMove(conn, dbName string) (bool, string) {
+	if conn != "" && conn != a.connName {
+		return true, conn
+	}
+	if dbName != "" && dbName != a.dbName {
+		return true, dbName
+	}
+	return false, ""
+}
+
+// allowSessionMove gates every connection/database change on there being exactly
+// one pane, reporting the refusal in the status line when there isn't.
+//
+// The engine is session-wide: all panes read one database. Reopening it while
+// split would leave the other panes showing rows from a database that's no
+// longer open. Rather than half-updating them (or silently blanking the user's
+// layout), a split makes the session's conn+db fixed — collapse it first.
+// Lifting this needs per-pane engines (a refcounted registry keyed conn+db).
+func (a *App) allowSessionMove(where string) bool {
+	if len(a.panes) == 1 {
+		return true
+	}
+	a.status = "close the split (<space>q) to switch to " + where
+	return false
 }
 
 // findConn looks up a configured connection by name.
@@ -1596,6 +1697,11 @@ func (a App) handleVisualKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // loaded edge and more rows exist. It never fires while another op is in flight:
 // begin() would cancel that op, so a cursor move during a sort/filter/reload
 // could silently supersede it and append the next window onto the stale rows.
+//
+// With splits that guard is GLOBAL — there is one op slot, so a slow load in one
+// pane stalls scroll-fetch in another until it lands (the cursor just stops at
+// the loaded edge). Correct for a single slot; per-pane concurrency would need
+// per-pane activity/cancel/gen.
 func (a *App) maybeLoadMore() tea.Cmd {
 	if a.activity != "" || !a.g().wantMore() {
 		return nil
@@ -1798,12 +1904,101 @@ func (a App) browseView() string {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.cell.View())
 		return a.statusLine() + "\n" + body
 	}
-	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.g().View())
+	body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.panesView())
 	return a.statusLine() + "\n" + body
 }
 
-// tableSegment is the header's table crumb: the current table, suffixed with the
-// followed-FK predicate when there is one. Empty before anything is opened.
+// panesView renders the pane row: each pane clamped to its rect, joined
+// left→right with a divider. Unsplit it's just the grid, exactly as before.
+func (a App) panesView() string {
+	if len(a.panes) == 1 {
+		return a.g().View()
+	}
+	blocks := make([]string, 0, len(a.panes)*2-1)
+	for i := range a.panes {
+		if i > 0 {
+			blocks = append(blocks, a.dividerView(i))
+		}
+		blocks = append(blocks, a.paneView(i))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
+}
+
+// paneView renders one pane: its header line, then its grid, clamped to the rect.
+//
+// The clamp is load-bearing, not cosmetic. grid.View's renderRow writes a whole
+// cell before checking x >= g.w, so a line can overrun the pane's width; joined
+// horizontally, the widest line would decide the block width and shove every
+// pane to its right. Height() likewise pads a short (or empty — grid.View
+// returns "" with no columns) pane, which JoinHorizontal would otherwise collapse.
+//
+// It must be lipgloss and not runewidth.Truncate: the grid emits ANSI styling,
+// which runewidth counts as width and would slice mid-escape.
+func (a App) paneView(i int) string {
+	p := &a.panes[i]
+	body := lipgloss.NewStyle().
+		Width(p.w).MaxWidth(p.w).
+		Height(p.h).MaxHeight(p.h).
+		Render(p.grid.View())
+	return a.paneHeader(i) + "\n" + body
+}
+
+func (a App) dividerView(i int) string {
+	// Full-height rule: the pane header line + the body.
+	col := strings.TrimSuffix(strings.Repeat("│\n", a.panes[i].h+1), "\n")
+	return lipgloss.NewStyle().Foreground(dividerColor).Render(col)
+}
+
+// dividerColor is the rule between split panes — faint enough to read as chrome.
+var dividerColor = lipgloss.Color("8")
+
+// paneHeader is a split pane's own crumb line: which table it's showing and its
+// own paging counter, since the one global status line can only speak for the
+// focused pane. The focused pane's is highlighted — that's the only indication
+// of where the keys are going.
+//
+// Unsplit there is no pane header at all: the global status line already names
+// the table, and a second line of chrome would cost a row of data.
+func (a App) paneHeader(i int) string {
+	p := &a.panes[i]
+	name := p.tableSegment()
+	if name == "" {
+		name = "(no table)"
+	}
+	right := ""
+	if len(p.grid.visible) > 0 {
+		row, loaded, more := p.grid.posSummary()
+		right = fmt.Sprintf("%d/%d", row, loaded)
+		if more {
+			right += "↓"
+		}
+	}
+	// Fit name + right into the pane width, truncating the name (not the counter).
+	gap := p.w - runewidth.StringWidth(right)
+	if gap < 0 {
+		gap = 0
+	}
+	line := runewidth.Truncate(name, gap, "…")
+	line = runewidth.FillRight(line, gap) + right
+	if i == a.focus {
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Render(line)
+	}
+	return lipgloss.NewStyle().Faint(true).Render(line)
+}
+
+// tableSegment is the pane's table crumb: the table it's showing, suffixed with
+// the followed-FK predicate when there is one. Empty before anything is opened.
+func (p *pane) tableSegment() string {
+	if p.currentTable.Name == "" {
+		return ""
+	}
+	if p.baseNote != "" { // a followed-FK view: show the predicate
+		return p.currentTable.Name + " · " + p.baseNote
+	}
+	return p.currentTable.Name
+}
+
+// tableSegment is the header's table crumb for the focused pane.
 func (a App) tableSegment() string {
 	if a.p().currentTable.Name == "" {
 		return ""
@@ -1817,7 +2012,13 @@ func (a App) tableSegment() string {
 // statusLine renders "connName > dbName > table > message". The table segment is
 // derived from the live view (not from a.status), so a transient message appends
 // a segment rather than overwriting the table — the current table stays visible.
+//
+// When split, the table crumb and the paging counter move to each pane's own
+// header (a single line can't speak for two panes) and this keeps only the
+// session-wide "connName > dbName > message". Unsplit — the overwhelmingly common
+// case — it renders exactly as it always has, so the split costs no chrome.
 func (a App) statusLine() string {
+	split := len(a.panes) > 1
 	name := a.connName
 	if name == "" {
 		name = "adhoc"
@@ -1826,7 +2027,7 @@ func (a App) statusLine() string {
 	if a.dbName != "" {
 		rest = append(rest, a.dbName)
 	}
-	if seg := a.tableSegment(); seg != "" {
+	if seg := a.tableSegment(); seg != "" && !split {
 		rest = append(rest, seg)
 	}
 	if a.status != "" {
@@ -1853,7 +2054,7 @@ func (a App) statusLine() string {
 		// spinner + label + a hint that Esc kills it.
 		frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
 		right = activityStyle.Render(frame + " " + a.activity + " · esc ")
-	case a.screen == screenBrowse && len(a.g().visible) > 0:
+	case a.screen == screenBrowse && !split && len(a.g().visible) > 0:
 		row, loaded, more := a.g().posSummary()
 		s := fmt.Sprintf("%d/%d", row, loaded)
 		if more {

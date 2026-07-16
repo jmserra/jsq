@@ -33,6 +33,7 @@ internal/db/
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
   app.go        # root App Model. Screens: screenPicker (bare `jsq`, or Backspace from the table list), screenTables (full-screen table list, Backspace from the grid), screenDatabases (database list, `d` → switchDBCmd reopens the engine on another db), screenBrowse (grid). The three list screens (`connList`/`sidebar`/`dbs`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `d` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `d`). Backspace is the ONLY way left — there are no `t`/`T`/`c` jump-to-screen shortcuts (they were redundant with the chain). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). **The overlay commands (`?` help, `` ` `` jumplist, `b` history) and the jumplist steps (`Ctrl-o`/`Ctrl-i`/`Tab`) are screen-independent** — they inspect session-wide state, so handleKey runs them before the screen switch, gated only on `App.typing()` (true while the grid's quick-edit/column filter or a list's `/` filter owns the keyboard, so a letter meant for a filter stays literal). Their overlays must therefore be rendered in `View()` **before** the screen switch (like confirm/errView) — drawing them in `browseView` would make them openable on a list screen but invisible. Only `cellview` stays grid-only (it shows the cell under the grid cursor). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
+  pane.go       # the `pane` struct + splits. A pane is one independently-navigable view: grid, currentTable, basePreds/baseNote, sort, adHoc/adHocQuery, its OWN jumplist (views/viewIdx), and its layout rect. App holds `panes []pane` + `focus`; `p()`/`g()` are the focused-pane accessors and `paneByID` resolves a stable id. `<space>` is a leader (App.leader): `v` = clonePane → insert right + focus it, `q` = close, `h/j/k/l` = focusDir, which moves by **rect geometry** not pane order (so `<space>s` horizontal splits only need layoutPanes to change). **clonePane/grid.clone deep-copy rows (outer), visible, filters/filtersWide, and views** — every one is mutated in place, so sharing corrupts: appendRows appends past len into a shared backing array (rows arrive from scanQuery with spare cap), and a clone starts at an identical viewIdx so a shared `views` would have the first navigation clobber the other pane's history. Inner `[]any` rows ARE shared on purpose (applyEdit writes row[col] in place; one connection, one row → an edit should show in both). NOT implemented via restore(snapshot()) — that path shares rows.
   cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner. yankCmd (y/Y) copies to the clipboard via an OSC 52 escape (go-osc52) written to stderr — no external binary, works over SSH; not a DB cmd.
   sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
@@ -157,6 +158,18 @@ reopens the seed in `$EDITOR` to fix and re-run. The free-form seed keeps its
 quick-edit seed is the equivalent `E` full-path UPDATE (`buildUpdateStmt`). A
 seedless `errMsg` (connect/reconnect/load failure) still just sets the status.
 
+**One op slot, routed by pane**: `begin(label, paneID)` records `App.opPane`; there
+is exactly one in-flight DB op, so the App always knows whose result is coming.
+Each gen-stamped handler goes **stale → stop → `opTarget()` → drop**, applying the
+result to *that* pane rather than the focused one (focus can move while a query
+runs) and dropping it if the pane was closed. Messages carry no pane field — a
+pane id would imply concurrency we don't have. Ordering matters: unlike a stale
+message, a pane-gone message owns the op slot, so skipping `stop()` would strand
+the spinner and leave Esc pointing at a dead op. Consequence: `maybeLoadMore`'s
+`activity != ""` guard is **global**, so a slow load in one pane stalls another's
+scroll-fetch until it finishes — correct for one slot, but don't read that
+function's comment as single-pane.
+
 **Safe mode** (`App.safe`, from `config.Conn.Safe`, cached like the old
 `readOnly` was — set alongside `connName` on every connection switch): when the
 active connection has `safe=true`, both mutation dispatch points — the quick-path
@@ -236,7 +249,16 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
 3. **Editability** (`grid.editable()`): single-table select + resolved PK + every
    PK column present in the result. Otherwise edit keys are inert.
 4. **jsq only ever reads `connections.toml`.** No write path. Keep it so.
-5. **Bind values as parameters** (`Placeholder(i)` + args) — filter patterns,
+5. **All panes share one connection+database+engine.** Every conn/db change goes
+   through `allowSessionMove`, which refuses while `len(panes) > 1` — reopening
+   the engine under the other panes would leave them rendering a closed database.
+   This is what keeps `pendingView`/`connRestore`/`connectedMsg` provably
+   single-pane (they may assume the focused pane is the only one). Lifting it
+   needs per-pane engines (a refcounted registry keyed conn+db).
+6. **Never hold a `*pane` across a mutation of `a.panes`.** An append may
+   reallocate and the pointer then aims at the orphaned array, where writes are
+   silently lost. Re-take `p()` after any append/remove (see splitVertical).
+7. **Bind values as parameters** (`Placeholder(i)` + args) — filter patterns,
    quick-path edit values, PK predicates. Only identifiers are interpolated, via
    `QuoteIdent`. **Sole exception:** the `$EDITOR` full path runs user-authored
    SQL verbatim (values inlined by `sqlLiteral`) — that's the documented model,
