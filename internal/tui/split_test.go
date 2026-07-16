@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/jmserra/jsq/internal/config"
 	"github.com/jmserra/jsq/internal/db"
 )
 
@@ -310,6 +311,52 @@ func TestSplitRefusesDatabaseSwitch(t *testing.T) {
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if _, cmd := app.switchDatabase("elsewhere"); cmd == nil {
 		t.Fatal("unsplit, a database switch should dispatch a reconnect again")
+	}
+}
+
+// TestSplitRefusesAtTheAsk: the database list and the connection picker exist
+// only to move the session, so while split they're refused when you ask for
+// them — not after you've navigated in and pressed Enter.
+func TestSplitRefusesAtTheAsk(t *testing.T) {
+	connA, connB := twoConns(t)
+	app := New([]config.Conn{connA, connB}, config.Conn{})
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = connectPicker(t, app, 0)
+	app = openFirstTable(t, app)
+	app = splitTable(t, app)
+
+	// `d` must not even open the database list.
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("`d` while split must not dispatch a databases fetch")
+	}
+	if app.screen != screenBrowse {
+		t.Fatalf("`d` while split should stay put, got screen=%d", app.screen)
+	}
+	if !strings.Contains(app.status, "close the split") {
+		t.Fatalf("`d` should say why it refused, got %q", app.status)
+	}
+
+	// Backspace reaches the table list (that's just navigation) but not the picker.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if app.screen != screenTables {
+		t.Fatalf("Backspace should still reach the table list, got screen=%d", app.screen)
+	}
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
+	if app.screen == screenPicker {
+		t.Fatal("Backspace while split must not reach the connection picker")
+	}
+	if !strings.Contains(app.status, "close the split") {
+		t.Fatalf("the picker refusal should say why, got %q", app.status)
+	}
+
+	// Close the split and both open normally again.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter}) // back into the grid
+	app = update(t, app, rowsMsg{rs: &db.ResultSet{Cols: []string{"id"}}, gen: app.gen})
+	app = leaderKey(t, app, 'q')
+	if _, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}); cmd == nil {
+		t.Fatal("unsplit, `d` should fetch databases again")
 	}
 }
 

@@ -927,7 +927,7 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 	}
-	if !a.allowSessionMove(c.Name) { // the engine is shared by every pane
+	if !a.allowSessionMove("switch to " + c.Name) { // the engine is shared by every pane
 		return a, nil
 	}
 	a.syncCurrent()         // capture the current view before changing identity
@@ -953,6 +953,9 @@ func (a App) connectTo(c config.Conn) (tea.Model, tea.Cmd) {
 
 // openDatabases fetches the connection's databases and shows the picker.
 func (a App) openDatabases() (tea.Model, tea.Cmd) {
+	if !a.allowSessionMove("switch database") { // refuse here, not on Enter
+		return a, nil
+	}
 	ctx := a.begin("loading databases", noPane)
 	a.status = "loading databases…"
 	return a, databasesCmd(ctx, a.gen, a.engine)
@@ -1107,7 +1110,7 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 	}
-	if !a.allowSessionMove(name) { // the engine is shared by every pane
+	if !a.allowSessionMove("switch to " + name) { // the engine is shared by every pane
 		return a, nil
 	}
 	a.syncCurrent()         // save the current view into the session jumplist before leaving
@@ -1135,8 +1138,10 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyBackspace:
 		// Backspace steps left to the connection picker (Connections → Tables →
-		// Grid). Any committed filter is preserved.
-		if len(a.conns) > 0 {
+		// Grid). Any committed filter is preserved. Like the database list, the
+		// picker exists only to move the session, so it's refused while split
+		// rather than letting Enter dead-end there.
+		if len(a.conns) > 0 && a.allowSessionMove("switch connection") {
 			a.screen = screenPicker
 		}
 	case tea.KeyRunes:
@@ -1306,7 +1311,7 @@ func (a App) goToView(idx int) (tea.Model, tea.Cmd) {
 	// database out from under the others, leaving them rendering rows from a
 	// closed database under a header naming the new one. Refuse instead.
 	if elsewhere, where := a.sessionMove(v.conn, v.db); elsewhere {
-		if !a.allowSessionMove(where) {
+		if !a.allowSessionMove("jump to " + where) {
 			return a, nil
 		}
 	}
@@ -1360,18 +1365,23 @@ func (a App) sessionMove(conn, dbName string) (bool, string) {
 }
 
 // allowSessionMove gates every connection/database change on there being exactly
-// one pane, reporting the refusal in the status line when there isn't.
+// one pane, reporting the refusal in the status line when there isn't. what
+// completes "close the split to …".
 //
 // The engine is session-wide: all panes read one database. Reopening it while
 // split would leave the other panes showing rows from a database that's no
 // longer open. Rather than half-updating them (or silently blanking the user's
 // layout), a split makes the session's conn+db fixed — collapse it first.
 // Lifting this needs per-pane engines (a refcounted registry keyed conn+db).
-func (a *App) allowSessionMove(where string) bool {
+//
+// Gate at the point the user ASKS, not at the last step: the connection picker
+// and the database list exist only to move the session, so opening one while
+// split and only refusing on Enter walks them into a dead end.
+func (a *App) allowSessionMove(what string) bool {
 	if len(a.panes) == 1 {
 		return true
 	}
-	a.status = "close the split (<space>q) to switch to " + where
+	a.status = "close the split (<space>q) to " + what
 	return false
 }
 
