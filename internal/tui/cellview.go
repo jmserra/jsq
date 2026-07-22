@@ -25,7 +25,8 @@ func (c *cellView) open(col string, row int, v any, w, h int) {
 	c.lines = valueLines(v)
 }
 
-// valueLines renders a value as display lines, pretty-printing JSON when it parses.
+// valueLines renders a value as display lines, pretty-printing JSON or PHP
+// serialize() output when either parses.
 func valueLines(v any) []string {
 	if v == nil {
 		return []string{"NULL"}
@@ -36,6 +37,8 @@ func valueLines(v any) []string {
 		if b, err := json.MarshalIndent(js, "", "  "); err == nil {
 			s = string(b)
 		}
+	} else if pretty, ok := prettyPHP(s); ok {
+		s = pretty
 	}
 	return strings.Split(strings.ReplaceAll(s, "\r", ""), "\n")
 }
