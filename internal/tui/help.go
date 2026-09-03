@@ -63,6 +63,7 @@ var helpItems = []helpItem{
 	{key: "s", desc: "free-form SQL in $EDITOR (also on the table list: blank scratch)"},
 	{key: "b", desc: "query-history buffer (enter runs a read, s edits, esc closes)"},
 	{key: "r", desc: "reload the current table / query view"},
+	{key: ",", desc: "server process list (table list; MySQL/Postgres only)"},
 	{head: "Splits (Space is the leader)"},
 	{key: "Space v", desc: "split vertically — a copy of this view on the right"},
 	{key: "Space s", desc: "split horizontally — a copy of this view below"},

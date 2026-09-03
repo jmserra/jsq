@@ -64,6 +64,11 @@ type Engine interface {
 	Exec(ctx context.Context, query string, args ...any) (int64, error)
 	Databases(ctx context.Context) ([]string, error) // deferred picker; may be nil
 
+	// ProcessListSQL is the read that lists the server's current sessions, run
+	// as an ordinary ad-hoc query. Empty when the engine has no such notion
+	// (SQLite), which the caller reports rather than running.
+	ProcessListSQL() string
+
 	QuoteIdent(s string) string
 	QualifiedName(t TableRef) string // schema-qualified, quoted table name
 	Placeholder(i int) string

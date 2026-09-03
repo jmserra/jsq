@@ -74,6 +74,16 @@ func (e *myEngine) FilterPredicate(quotedCol string, _ int) string {
 	return fmt.Sprintf("LOWER(CAST(%s AS CHAR)) LIKE LOWER(?)", quotedCol)
 }
 
+// ProcessListSQL lists the server's threads, longest-running first.
+// information_schema (not SHOW FULL PROCESSLIST) so the result can be ordered;
+// the table is present in every MySQL 5.6+ and MariaDB. Needs the PROCESS
+// privilege to see other users' threads — without it you just see your own.
+func (e *myEngine) ProcessListSQL() string {
+	return `SELECT id, user, host, db, command, time, state, info
+FROM information_schema.processlist
+ORDER BY time DESC`
+}
+
 func (e *myEngine) Databases(ctx context.Context) ([]string, error) {
 	return queryStrings(ctx, e.db, `
 		SELECT schema_name FROM information_schema.schemata

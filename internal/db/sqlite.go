@@ -49,6 +49,10 @@ func (e *sqliteEngine) FilterPredicate(quotedCol string, _ int) string {
 
 func (e *sqliteEngine) Databases(context.Context) ([]string, error) { return nil, nil }
 
+// ProcessListSQL is empty: SQLite is a library on a local file, with no server
+// and so no sessions to list.
+func (e *sqliteEngine) ProcessListSQL() string { return "" }
+
 func (e *sqliteEngine) Tables(ctx context.Context) ([]Table, error) {
 	names, err := queryStrings(ctx, e.db,
 		`SELECT name FROM sqlite_master

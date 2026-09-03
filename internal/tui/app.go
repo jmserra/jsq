@@ -1128,8 +1128,8 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 
 // handleTablesKey drives the full-screen table list: navigation by default (`/`
 // filters), Enter opens the table (moving right to the grid), `d` jumps to the
-// database list, Backspace steps left to the connection picker, and Esc clears the
-// filter.
+// database list, `,` shows the server's process list, Backspace steps left to the
+// connection picker, and Esc clears the filter.
 func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if listKeys(&a.sidebar, msg) {
 		return a, nil
@@ -1155,9 +1155,29 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.openDatabases()
 		case "s": // free-form scratch query for this connection/database
 			return a, editorCmd(a.blankScratchSeed())
+		case ",": // the server's current process list
+			return a.showProcessList()
 		}
 	}
 	return a, nil
+}
+
+// showProcessList runs the engine's process-list query (information_schema on
+// MySQL, pg_stat_activity on Postgres) as an ordinary ad-hoc read, so the result
+// lands in the grid exactly like an `s` query — read-only, and `r` re-runs it to
+// see what has changed. SQLite has no server, so there is nothing to list.
+func (a App) showProcessList() (tea.Model, tea.Cmd) {
+	if a.engine == nil {
+		return a, nil
+	}
+	sql := a.engine.ProcessListSQL()
+	if sql == "" {
+		a.status = "no process list on this engine"
+		return a, nil
+	}
+	ctx := a.begin("loading process list", a.p().id)
+	a.status = "loading process list…"
+	return a, runQueryCmd(ctx, a.gen, a.engine, sql, editorSeed{sql: sql})
 }
 
 // viewState is a jumplist entry: enough to reload a table exactly as it was,

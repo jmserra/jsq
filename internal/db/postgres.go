@@ -49,6 +49,18 @@ func (e *pgEngine) FilterPredicate(quotedCol string, i int) string {
 	return fmt.Sprintf("LOWER(%s::text) LIKE LOWER($%d)", quotedCol, i)
 }
 
+// ProcessListSQL lists the cluster's backends, longest-running query first
+// (idle sessions have a NULL query_start, which sorts last). Our own backend is
+// excluded — it is always the query you are reading. A non-superuser sees other
+// users' rows but their query text is hidden unless it is pg_read_all_stats.
+func (e *pgEngine) ProcessListSQL() string {
+	return `SELECT pid, usename, datname, client_addr, state,
+       now() - query_start AS duration, wait_event_type, wait_event, query
+FROM pg_stat_activity
+WHERE pid <> pg_backend_pid()
+ORDER BY query_start`
+}
+
 func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
 	// datallowconn filters out databases that reject connections (e.g. template0),
 	// which would otherwise be offered in the switcher but fail on select.
