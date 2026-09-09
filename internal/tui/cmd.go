@@ -376,13 +376,45 @@ func prepareInsertCmd(ctx context.Context, gen int, eng db.Engine, t db.Table) t
 // runQueryCmd runs a free-form read (s/S) and returns its result set to display.
 // The result carries no table/PK provenance, so the grid renders it read-only.
 // seed reopens the query in $EDITOR if it fails (see errView).
-func runQueryCmd(ctx context.Context, gen int, eng db.Engine, query string, seed editorSeed) tea.Cmd {
+func runQueryCmd(ctx context.Context, gen int, eng db.Engine, query string, seed editorSeed, args ...any) tea.Cmd {
 	return func() tea.Msg {
-		rs, err := eng.Query(ctx, query)
+		rs, err := eng.Query(ctx, query, args...)
 		if err != nil {
 			return dbErrSeed(ctx, gen, err, seed)
 		}
-		return queryResultMsg{rs: rs, sql: query, gen: gen}
+		return queryResultMsg{rs: rs, sql: query, args: args, gen: gen}
+	}
+}
+
+// usersCmd lists the server's users/roles (for the `u` picker).
+func usersCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
+	return func() tea.Msg {
+		users, err := eng.Users(ctx)
+		if err != nil {
+			return dbErr(ctx, gen, err)
+		}
+		return usersMsg{users: users, gen: gen}
+	}
+}
+
+// grantsCmd shows one user's privileges. The engine composes the query (it may
+// probe what its server exposes first), then it runs as an ordinary ad-hoc read
+// — so the result lands in the grid like an `s` query, and `r` re-runs the same
+// SQL and args without re-probing. Values are bound, not inlined (invariant 7).
+func grantsCmd(ctx context.Context, gen int, eng db.Engine, u db.User) tea.Cmd {
+	return func() tea.Msg {
+		query, args, err := eng.GrantsSQL(ctx, u)
+		if err != nil {
+			return dbErr(ctx, gen, err)
+		}
+		if query == "" {
+			return errMsg{err: fmt.Errorf("no user privileges on this engine"), gen: gen}
+		}
+		rs, err := eng.Query(ctx, query, args...)
+		if err != nil {
+			return dbErr(ctx, gen, err)
+		}
+		return queryResultMsg{rs: rs, sql: query, args: args, gen: gen}
 	}
 }
 

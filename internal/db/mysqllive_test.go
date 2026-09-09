@@ -62,4 +62,6 @@ func TestMySQLLive(t *testing.T) {
 		t.Fatalf("query: %v", err)
 	}
 	t.Logf("sample query → %d cols, %d rows", len(rs.Cols), len(rs.Rows))
+
+	checkUsersLive(t, ctx, e)
 }

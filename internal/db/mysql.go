@@ -84,6 +84,120 @@ FROM information_schema.processlist
 ORDER BY time DESC`
 }
 
+// Users lists the server's accounts (user + host — 'bob'@'%' and 'bob'@'localhost'
+// are two accounts with their own privileges). mysql.user is the complete list,
+// but reading it needs SELECT on the mysql database; without that we fall back to
+// information_schema.user_privileges, which every account can read for itself —
+// so an unprivileged connection sees just its own account rather than an error.
+// Both halves are 5.7-era, so this works unchanged from 5.7 to 9.x.
+func (e *myEngine) Users(ctx context.Context) ([]User, error) {
+	rows, err := e.db.QueryContext(ctx, `SELECT user, host FROM mysql.user ORDER BY user, host`)
+	if err != nil {
+		return e.usersFromPrivileges(ctx)
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.Name, &u.Host); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (e *myEngine) usersFromPrivileges(ctx context.Context) ([]User, error) {
+	names, err := queryStrings(ctx, e.db, `
+		SELECT DISTINCT grantee FROM information_schema.user_privileges
+		ORDER BY grantee`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]User, len(names))
+	for i, n := range names {
+		out[i] = parseGrantee(n)
+	}
+	return out, nil
+}
+
+// parseGrantee splits information_schema's grantee form ('bob'@'%') back into the
+// two halves. Anything that isn't in that form is taken as a bare name.
+func parseGrantee(s string) User {
+	i := strings.LastIndex(s, `'@'`)
+	if i < 0 || !strings.HasPrefix(s, `'`) || !strings.HasSuffix(s, `'`) {
+		return User{Name: s}
+	}
+	unq := func(x string) string { return strings.ReplaceAll(x, `''`, `'`) }
+	return User{Name: unq(s[1:i]), Host: unq(s[i+3 : len(s)-1])}
+}
+
+// grantee renders the account the way information_schema stores it. The result is
+// BOUND as a parameter, never interpolated — the quote doubling is only so the
+// string equals what the catalog holds for a name containing a quote.
+func grantee(u User) string {
+	q := func(s string) string { return `'` + strings.ReplaceAll(s, `'`, `''`) + `'` }
+	return q(u.Name) + "@" + q(u.Host)
+}
+
+// GrantsSQL unions MySQL's four information_schema privilege tables into the
+// shared scope/object/privilege shape, ordered widest scope first. Those four
+// are complete for privileges — verified against 9.7.1, where user_privileges
+// lists the DYNAMIC privileges (MANAGE_DATA_MASKING_POLICY et al.) alongside the
+// static ones, so mysql.global_grants would only duplicate them.
+//
+// The union itself is 5.7-safe: those four views, FIELD(), IF() and CONCAT() are
+// all old, and 5.7 has no dynamic privileges to miss.
+//
+// Role grants are the exception: they live in mysql.role_edges and appear in no
+// information_schema table, which matters because a user whose privileges all
+// arrive through a role otherwise reads as having none. That table is 8.0+ and
+// needs SELECT on mysql.*, so it is probed by reading it rather than assumed —
+// missing (5.7) OR unreadable drops the part instead of failing the whole query,
+// and 5.7 has no roles for it to lose. (MariaDB keeps the same thing in
+// mysql.roles_mapping with different columns; unhandled, so roles are simply not
+// listed there.)
+func (e *myEngine) GrantsSQL(ctx context.Context, u User) (string, []any, error) {
+	parts := []string{
+		`SELECT 'global' AS scope, '' AS object, privilege_type AS privilege, is_grantable AS grantable
+		   FROM information_schema.user_privileges WHERE grantee = ?`,
+		`SELECT 'database', table_schema, privilege_type, is_grantable
+		   FROM information_schema.schema_privileges WHERE grantee = ?`,
+		`SELECT 'table', CONCAT(table_schema, '.', table_name), privilege_type, is_grantable
+		   FROM information_schema.table_privileges WHERE grantee = ?`,
+		`SELECT 'column', CONCAT(table_schema, '.', table_name, '.', column_name), privilege_type, is_grantable
+		   FROM information_schema.column_privileges WHERE grantee = ?`,
+	}
+	g := grantee(u)
+	args := []any{g, g, g, g}
+
+	if e.readable(ctx, "mysql.role_edges") {
+		parts = append(parts, `SELECT 'role', CONCAT(FROM_USER, '@', FROM_HOST), 'MEMBER', IF(WITH_ADMIN_OPTION, 'YES', 'NO')
+		   FROM mysql.role_edges WHERE TO_USER = ? AND TO_HOST = ?`)
+		args = append(args, u.Name, u.Host)
+	}
+
+	sql := "SELECT scope, object, privilege, grantable FROM (\n" +
+		strings.Join(parts, "\nUNION ALL\n") +
+		"\n) g\nORDER BY FIELD(scope, 'global', 'role', 'database', 'table', 'column'), object, privilege"
+	return sql, args, nil
+}
+
+// readable reports whether a catalog table both exists and can be selected from
+// by this connection — the two ways an optional privilege source drops out.
+func (e *myEngine) readable(ctx context.Context, table string) bool {
+	// table is one of this file's own constants, never user input.
+	rows, err := e.db.QueryContext(ctx, "SELECT 1 FROM "+table+" LIMIT 1")
+	if err != nil {
+		return false
+	}
+	rows.Close()
+	return true
+}
+
 func (e *myEngine) Databases(ctx context.Context) ([]string, error) {
 	return queryStrings(ctx, e.db, `
 		SELECT schema_name FROM information_schema.schemata

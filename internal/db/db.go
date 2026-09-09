@@ -45,6 +45,23 @@ type ForeignKey struct {
 	RefColumns []string
 }
 
+// User is a database user (Postgres: a role). Host is MySQL's other half of the
+// account identity — an account is 'bob'@'%', and two rows with the same name
+// but different hosts are two different users with their own privileges.
+// Postgres roles have no host, so it stays empty there.
+type User struct {
+	Name string
+	Host string
+}
+
+// Label is the display form: "bob@%" on MySQL, plain "bob" on Postgres.
+func (u User) Label() string {
+	if u.Host == "" {
+		return u.Name
+	}
+	return u.Name + "@" + u.Host
+}
+
 // ResultSet is a query result. A nil Rows element is SQL NULL.
 type ResultSet struct {
 	Cols  []string
@@ -68,6 +85,28 @@ type Engine interface {
 	// as an ordinary ad-hoc query. Empty when the engine has no such notion
 	// (SQLite), which the caller reports rather than running.
 	ProcessListSQL() string
+
+	// Users lists the server's users/roles for the `u` picker. Nil when the
+	// engine has no such notion (SQLite), which the caller reports.
+	Users(ctx context.Context) ([]User, error)
+
+	// GrantsSQL returns the read that lists u's privileges, with its bind args —
+	// run as an ordinary ad-hoc query, so `r` re-runs it unchanged. It takes a
+	// ctx because an engine may probe what its server exposes before composing
+	// the query (MySQL's role/dynamic-privilege tables are version- and
+	// privilege-dependent). Empty SQL means the engine has no users at all.
+	//
+	// Every engine normalises to the same four columns — scope, object,
+	// privilege, grantable — so one result shape covers both dialects:
+	//
+	//	global    │                  │ SELECT         │ NO
+	//	role      │ readonly         │ MEMBER         │ NO
+	//	database  │ appdb            │ ALL PRIVILEGES │ NO
+	//	table     │ appdb.orders     │ UPDATE         │ NO
+	//
+	// with Postgres adding `attribute` rows (SUPERUSER, LOGIN, …) for the role
+	// flags that are its equivalent of a global privilege.
+	GrantsSQL(ctx context.Context, u User) (string, []any, error)
 
 	QuoteIdent(s string) string
 	QualifiedName(t TableRef) string // schema-qualified, quoted table name

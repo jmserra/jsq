@@ -61,6 +61,81 @@ WHERE pid <> pg_backend_pid()
 ORDER BY query_start`
 }
 
+// Users lists the cluster's roles — both login roles and the group roles that
+// grant through them, since a role's privileges are only legible alongside the
+// groups it belongs to. The pg_* built-in roles (pg_read_all_stats and friends)
+// are filtered out as noise; every user can read pg_roles, so this needs no
+// privilege of its own.
+func (e *pgEngine) Users(ctx context.Context) ([]User, error) {
+	names, err := queryStrings(ctx, e.db,
+		`SELECT rolname FROM pg_roles WHERE rolname NOT LIKE 'pg\_%' ORDER BY rolname`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]User, len(names))
+	for i, n := range names {
+		out[i] = User{Name: n}
+	}
+	return out, nil
+}
+
+// GrantsSQL assembles the role's privileges from the catalogs into the shared
+// scope/object/privilege shape. Four sources, widest first:
+//
+//   - attribute: the pg_roles flags (SUPERUSER, CREATEDB, LOGIN, …). Postgres has
+//     no global privilege table; these flags are its equivalent.
+//   - role: pg_auth_members — the groups this role belongs to. Privileges reached
+//     through them are NOT expanded here, so a role row is the pointer to follow.
+//   - database/schema/table: aclexplode over the object's ACL. COALESCE to
+//     acldefault matters — a NULL acl means "never granted, defaults apply", so
+//     without it an object's owner would show no privileges on what they own.
+//
+// Read from pg_catalog rather than information_schema.table_privileges, which
+// only shows grants involving a currently-enabled role — it would silently
+// return nothing for the other users you are here to inspect. Grants to PUBLIC
+// are left out: they belong to everyone, not to this role.
+func (e *pgEngine) GrantsSQL(_ context.Context, u User) (string, []any, error) {
+	return `SELECT scope, object, privilege, grantable FROM (
+  SELECT 'attribute' AS scope, '' AS object, a.attr AS privilege, '' AS grantable
+    FROM pg_roles r
+    CROSS JOIN LATERAL (VALUES
+      ('SUPERUSER', r.rolsuper), ('CREATEDB', r.rolcreatedb), ('CREATEROLE', r.rolcreaterole),
+      ('LOGIN', r.rolcanlogin), ('REPLICATION', r.rolreplication), ('BYPASSRLS', r.rolbypassrls),
+      ('INHERIT', r.rolinherit)) AS a(attr, held)
+    WHERE r.rolname = $1 AND a.held
+  UNION ALL
+  SELECT 'role', g.rolname, 'MEMBER', CASE WHEN m.admin_option THEN 'YES' ELSE 'NO' END
+    FROM pg_auth_members m
+    JOIN pg_roles g ON g.oid = m.roleid
+    JOIN pg_roles c ON c.oid = m.member
+    WHERE c.rolname = $1
+  UNION ALL
+  SELECT 'database', d.datname, x.privilege_type, CASE WHEN x.is_grantable THEN 'YES' ELSE 'NO' END
+    FROM pg_database d
+    CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) x
+    WHERE pg_get_userbyid(x.grantee) = $1
+  UNION ALL
+  SELECT 'schema', n.nspname, x.privilege_type, CASE WHEN x.is_grantable THEN 'YES' ELSE 'NO' END
+    FROM pg_namespace n
+    CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_'
+      AND pg_get_userbyid(x.grantee) = $1
+  UNION ALL
+  SELECT 'table', n.nspname || '.' || c.relname, x.privilege_type,
+         CASE WHEN x.is_grantable THEN 'YES' ELSE 'NO' END
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) x
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_'
+      AND pg_get_userbyid(x.grantee) = $1
+) g
+ORDER BY CASE scope
+           WHEN 'attribute' THEN 0 WHEN 'role' THEN 1 WHEN 'database' THEN 2
+           WHEN 'schema' THEN 3 ELSE 4 END,
+         object, privilege`, []any{u.Name}, nil
+}
+
 func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
 	// datallowconn filters out databases that reject connections (e.g. template0),
 	// which would otherwise be offered in the switcher but fail on select.

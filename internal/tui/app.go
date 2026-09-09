@@ -21,6 +21,7 @@ const (
 	screenBrowse                  // the results grid
 	screenTables                  // the full-screen table list
 	screenDatabases               // the full-screen database list (T)
+	screenUsers                   // the full-screen user/role list (u)
 )
 
 const leftPad = 1 // 1-char blank margin before the table list / grid
@@ -51,13 +52,15 @@ type App struct {
 	// once one commits (connectedMsg).
 	preConn *connRestore
 
-	engine  db.Engine
-	sidebar sidebar // the full-screen table list (screenTables)
-	dbs     sidebar // the full-screen database list (screenDatabases; items are db.Table{Name: db})
-	cell    cellView
-	help    help
-	confirm confirmView // safe-mode "run this mutation?" overlay
-	errView errView     // failed-statement modal (full error + query, e to re-edit)
+	engine   db.Engine
+	sidebar  sidebar   // the full-screen table list (screenTables)
+	dbs      sidebar   // the full-screen database list (screenDatabases; items are db.Table{Name: db})
+	users    sidebar   // the full-screen user list (screenUsers; items are db.Table{Name: user.Label()})
+	userList []db.User // the users behind that list, in the same order (findUser maps a label back)
+	cell     cellView
+	help     help
+	confirm  confirmView // safe-mode "run this mutation?" overlay
+	errView  errView     // failed-statement modal (full error + query, e to re-edit)
 
 	// panes are the split views (`<space>v`), left→right; focus indexes the live
 	// one. There is always at least one. Each owns its grid, what it's showing,
@@ -81,11 +84,16 @@ type App struct {
 	history  map[string][]histEntry
 	histView histView
 
-	dbName         string
-	w, h           int
-	status         string
-	postExecStatus string // shown after the reload that follows a full-path exec
-	fatalErr       error  // connect failure → carried out to main, printed to stderr
+	dbName string
+	w, h   int
+	status string
+	// nextStatus is the caption for the next result that lands, replacing the
+	// generic one: the affected count that must survive the reload after a
+	// full-path exec, or whose grants an ad-hoc result is showing. begin() clears
+	// it, so a superseded op can't leave its caption on someone else's result —
+	// set it AFTER begin, never before.
+	nextStatus string
+	fatalErr   error // connect failure → carried out to main, printed to stderr
 
 	// Header activity indicator (top-right): activity names the in-flight DB op
 	// (empty → nothing shown), cancel kills it (Esc), spinner is the frame index.
@@ -121,6 +129,7 @@ func New(conns []config.Conn, direct config.Conn) App {
 		history:   map[string][]histEntry{},
 		sidebar:   sidebar{label: "tables"},
 		dbs:       sidebar{label: "databases"},
+		users:     sidebar{label: "users"},
 		tunneled:  map[string]bool{},
 	}
 	// One pane to start; `<space>v` adds more. New is the only constructor, so
@@ -251,7 +260,8 @@ func (a App) isConnecting() bool { return a.connCmd != "" || (a.connecting && a.
 func (a *App) begin(label string, paneID int) context.Context {
 	a.stop()
 	a.activity = label
-	a.gen++ // supersede any prior op: its late result will no longer match a.gen
+	a.nextStatus = "" // a new op invalidates any caption waiting for a result
+	a.gen++           // supersede any prior op: its late result will no longer match a.gen
 	a.opPane = paneID
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
@@ -407,6 +417,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 
+	case usersMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
+		a.stop()
+		if len(msg.users) == 0 {
+			a.status = "no users on this engine"
+			return a, nil
+		}
+		a.userList = msg.users
+		items := make([]db.Table, len(msg.users))
+		for i, u := range msg.users {
+			items[i] = db.Table{Name: u.Label()}
+		}
+		a.users.setTables(items)
+		a.screen = screenUsers
+		a.layout()
+		a.status = ""
+		return a, nil
+
 	case rowsMsg:
 		if a.stale(msg.gen) { // a superseded load landed late — don't apply it
 			return a, nil
@@ -440,9 +470,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// just clears the previous view's transient message.
 		a.status = ""
 		// A reload triggered by a full-path exec keeps its confirmation visible.
-		if a.postExecStatus != "" {
-			a.status = a.postExecStatus
-			a.postExecStatus = ""
+		if a.nextStatus != "" {
+			a.status = a.nextStatus
+			a.nextStatus = ""
 		}
 		return a, nil
 
@@ -539,11 +569,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.grid.loading = false
 		p.grid.reset()
 		p.adHoc = true
-		p.adHocQuery = msg.sql
+		p.adHocQuery, p.adHocArgs = msg.sql, msg.args
 		a.screen = screenBrowse
 		a.layout()
 		a.recordQueryCount(msg.sql, len(msg.rs.Rows), true)
 		a.status = fmt.Sprintf("query — %d row(s)", len(msg.rs.Rows))
+		if a.nextStatus != "" { // a labelled read (grants): say what it is, not "query"
+			a.status = fmt.Sprintf("%s — %d row(s)", a.nextStatus, len(msg.rs.Rows))
+			a.nextStatus = ""
+		}
 		return a, nil
 
 	case execDoneMsg:
@@ -564,8 +598,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// focused pane — focus can have moved while the write was in flight, and
 		// reloading whatever is focused now would both miss the change and stomp an
 		// unrelated view.
-		a.postExecStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
 		ctx := a.begin("reloading", p.id)
+		a.nextStatus = fmt.Sprintf("ran — %d row(s) affected", msg.affected)
 		return a, a.loadPaneCmd(ctx, p)
 
 	case tea.KeyMsg:
@@ -586,6 +620,7 @@ func (a *App) layout() {
 	// The two lists each own the whole body (separate full-screen pages).
 	a.sidebar.w, a.sidebar.h = avail, bodyH
 	a.dbs.w, a.dbs.h = avail, bodyH
+	a.users.w, a.users.h = avail, bodyH
 	a.connList.w, a.connList.h = avail, bodyH
 	a.layoutPanes(avail, bodyH)
 }
@@ -878,6 +913,9 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenDatabases:
 		return a.handleDatabasesKey(msg)
 
+	case screenUsers:
+		return a.handleUsersKey(msg)
+
 	case screenBrowse:
 		switch msg.String() {
 		case "backspace": // step left to the table list
@@ -886,6 +924,8 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "d": // go to the database list
 			return a.openDatabases()
+		case "u": // go to the user list
+			return a.openUsers()
 		case "ctrl+d": // close the focused pane
 			// Not on the <space> leader with the other split commands: closing is
 			// frequent enough to want one keystroke. Reached here rather than in
@@ -918,6 +958,8 @@ func (a App) typing() bool {
 		return a.sidebar.filtering
 	case screenDatabases:
 		return a.dbs.filtering
+	case screenUsers:
+		return a.users.filtering
 	}
 	return false
 }
@@ -1126,6 +1168,63 @@ func (a App) switchDatabase(name string) (tea.Model, tea.Cmd) {
 	return a, openEngineCmd(gen, config.Conn{Name: a.connName}, dsn, false)
 }
 
+// openUsers fetches the server's users/roles and shows the picker. Reachable
+// from both the table list and the grid, like the database list — and, like it,
+// it changes nothing about the session: the engine stays where it is, so there
+// is no allowSessionMove check to make.
+func (a App) openUsers() (tea.Model, tea.Cmd) {
+	if a.engine == nil {
+		return a, nil
+	}
+	ctx := a.begin("loading users", noPane)
+	a.status = "loading users…"
+	return a, usersCmd(ctx, a.gen, a.engine)
+}
+
+// handleUsersKey drives the full-screen user list (reached with `u`): navigation
+// by default, `/` filters, Enter shows that user's privileges in the grid,
+// Backspace steps back to the table list, and Esc clears the filter.
+func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if listKeys(&a.users, msg) {
+		return a, nil
+	}
+	switch msg.Type {
+	case tea.KeyEnter:
+		a.users.commitFilter() // an Enter from filter mode opens; leave nav mode
+		if t, ok := a.users.selected(); ok {
+			if u, ok2 := a.findUser(t.Name); ok2 {
+				return a.showGrants(u)
+			}
+		}
+	case tea.KeyBackspace:
+		a.screen = screenTables // step back to the table list
+		a.layout()
+	}
+	return a, nil
+}
+
+// findUser maps a list label back to the user it was rendered from — the same
+// trick the connection picker uses (the sidebar carries names, not structs).
+func (a App) findUser(label string) (db.User, bool) {
+	for _, u := range a.userList {
+		if u.Label() == label {
+			return u, true
+		}
+	}
+	return db.User{}, false
+}
+
+// showGrants runs the user's privilege read, which lands in the grid as an
+// ordinary ad-hoc result: read-only, and `r` re-runs it. The engine composes the
+// query inside the command — building it can need a round trip (see GrantsSQL),
+// and no engine call may happen in Update (invariant 1).
+func (a App) showGrants(u db.User) (tea.Model, tea.Cmd) {
+	ctx := a.begin("loading grants", a.p().id)
+	a.status = "loading grants for " + u.Label() + "…"
+	a.nextStatus = "grants for " + u.Label()
+	return a, grantsCmd(ctx, a.gen, a.engine, u)
+}
+
 // handleTablesKey drives the full-screen table list: navigation by default (`/`
 // filters), Enter opens the table (moving right to the grid), `d` jumps to the
 // database list, `,` shows the server's process list, Backspace steps left to the
@@ -1155,6 +1254,8 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.openDatabases()
 		case "s": // free-form scratch query for this connection/database
 			return a, editorCmd(a.blankScratchSeed())
+		case "u": // go to the user list
+			return a.openUsers()
 		case ",": // the server's current process list
 			return a.showProcessList()
 		}
@@ -1917,7 +2018,7 @@ func (a App) reloadView() (tea.Model, tea.Cmd) {
 		}
 		ctx := a.begin("reloading", a.p().id)
 		a.status = "reloading…"
-		return a, runQueryCmd(ctx, a.gen, a.engine, a.p().adHocQuery, editorSeed{sql: a.p().adHocQuery})
+		return a, runQueryCmd(ctx, a.gen, a.engine, a.p().adHocQuery, editorSeed{sql: a.p().adHocQuery}, a.p().adHocArgs...)
 	}
 	if a.p().currentTable.Name == "" {
 		return a, nil
@@ -1977,6 +2078,9 @@ func (a App) View() string {
 		return a.statusLine() + "\n" + body
 	case screenDatabases:
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.dbs.View())
+		return a.statusLine() + "\n" + body
+	case screenUsers:
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.users.View())
 		return a.statusLine() + "\n" + body
 	case screenBrowse:
 		return a.browseView()

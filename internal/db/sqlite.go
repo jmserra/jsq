@@ -53,6 +53,15 @@ func (e *sqliteEngine) Databases(context.Context) ([]string, error) { return nil
 // and so no sessions to list.
 func (e *sqliteEngine) ProcessListSQL() string { return "" }
 
+// Users is nil and GrantsSQL empty for the same reason: a SQLite database is a
+// file, with no accounts and no privileges — access is whatever the filesystem
+// says. The caller reports that rather than running anything.
+func (e *sqliteEngine) Users(context.Context) ([]User, error) { return nil, nil }
+
+func (e *sqliteEngine) GrantsSQL(context.Context, User) (string, []any, error) {
+	return "", nil, nil
+}
+
 func (e *sqliteEngine) Tables(ctx context.Context) ([]Table, error) {
 	names, err := queryStrings(ctx, e.db,
 		`SELECT name FROM sqlite_master

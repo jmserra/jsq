@@ -33,6 +33,7 @@ type pane struct {
 	sortAsc      bool
 	adHoc        bool   // grid shows a free-form (s) query result, not a table
 	adHocQuery   string // SQL behind the adHoc result, so `r` can re-run it
+	adHocArgs    []any  // its bind values (jsq-composed reads: the grants view)
 
 	// Per-pane jumplist: visited views oldest→newest, viewIdx = current (-1
 	// before the first). See App.views' old doc comment for the semantics.
@@ -70,7 +71,8 @@ func (a *App) newPane() pane {
 // clone starts at an identical viewIdx, so a shared backing array would have the
 // first navigation in either pane overwrite the other's history. The *gridSnapshot
 // pointers inside are shared, which is fine — nothing writes one in place except
-// the intentional edit reflection.
+// the intentional edit reflection. adHocArgs is shared too: it is replaced
+// wholesale by the next result, never written through.
 func (a *App) clonePane(src *pane) pane {
 	c := *src
 	c.id = 0 // assigned below; never inherit the source's identity

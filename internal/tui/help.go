@@ -72,6 +72,7 @@ var helpItems = []helpItem{
 	{head: "Navigate"},
 	{key: "Bksp", desc: "step left: grid → table list → connection picker"},
 	{key: "d", desc: "go to the database list (jump to another database)"},
+	{key: "u", desc: "go to the user list (enter shows that user's privileges)"},
 	{key: "Tab", desc: "jump forward through views (= Ctrl-i)"},
 	{head: "General"},
 	{key: "?", desc: "toggle this help"},

@@ -73,11 +73,21 @@ type execDoneMsg struct {
 }
 
 // queryResultMsg is delivered when a free-form read (s/S) returns rows to show.
-// sql is the query that produced them, kept so `r` can re-run it.
+// sql is the query that produced them, kept so `r` can re-run it — with args,
+// its bind values, for the reads jsq composes itself (the grants view). A
+// user-authored s query has its values inlined and so carries none.
 type queryResultMsg struct {
-	rs  *db.ResultSet
-	sql string
-	gen int
+	rs   *db.ResultSet
+	sql  string
+	args []any
+	gen  int
+}
+
+// usersMsg carries the server's users/roles for the `u` picker. Empty means the
+// engine has no such notion (SQLite), which the handler reports.
+type usersMsg struct {
+	users []db.User
+	gen   int
 }
 
 // databasesMsg carries the databases available on the current connection (T).

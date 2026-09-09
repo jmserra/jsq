@@ -144,9 +144,10 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `Ctrl-d` | close the focused pane (the last one stays). Not on the `Space` leader — closing is frequent enough to want one keystroke |
 | `Backspace` | step left along the navigation chain: grid → table list → connection picker. Switching connection from the picker reuses its `cmd` tunnel if already up |
 | `d` | go to the database list — jump to another database on the same connection |
+| `u` | go to the user list — every account on the server (MySQL) or role in the cluster (Postgres). `Enter` shows that user's privileges in the grid as a read-only ad-hoc result: one row per grant, normalised to `scope · object · privilege · grantable`, widest scope first — `global`/`attribute`, then the roles they belong to, then per-database, per-schema, per-table and per-column grants. Read-only for now: no `CREATE USER`/`GRANT` yet (SQLite has no users, so it reports that instead) |
 | `Tab` | step the jumplist **forward** (this is where a `Ctrl-i` lands, since terminals send it as `Tab`) |
-| *(picker / table / database list)* `↑`/`↓` or `j`/`k`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` or `h`/`l` jump columns, `g`/`G` to the ends). Navigation is **Connections → Tables → Grid**: `Enter` opens (moves right), `Backspace` steps back (moves left) |
-| *(picker / table / database list)* `/` | start filtering — type to narrow live (prefix, then substring when the prefix finds nothing; `←`/`→`, `Ctrl-w` to edit), `Enter` opens the highlighted match, `Esc` clears the filter |
+| *(picker / table / database / user list)* `↑`/`↓` or `j`/`k`, `Ctrl-p`/`Ctrl-n` | move (the list is a multi-column grid on a wide screen; `←`/`→` or `h`/`l` jump columns, `g`/`G` to the ends). Navigation is **Connections → Tables → Grid**: `Enter` opens (moves right), `Backspace` steps back (moves left) |
+| *(picker / table / database / user list)* `/` | start filtering — type to narrow live (prefix, then substring when the prefix finds nothing; `←`/`→`, `Ctrl-w` to edit), `Enter` opens the highlighted match, `Esc` clears the filter |
 | `?` | toggle the keybinding cheat sheet (`?` / `Esc` / `q` closes; `j`/`k` scroll) |
 | `Ctrl-c` | quit |
 
