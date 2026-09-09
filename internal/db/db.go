@@ -108,6 +108,14 @@ type Engine interface {
 	// flags that are its equivalent of a global privilege.
 	GrantsSQL(ctx context.Context, u User) (string, []any, error)
 
+	// CreateUserSQL is the starting point for creating a user: the statements a
+	// new account normally needs, written the way this dialect writes them, with
+	// name as the placeholder to replace and dbName the database to scope the
+	// grant to (unscoped when empty). It is a TEMPLATE, opened in $EDITOR and run
+	// verbatim once the user has edited it — jsq never composes a CREATE USER of
+	// its own. Empty when the engine has no users (SQLite).
+	CreateUserSQL(name, dbName string) string
+
 	QuoteIdent(s string) string
 	QualifiedName(t TableRef) string // schema-qualified, quoted table name
 	Placeholder(i int) string

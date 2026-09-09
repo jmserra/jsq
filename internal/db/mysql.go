@@ -47,6 +47,13 @@ func mysqlDSN(rawurl string) (string, error) {
 	}
 	cfg.Addr = host
 	cfg.DBName = strings.TrimPrefix(u.Path, "/")
+	// Let one Exec carry several statements, as Postgres already does: the
+	// $EDITOR full path hands the server exactly what the user wrote, and a
+	// two-statement CREATE USER + GRANT is the normal way to write it. Without
+	// this the driver rejects the second statement as a syntax error. It applies
+	// only to statements sent whole (Exec/Query with no args); everything jsq
+	// parameterizes is a single statement and still goes through a prepare.
+	cfg.MultiStatements = true
 	if u.User != nil {
 		cfg.User = u.User.Username()
 		if pw, ok := u.User.Password(); ok {
@@ -184,6 +191,22 @@ func (e *myEngine) GrantsSQL(ctx context.Context, u User) (string, []any, error)
 		strings.Join(parts, "\nUNION ALL\n") +
 		"\n) g\nORDER BY FIELD(scope, 'global', 'role', 'database', 'table', 'column'), object, privilege"
 	return sql, args, nil
+}
+
+// CreateUserSQL templates the two statements a usable MySQL account needs: the
+// account itself (user + host — '%' is any host, the usual default for a
+// container or a LAN server) and one grant. Both are 5.7-compatible; since 8.0 a
+// GRANT can no longer create the account implicitly, which is why the CREATE
+// comes first. The grant is deliberately SELECT on the current database only —
+// the narrow starting point to widen by hand, not a privilege handed out because
+// a template said so.
+func (e *myEngine) CreateUserSQL(name, dbName string) string {
+	acct := "'" + name + "'@'%'"
+	sql := "CREATE USER " + acct + " IDENTIFIED BY 'change-me';\n"
+	if dbName != "" {
+		sql += "GRANT SELECT ON " + e.QuoteIdent(dbName) + ".* TO " + acct + ";\n"
+	}
+	return sql
 }
 
 // readable reports whether a catalog table both exists and can be selected from

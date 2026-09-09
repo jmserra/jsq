@@ -58,6 +58,7 @@ type editorSubmitMsg struct {
 	sql      string
 	remember db.Table
 	scratch  bool // free-form table-list scratch → record in `b` history without a table
+	users    bool // user-management write (o on the user list) → reload that list
 }
 
 // editorAbortedMsg means the editor closed without saving (:q!) or the buffer was
@@ -69,6 +70,7 @@ type editorAbortedMsg struct{}
 type execDoneMsg struct {
 	sql      string
 	affected int64
+	users    bool // the write managed users → reload that list, not a table
 	gen      int
 }
 

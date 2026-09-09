@@ -56,7 +56,7 @@ var helpItems = []helpItem{
 	{head: "Edit"},
 	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now; type NULL to null it)"},
 	{key: "E", desc: "edit cell in $EDITOR"},
-	{key: "o", desc: "insert a blank row"},
+	{key: "o", desc: "insert a blank row (on the user list: create a user)"},
 	{key: "D", desc: "delete the current row"},
 	{key: "p", desc: "duplicate the current row"},
 	{head: "SQL"},

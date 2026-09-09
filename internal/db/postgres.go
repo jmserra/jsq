@@ -136,6 +136,25 @@ ORDER BY CASE scope
          object, privilege`, []any{u.Name}, nil
 }
 
+// CreateUserSQL templates what a usable Postgres login role needs, which is more
+// than one statement: the role, the right to connect to this database, the right
+// to see into the schema, and then the tables themselves. The last grant covers
+// only the tables that exist right now — ALTER DEFAULT PRIVILEGES is what covers
+// future ones, mentioned in a comment rather than run, since it is a standing
+// policy change and should be a deliberate edit.
+func (e *pgEngine) CreateUserSQL(name, dbName string) string {
+	q := e.QuoteIdent(name)
+	sql := "CREATE ROLE " + q + " LOGIN PASSWORD 'change-me';\n"
+	if dbName != "" {
+		sql += "GRANT CONNECT ON DATABASE " + e.QuoteIdent(dbName) + " TO " + q + ";\n"
+	}
+	sql += "GRANT USAGE ON SCHEMA public TO " + q + ";\n" +
+		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO " + q + ";\n" +
+		"-- existing tables only; for future ones:\n" +
+		"-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO " + q + ";\n"
+	return sql
+}
+
 func (e *pgEngine) Databases(ctx context.Context) ([]string, error) {
 	// datallowconn filters out databases that reject connections (e.g. template0),
 	// which would otherwise be offered in the switcher but fail on select.

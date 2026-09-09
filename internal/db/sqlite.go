@@ -62,6 +62,8 @@ func (e *sqliteEngine) GrantsSQL(context.Context, User) (string, []any, error) {
 	return "", nil, nil
 }
 
+func (e *sqliteEngine) CreateUserSQL(string, string) string { return "" }
+
 func (e *sqliteEngine) Tables(ctx context.Context) ([]Table, error) {
 	names, err := queryStrings(ctx, e.db,
 		`SELECT name FROM sqlite_master

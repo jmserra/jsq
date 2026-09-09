@@ -282,6 +282,7 @@ func editorCmd(seed editorSeed) tea.Cmd {
 		if sub, ok := msg.(editorSubmitMsg); ok {
 			sub.remember = seed.remember // carry the s "remember for table" marker
 			sub.scratch = seed.scratch   // and the no-table scratch marker
+			sub.users = seed.users       // and the "this manages users" marker
 			return sub
 		}
 		return msg
@@ -331,6 +332,8 @@ func positionArgs(editor string, seed editorSeed) []string {
 		return []string{cur, `+call feedkeys("vi'", "n")`}
 	case selectToken:
 		return []string{cur, `+call feedkeys("v$", "n")`}
+	case selectWord:
+		return []string{cur, `+call feedkeys("viw", "n")`}
 	default:
 		return []string{cur}
 	}
@@ -355,7 +358,7 @@ func execRawCmd(ctx context.Context, gen int, eng db.Engine, query string, seed 
 		if err != nil {
 			return dbErrSeed(ctx, gen, err, seed)
 		}
-		return execDoneMsg{sql: query, affected: n, gen: gen}
+		return execDoneMsg{sql: query, affected: n, users: seed.users, gen: gen}
 	}
 }
 

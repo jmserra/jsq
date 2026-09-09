@@ -56,6 +56,7 @@ const (
 	selectNone         selectKind = iota // just place the cursor (empty / multi-line)
 	selectToken                          // whole literal to end of line (NULL / number)
 	selectInsideQuotes                   // the text between a string literal's quotes
+	selectWord                           // the word under the cursor, whatever quotes it sits in
 )
 
 // editorSeed is a generated statement plus where to put the cursor, so the
@@ -75,6 +76,13 @@ type editorSeed struct {
 	// submit it's still recorded in the connection's `b` history even though
 	// there's no table to key a last-query against.
 	scratch bool
+
+	// users marks a user-management write (`o` on the user list): when it lands,
+	// the user list is
+	// what needs reloading, not a table. It rides all the way through
+	// editorSubmitMsg → execRawCmd → execDoneMsg, so a statement reopened from
+	// the error modal still refreshes the right thing.
+	users bool
 }
 
 // inlinedKeyPreds renders the "col = literal" WHERE predicates for a full-PK
@@ -295,4 +303,56 @@ func stripSQLComments(s string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// newUserName is the placeholder account name in the create-user template — what the
+// cursor lands on, pre-selected, so the first thing you type replaces it.
+const newUserName = "newuser"
+
+// buildCreateUserStmt is the create-user starting point (`o` on the user list,
+// the same key as the grid's insert-a-row): the engine's
+// template for a new account, headed by the connection and database it will be
+// created on. Nothing here runs on its own — it opens in $EDITOR like every other
+// full path, and :wq runs whatever the user made of it (on a safe connection,
+// after the y/n confirmation), which is why the template can be opinionated about
+// a narrow starting grant without deciding anything.
+//
+// Empty SQL means the engine has no users; the caller reports that.
+func buildCreateUserStmt(eng db.Engine, connName, dbName string) editorSeed {
+	body := eng.CreateUserSQL(newUserName, dbName)
+	if body == "" {
+		return editorSeed{}
+	}
+	// Where it will run — connection · database, skipping either if unnamed (a
+	// direct DSN has no connection name, the way the status line shows "adhoc").
+	var where []string
+	for _, part := range []string{connName, dbName} {
+		if part != "" {
+			where = append(where, part)
+		}
+	}
+	head := "-- new user"
+	if len(where) > 0 {
+		head += " on " + strings.Join(where, " · ")
+	}
+	head += " — edit, then :wq to run (:q! aborts)\n" +
+		"-- ⚠ change the name and the password first: this runs exactly as written\n"
+	sql := head + body
+
+	// Land on the placeholder name and select it. It sits inside quotes on MySQL
+	// and inside a quoted identifier on Postgres, so the selection is by word
+	// rather than by quote — one kind covers both.
+	line, col := locate(sql, newUserName)
+	return editorSeed{sql: sql, line: line, col: col, kind: selectWord, users: true}
+}
+
+// locate returns the 1-based line and byte column of the first occurrence of
+// needle in sql (0, 0 when it does not occur).
+func locate(sql, needle string) (int, int) {
+	for i, l := range strings.Split(sql, "\n") {
+		if c := strings.Index(l, needle); c >= 0 {
+			return i + 1, c + 1
+		}
+	}
+	return 0, 0
 }

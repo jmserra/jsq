@@ -434,7 +434,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.users.setTables(items)
 		a.screen = screenUsers
 		a.layout()
-		a.status = ""
+		a.status = a.nextStatus // "" unless a c write is reporting through the reload
+		a.nextStatus = ""
 		return a, nil
 
 	case rowsMsg:
@@ -533,7 +534,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// with a read verb, so a trailing write can't slip past unconfirmed.
 		// The failed statement reopens exactly as submitted, keeping its s remember/
 		// scratch markers so a re-run still continues the edit loop and records.
-		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch}
+		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch, users: msg.users}
 		if isReadSQL(msg.sql) && !(a.safe && isMultiStatement(msg.sql)) {
 			ctx := a.begin("running query", a.p().id)
 			a.status = "running query…"
@@ -585,6 +586,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.recordQueryCount(msg.sql, int(msg.affected), false)
+		// A user-management write (o on the user list) changed the server's
+		// accounts, not any
+		// pane's rows: reload that list instead, which also lands us back on it.
+		// begin() stops the finished op, so this needs no stop() of its own.
+		if msg.users {
+			ctx := a.begin("loading users", noPane)
+			a.nextStatus = "ran — user list reloaded"
+			return a, usersCmd(ctx, a.gen, a.engine)
+		}
 		p, ok := a.opTarget()
 		// No table to reload (e.g. a write scratch from the table list before any
 		// table was opened, or the pane went away) → just report and stay put.
@@ -594,7 +604,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		// Reload the view the write ran against so the change is reflected; the
-		// affected count survives the reload via postExecStatus. Reload p, NOT the
+		// affected count survives the reload via nextStatus. Reload p, NOT the
 		// focused pane — focus can have moved while the write was in flight, and
 		// reloading whatever is focused now would both miss the change and stomp an
 		// unrelated view.
@@ -1182,8 +1192,9 @@ func (a App) openUsers() (tea.Model, tea.Cmd) {
 }
 
 // handleUsersKey drives the full-screen user list (reached with `u`): navigation
-// by default, `/` filters, Enter shows that user's privileges in the grid,
-// Backspace steps back to the table list, and Esc clears the filter.
+// by default, `/` filters, Enter shows that user's privileges in the grid, `o`
+// opens the CREATE USER template in $EDITOR, Backspace steps back to the table
+// list, and Esc clears the filter.
 func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if listKeys(&a.users, msg) {
 		return a, nil
@@ -1199,8 +1210,26 @@ func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyBackspace:
 		a.screen = screenTables // step back to the table list
 		a.layout()
+	case tea.KeyRunes:
+		// `o` — the grid's insert-a-row key. Same act, different list.
+		if string(msg.Runes) == "o" {
+			return a.createUser()
+		}
 	}
 	return a, nil
+}
+
+// createUser opens the engine's CREATE USER template in $EDITOR. It is literally
+// the o full path aimed at another list: nothing runs until :wq, the statement runs
+// verbatim, a safe connection confirms it first, and a failure reopens it in the
+// error modal. The template is generated text, not a DB call, so it is built here.
+func (a App) createUser() (tea.Model, tea.Cmd) {
+	seed := buildCreateUserStmt(a.engine, a.connName, a.dbName)
+	if seed.sql == "" {
+		a.status = "no users on this engine"
+		return a, nil
+	}
+	return a, editorCmd(seed)
 }
 
 // findUser maps a list label back to the user it was rendered from — the same
