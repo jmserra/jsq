@@ -209,6 +209,73 @@ func (e *myEngine) CreateUserSQL(name, dbName string) string {
 	return sql
 }
 
+// DropUserSQL removes the account. MySQL drops it outright — its grants go with
+// it, and objects it created are unaffected because they belong to the schema,
+// not to the account (unlike Postgres, where ownership blocks the drop).
+func (e *myEngine) DropUserSQL(u User) string {
+	return "DROP USER " + e.account(u) + ";\n"
+}
+
+// GrantSQL templates one more grant for an existing account, scoped to the
+// current database — the same narrow starting point as CreateUserSQL, to widen
+// by hand.
+func (e *myEngine) GrantSQL(u User, dbName string) string {
+	on := "*.*"
+	if dbName != "" {
+		on = e.QuoteIdent(dbName) + ".*"
+	}
+	return "GRANT SELECT ON " + on + " TO " + e.account(u) + ";\n"
+}
+
+// RevokeSQL reverses one grants row. MySQL's REVOKE mirrors its GRANT, so the
+// scope decides what follows ON: nothing (global), the database, the table, or
+// the table with the column in parentheses after the privilege. A role row is a
+// different statement shape entirely — REVOKE <role> FROM <account>, no ON.
+func (e *myEngine) RevokeSQL(u User, g Grant) string {
+	acct := e.account(u)
+	if g.Scope == "role" {
+		name, host := splitAccount(g.Object)
+		return "REVOKE " + e.account(User{Name: name, Host: host}) + " FROM " + acct + ";\n"
+	}
+	priv, on := g.Privilege, "*.*"
+	switch g.Scope {
+	case "global":
+		// *.* is right as it stands.
+	case "database":
+		on = e.QuoteIdent(g.Object) + ".*"
+	case "table":
+		dbName, tbl := cutDot(g.Object)
+		on = e.QuoteIdent(dbName) + "." + e.QuoteIdent(tbl)
+	case "column":
+		dbName, rest := cutDot(g.Object)
+		tbl, col := cutDot(rest)
+		on = e.QuoteIdent(dbName) + "." + e.QuoteIdent(tbl)
+		priv += " (" + e.QuoteIdent(col) + ")"
+	default:
+		return "" // not a scope this dialect knows how to revoke
+	}
+	return "REVOKE " + priv + " ON " + on + " FROM " + acct + ";\n"
+}
+
+// account renders 'user'@'host', the form every GRANT/REVOKE/CREATE USER takes.
+func (e *myEngine) account(u User) string {
+	host := u.Host
+	if host == "" {
+		host = "%"
+	}
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	return q(u.Name) + "@" + q(host)
+}
+
+// splitAccount is the inverse of the grants view's CONCAT(user,'@',host): split
+// at the LAST '@', since a MySQL user name may contain one but a host may not.
+func splitAccount(s string) (name, host string) {
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, "%"
+}
+
 // readable reports whether a catalog table both exists and can be selected from
 // by this connection — the two ways an optional privilege source drops out.
 func (e *myEngine) readable(ctx context.Context, table string) bool {

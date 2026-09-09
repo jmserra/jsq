@@ -21,8 +21,23 @@ type userEngine struct {
 func (e userEngine) Users(context.Context) ([]db.User, error) { return e.users, nil }
 
 func (e userEngine) GrantsSQL(_ context.Context, u db.User) (string, []any, error) {
-	return `SELECT 'global' AS scope, ? AS object, 'SELECT' AS privilege, 'NO' AS grantable`,
+	return `SELECT 'global' AS scope, ? AS object, 'SELECT' AS privilege, 'NO' AS grantable
+	        UNION ALL SELECT 'table', 'shop.items', 'UPDATE', 'NO'`,
 		[]any{u.Label()}, nil
+}
+
+// The statement builders echo the tuple they were handed, so a test can prove
+// which ROW the key acted on. Dialect correctness is pinned in internal/db.
+func (e userEngine) GrantSQL(u db.User, dbName string) string {
+	return "GRANT SELECT ON " + dbName + ".* TO " + u.Label() + ";\n"
+}
+
+func (e userEngine) RevokeSQL(u db.User, g db.Grant) string {
+	return "REVOKE " + g.Privilege + " ON " + g.Object + " FROM " + u.Label() + ";\n"
+}
+
+func (e userEngine) DropUserSQL(u db.User) string {
+	return "DROP USER '" + u.Name + "'@'" + u.Host + "';\n"
 }
 
 // usersApp puts the model on the table list with an engine that has two users.
@@ -193,8 +208,8 @@ func TestCreateUserSeed(t *testing.T) {
 	if !strings.Contains(seed.sql, "CREATE USER 'newuser'") {
 		t.Errorf("seed should carry the engine's template:\n%s", seed.sql)
 	}
-	if !seed.users {
-		t.Error("the seed must be marked as a user-management write")
+	if seed.after != afterWriteUsers {
+		t.Error("the seed must be marked as a write that reloads the user list")
 	}
 	if seed.kind != selectWord {
 		t.Errorf("kind = %v, want the placeholder pre-selected", seed.kind)
@@ -224,7 +239,7 @@ func (seedEngine) CreateUserSQL(name, dbName string) string {
 func TestCreateUserRefreshesList(t *testing.T) {
 	app := openUserList(t, usersApp(t))
 
-	m, cmd := app.Update(editorSubmitMsg{sql: "CREATE TABLE created (id INTEGER)", users: true})
+	m, cmd := app.Update(editorSubmitMsg{sql: "CREATE TABLE created (id INTEGER)", after: afterWriteUsers})
 	app = m.(App)
 	if cmd == nil {
 		t.Fatal("a submitted user write should run")
@@ -233,7 +248,7 @@ func TestCreateUserRefreshesList(t *testing.T) {
 	if !ok {
 		t.Fatalf("want an execDoneMsg, got %T", cmd())
 	}
-	if !done.users {
+	if done.after != afterWriteUsers {
 		t.Fatal("the user-management marker must survive into the result")
 	}
 
@@ -258,7 +273,7 @@ func TestCreateUserSafeConfirms(t *testing.T) {
 	app.safe, app.connName = true, "prod"
 
 	sql := "CREATE USER 'newuser'@'%' IDENTIFIED BY 'change-me';\nGRANT SELECT ON `shop`.* TO 'newuser'@'%';"
-	m, cmd := app.Update(editorSubmitMsg{sql: sql, users: true})
+	m, cmd := app.Update(editorSubmitMsg{sql: sql, after: afterWriteUsers})
 	app = m.(App)
 	if cmd != nil {
 		t.Fatal("a safe connection must not run the statement before confirmation")
@@ -291,5 +306,224 @@ func TestCreateUserUnsupported(t *testing.T) {
 	}
 	if !strings.Contains(app.status, "no users") {
 		t.Errorf("status = %q, want it to report there are none", app.status)
+	}
+}
+
+// grantsApp opens a user's privileges in the grid — where o/D mean grant/revoke.
+func grantsApp(t *testing.T) App {
+	t.Helper()
+	app := openUserList(t, usersApp(t))
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("enter should open the user's grants")
+	}
+	app = update(t, app, cmd())
+	if app.p().grantsFor.Name != "alice" {
+		t.Fatalf("the pane should know whose grants it shows, got %q", app.p().grantsFor.Label())
+	}
+	return app
+}
+
+// TestGrantsMarkerCleared checks that running anything else in the pane drops the
+// grants marker: an ordinary query's rows are not somebody's privileges, and o/D
+// over them must go back to meaning insert/delete row.
+func TestGrantsMarkerCleared(t *testing.T) {
+	app := grantsApp(t)
+	app = update(t, app, queryResultMsg{
+		rs:  &db.ResultSet{Cols: []string{"n"}, Rows: [][]any{{int64(1)}}},
+		sql: "SELECT 1",
+		gen: app.gen,
+	})
+	if app.p().grantsFor.Name != "" {
+		t.Error("a non-grants result must clear the marker")
+	}
+}
+
+// TestRevokeRowUnderCursor drives `D` on a grants row: the statement it seeds is
+// built from THAT row — cursor on the second row revokes the second row's grant.
+func TestRevokeRowUnderCursor(t *testing.T) {
+	app := grantsApp(t)
+	app = runeKey(t, app, 'j') // move to the table-scoped row
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`D` on a grants row should open a revoke in $EDITOR")
+	}
+	seed := buildRevokeStmt(app.engine, app.p().grantsFor, db.Grant{
+		Scope: "table", Object: "shop.items", Privilege: "UPDATE",
+	})
+	if !strings.Contains(seed.sql, "REVOKE UPDATE ON shop.items FROM alice@%") {
+		t.Errorf("revoke seed should undo the row under the cursor:\n%s", seed.sql)
+	}
+	if seed.after != afterWriteGrants {
+		t.Error("a revoke should refresh the grants view, not a table")
+	}
+}
+
+// TestGrantMore drives `o` on a grants view: the GRANT template for the user
+// whose privileges are on screen.
+func TestGrantMore(t *testing.T) {
+	app := grantsApp(t)
+	app.dbName = "shop"
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`o` on a grants view should open a grant in $EDITOR")
+	}
+	seed := buildGrantStmt(app.engine, app.p().grantsFor, app.dbName)
+	if !strings.Contains(seed.sql, "GRANT SELECT ON shop.* TO alice@%") {
+		t.Errorf("grant seed should target the user on screen:\n%s", seed.sql)
+	}
+	if seed.kind != selectWord {
+		t.Error("the privilege word should be pre-selected — it is what you change")
+	}
+}
+
+// TestGrantWriteReloadsGrants checks where a grant/revoke lands: back on the
+// same user's privileges, re-read, rather than on a table reload.
+func TestGrantWriteReloadsGrants(t *testing.T) {
+	app := grantsApp(t)
+
+	m, cmd := app.Update(editorSubmitMsg{sql: "CREATE TABLE granted (id INTEGER)", after: afterWriteGrants})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("the write should run")
+	}
+	done := cmd().(execDoneMsg)
+	if done.after != afterWriteGrants {
+		t.Fatal("the marker must survive into the result")
+	}
+
+	m, cmd = app.Update(done)
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("a grant write should be followed by a grants re-read")
+	}
+	res, ok := cmd().(queryResultMsg)
+	if !ok {
+		t.Fatalf("want the grants query, got %T", cmd())
+	}
+	app = update(t, app, res)
+	if app.p().grantsFor.Name != "alice" {
+		t.Error("the pane should still be alice's grants after the write")
+	}
+	if !strings.Contains(app.status, "grants for alice@%") {
+		t.Errorf("status = %q, want it to name whose grants these are", app.status)
+	}
+}
+
+// TestReloadGrantsView checks `r` on a grants view re-reads the grants (and so
+// keeps the marker) instead of re-running the raw SQL as an anonymous query.
+func TestReloadGrantsView(t *testing.T) {
+	app := grantsApp(t)
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`r` should reload")
+	}
+	res, ok := cmd().(queryResultMsg)
+	if !ok {
+		t.Fatalf("want a queryResultMsg, got %T", cmd())
+	}
+	if res.user.Name != "alice" {
+		t.Error("the reload must come back marked as alice's grants")
+	}
+	app = update(t, app, res)
+	if app.p().grantsFor.Name != "alice" {
+		t.Error("a reload must not turn the grants view into a plain query result")
+	}
+}
+
+// TestDropUserSeed drives `D` on the user list: it opens the drop for the
+// HIGHLIGHTED user, warns, and is marked to reload the list when it lands.
+// Nothing runs from the keystroke itself.
+func TestDropUserSeed(t *testing.T) {
+	app := openUserList(t, usersApp(t))
+	app = runeKey(t, app, 'j') // move to bob
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`D` on the user list should open a drop in $EDITOR")
+	}
+	u, _ := app.findUser("bob@localhost")
+	seed := buildDropUserStmt(app.engine, u)
+	if !strings.Contains(seed.sql, "DROP USER 'bob'@'localhost'") {
+		t.Errorf("the drop should target the highlighted user:\n%s", seed.sql)
+	}
+	if !strings.Contains(seed.sql, "⚠") || !strings.Contains(seed.sql, "cannot be undone") {
+		t.Errorf("a drop should warn before it is run:\n%s", seed.sql)
+	}
+	if seed.after != afterWriteUsers {
+		t.Error("a drop should reload the user list")
+	}
+}
+
+// TestDropUserUnsupported checks the engine-has-no-users path.
+func TestDropUserUnsupported(t *testing.T) {
+	app := openUserList(t, usersApp(t))
+	// Unwrap to the bare sqlite engine: a list of users, but no statements for
+	// managing them — which is exactly the shape of an engine without accounts.
+	app.engine = app.engine.(userEngine).Engine
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	app = m.(App)
+	if cmd != nil {
+		t.Fatal("nothing should open when the engine has no user statements")
+	}
+	if !strings.Contains(app.status, "no users") {
+		t.Errorf("status = %q, want it to report there are none", app.status)
+	}
+}
+
+// TestReloadUserList checks `r` on the user list re-lists the users — the same
+// key that reloads a table or a grants view, on the view that is a list.
+func TestReloadUserList(t *testing.T) {
+	app := openUserList(t, usersApp(t))
+
+	// The server gains an account behind our back; `r` is how you see it.
+	app.engine = userEngine{Engine: app.engine.(userEngine).Engine, users: []db.User{
+		{Name: "alice", Host: "%"},
+		{Name: "bob", Host: "localhost"},
+		{Name: "carol", Host: "%"},
+	}}
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`r` on the user list should re-list the users")
+	}
+	app = update(t, app, cmd())
+	if app.screen != screenUsers {
+		t.Fatalf("screen = %d, want to stay on the user list", app.screen)
+	}
+	if !strings.Contains(app.View(), "carol@%") {
+		t.Errorf("the reload should show the new account:\n%s", app.View())
+	}
+	// A silent reload looks like a key that did nothing.
+	if !strings.Contains(app.status, "reloaded") {
+		t.Errorf("status = %q, want it to say the list reloaded", app.status)
+	}
+}
+
+// TestReloadTableList checks the same key on the table list.
+func TestReloadTableList(t *testing.T) {
+	app := tableListApp(t) // one table: "things"
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`r` on the table list should re-list the tables")
+	}
+	app = update(t, app, cmd())
+	if app.screen != screenTables {
+		t.Fatalf("screen = %d, want to stay on the table list", app.screen)
+	}
+	if !strings.Contains(app.View(), "things") {
+		t.Errorf("the table should still be listed:\n%s", app.View())
+	}
+	if !strings.Contains(app.status, "table(s)") {
+		t.Errorf("status = %q, want it to report the count", app.status)
 	}
 }

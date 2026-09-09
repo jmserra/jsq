@@ -77,13 +77,21 @@ type editorSeed struct {
 	// there's no table to key a last-query against.
 	scratch bool
 
-	// users marks a user-management write (`o` on the user list): when it lands,
-	// the user list is
-	// what needs reloading, not a table. It rides all the way through
+	// after says what this write should refresh when it lands — the user list or
+	// a grants view rather than the pane's table. It rides all the way through
 	// editorSubmitMsg → execRawCmd → execDoneMsg, so a statement reopened from
 	// the error modal still refreshes the right thing.
-	users bool
+	after afterWrite
 }
+
+// afterWrite is what a full-path write refreshes once it has run.
+type afterWrite int
+
+const (
+	afterWriteView   afterWrite = iota // the pane's own view (E/o/D/p/s — the default)
+	afterWriteUsers                    // the user list (create user)
+	afterWriteGrants                   // the grants view the write came from (grant/revoke)
+)
 
 // inlinedKeyPreds renders the "col = literal" WHERE predicates for a full-PK
 // keyed statement, values inlined via sqlLiteral. Shared by the E/D full paths
@@ -343,7 +351,51 @@ func buildCreateUserStmt(eng db.Engine, connName, dbName string) editorSeed {
 	// and inside a quoted identifier on Postgres, so the selection is by word
 	// rather than by quote — one kind covers both.
 	line, col := locate(sql, newUserName)
-	return editorSeed{sql: sql, line: line, col: col, kind: selectWord, users: true}
+	return editorSeed{sql: sql, line: line, col: col, kind: selectWord, after: afterWriteUsers}
+}
+
+// buildDropUserStmt is the `D` starting point on the user list: the statement
+// that removes the selected account, headed by a warning naming it. Like every
+// full path it only opens the editor — the drop happens when you :wq it (and,
+// on a safe connection, confirm it). No selection: the statement is exact.
+func buildDropUserStmt(eng db.Engine, u db.User) editorSeed {
+	body := eng.DropUserSQL(u)
+	if body == "" {
+		return editorSeed{}
+	}
+	sql := "-- ⚠ DROP the user " + u.Label() + " — this cannot be undone; :q! aborts\n" + body
+	return editorSeed{sql: sql, line: 2, col: 1, after: afterWriteUsers}
+}
+
+// buildGrantStmt is the `o` starting point on a grants view: the engine's GRANT
+// template for the user whose privileges are on screen, with the privilege word
+// selected — that is the word you are there to change. Empty SQL means the engine
+// has nothing to template.
+func buildGrantStmt(eng db.Engine, u db.User, dbName string) editorSeed {
+	body := eng.GrantSQL(u, dbName)
+	if body == "" {
+		return editorSeed{}
+	}
+	sql := "-- more privileges for " + u.Label() + " — edit, then :wq to run (:q! aborts)\n" + body
+	line, col := locate(sql, "GRANT ")
+	return editorSeed{sql: sql, line: line, col: col + len("GRANT "), kind: selectWord, after: afterWriteGrants}
+}
+
+// buildRevokeStmt is the `D` starting point on a grants view: the statement that
+// takes back the row under the cursor, derived from the row itself (scope +
+// object + privilege). No selection — the statement is already exact; it opens
+// for review, not for filling in. Empty SQL means the row is not revocable.
+func buildRevokeStmt(eng db.Engine, u db.User, g db.Grant) editorSeed {
+	body := eng.RevokeSQL(u, g)
+	if body == "" {
+		return editorSeed{}
+	}
+	what := g.Privilege
+	if g.Object != "" {
+		what += " on " + g.Object
+	}
+	sql := "-- take " + what + " away from " + u.Label() + " — :wq to run, :q! aborts\n" + body
+	return editorSeed{sql: sql, line: 2, col: 1, after: afterWriteGrants}
 }
 
 // locate returns the 1-based line and byte column of the first occurrence of

@@ -111,8 +111,11 @@ grants read is jsq-authored, so its values are **bound** (invariant 7), which is
 why `queryResultMsg`/`pane.adHocArgs` carry args alongside the SQL: `r` re-runs
 the same query with the same args, without re-probing.
 
-**Creating a user** is `o` on the user list — deliberately the grid's
-insert-a-row key, not a new verb: same act, different list. It is an ordinary
+**Managing users** reuses the grid's record keys on the user list — `o` creates
+(`buildCreateUserStmt`), `D` drops the highlighted one (`buildDropUserStmt` →
+`Engine.DropUserSQL`; pg carries `REASSIGN OWNED`/`DROP OWNED` as comments, since
+a role owning objects can't be dropped) — deliberately not new verbs: same acts,
+different list. It is an ordinary
 **`$EDITOR` full path**:
 `buildCreateUserStmt` (sqlgen.go) heads `Engine.CreateUserSQL(name, dbName)` — a
 pure template, no DB call, so it's built in Update like `E`/`D` — with a
@@ -124,6 +127,27 @@ The one addition is `editorSeed.users`, which rides seed →`editorSubmitMsg` �
 `execRawCmd` → `execDoneMsg` so the handler reloads the **user list** (usersCmd)
 instead of the pane's table — and so a statement reopened from the error modal
 still refreshes the right thing. The caption comes back through `nextStatus`.
+
+On the **grants view itself**, `o` and `D` keep their grid meanings against a
+different kind of row: `o` = `buildGrantStmt` (the engine's GRANT template for
+the user on screen), `D` = `buildRevokeStmt` off the row under the cursor —
+`db.Grant{Scope,Object,Privilege}` read from the grid by column name and handed
+to `Engine.RevokeSQL`, which knows that a pg `attribute` row negates with
+`ALTER ROLE … NO<flag>` and a `role` row is `REVOKE … FROM …`, not an object
+grant. Composite Objects ("db.table") are unpicked with `cutDot`, the inverse of
+the CONCAT that built them — a dotted identifier splits wrong, which is
+tolerable only because the result is a **seed** the user reviews in `$EDITOR`.
+Use `grid.currentRowMap`, NOT `currentRowValues`: the latter is gated on
+`editable()`, which an adHoc grants view never is.
+
+What makes those keys mean that is `pane.grantsFor` (the `db.User` whose grants
+the pane shows), set from `queryResultMsg.user` — stamped by `grantsCmd` and
+**zero on every other result**, so an `s` query landing in the pane clears it and
+o/D go back to insert/delete row. A table load clears it too (rowsMsg). `r` on
+such a pane re-dispatches `grantsCmd` rather than replaying `adHocQuery`, so the
+marker survives a reload. `afterWrite` (on the seed → editorSubmitMsg →
+execDoneMsg) is the enum saying what a full-path write refreshes when it lands:
+the pane's view (default), the user list, or that pane's grants.
 
 **Jumplist**: one **session-wide** list (`App.views`, oldest→newest, `viewIdx` =
 current); a `viewState` is `{conn, db, table, basePreds, baseNote, sort, pos}`
@@ -238,6 +262,12 @@ list into `histView` (an overlay like `jumpView`); Enter runs a read directly
 (`runHist`, re-recording for recency) but opens a write in `$EDITOR` for review
 (`histSeed`, `remember`=current table so a `:wq` re-records + continues the `s`
 loop); `s` opens any entry in `$EDITOR`. History is in-memory only (no persistence).
+
+`r` **on a list screen** re-lists it — `tablesCmd`→`tablesMsg` (the only
+tables-only fetch; connecting delivers its tables in `connectedMsg` instead),
+`openDatabases`, `openUsers` — so something created in another session shows up
+without leaving the screen. Note `sidebar.setTables` clears an active filter, so
+a refresh drops it.
 
 `r` (`App.reloadView`) re-runs the current view: a table reload is just
 `loadCurrentCmd` (keeps sort, `basePreds`, column filters, and cursor — `setResult`

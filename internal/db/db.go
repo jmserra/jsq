@@ -62,6 +62,15 @@ func (u User) Label() string {
 	return u.Name + "@" + u.Host
 }
 
+// Grant is one row of the grants view: what a user may do (Privilege) over what
+// (Scope + Object). It is the tuple GrantsSQL emits and RevokeSQL consumes, so a
+// row under the cursor is directly actionable.
+type Grant struct {
+	Scope     string // global | attribute | role | database | schema | table | column
+	Object    string // what it applies to; empty for a global/attribute row
+	Privilege string
+}
+
 // ResultSet is a query result. A nil Rows element is SQL NULL.
 type ResultSet struct {
 	Cols  []string
@@ -107,6 +116,27 @@ type Engine interface {
 	// with Postgres adding `attribute` rows (SUPERUSER, LOGIN, …) for the role
 	// flags that are its equivalent of a global privilege.
 	GrantsSQL(ctx context.Context, u User) (string, []any, error)
+
+	// GrantSQL is the starting point for granting more to an existing user: a
+	// template scoped to dbName, opened in $EDITOR and run verbatim like
+	// CreateUserSQL. Empty when the engine has no users.
+	GrantSQL(u User, dbName string) string
+
+	// RevokeSQL is the statement that takes back one row of the grants view — the
+	// reverse of the grant the row describes. Empty when the row is not something
+	// this dialect can revoke (an unknown scope), which the caller reports.
+	//
+	// The Grant comes back through the grid as the text this engine's GrantsSQL
+	// put there, so parsing a composite Object (a "db.table") is the inverse of
+	// the CONCAT that built it. An identifier containing a dot therefore splits
+	// wrong — acceptable because the result is a SEED: it opens in $EDITOR for
+	// review, and is never run unseen.
+	RevokeSQL(u User, g Grant) string
+
+	// DropUserSQL is the statement that removes a user, opened in $EDITOR like the
+	// rest of the full path — never run on a keystroke. Empty when the engine has
+	// no users.
+	DropUserSQL(u User) string
 
 	// CreateUserSQL is the starting point for creating a user: the statements a
 	// new account normally needs, written the way this dialect writes them, with
@@ -231,6 +261,16 @@ func queryStrings(ctx context.Context, sdb *sql.DB, query string, args ...any) (
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// cutDot splits a composite object name ("db.table") at its FIRST dot. Used to
+// unpick the Object of a grants row back into its parts — see RevokeSQL on the
+// dotted-identifier caveat.
+func cutDot(s string) (head, tail string) {
+	if i := strings.Index(s, "."); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
 }
 
 // quoteIdentDouble quotes an identifier with double-quotes, doubling any embedded

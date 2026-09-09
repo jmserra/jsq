@@ -136,6 +136,50 @@ ORDER BY CASE scope
          object, privilege`, []any{u.Name}, nil
 }
 
+// DropUserSQL removes the role — but Postgres refuses while anything still
+// depends on it: objects it owns, or privileges granted to it. The two
+// statements that clear that are offered as comments above the DROP rather than
+// run, because REASSIGN OWNED moves real tables to another owner and that is a
+// decision, not a detail. Order matters if they are used: reassign first (it
+// moves ownership), then DROP OWNED (which clears the remaining grants).
+func (e *pgEngine) DropUserSQL(u User) string {
+	role := e.QuoteIdent(u.Name)
+	return "-- Postgres refuses while the role owns objects or holds grants; if so:\n" +
+		"-- REASSIGN OWNED BY " + role + " TO CURRENT_USER;\n" +
+		"-- DROP OWNED BY " + role + ";\n" +
+		"DROP ROLE " + role + ";\n"
+}
+
+// GrantSQL templates one more grant for an existing role, on this database's
+// public schema — the narrow starting point, to widen by hand.
+func (e *pgEngine) GrantSQL(u User, _ string) string {
+	return "GRANT SELECT ON ALL TABLES IN SCHEMA public TO " + e.QuoteIdent(u.Name) + ";\n"
+}
+
+// RevokeSQL reverses one grants row. Three of the scopes are ordinary REVOKEs on
+// an object; the other two are not REVOKEs at all, which is the point of routing
+// through the engine: a role membership is REVOKE <role> FROM <role>, and an
+// `attribute` row is a role flag, so taking it away is ALTER ROLE … NO<flag>.
+func (e *pgEngine) RevokeSQL(u User, g Grant) string {
+	role := e.QuoteIdent(u.Name)
+	switch g.Scope {
+	case "attribute":
+		// INHERIT/LOGIN/SUPERUSER/… all negate with a NO prefix.
+		return "ALTER ROLE " + role + " NO" + g.Privilege + ";\n"
+	case "role":
+		return "REVOKE " + e.QuoteIdent(g.Object) + " FROM " + role + ";\n"
+	case "database":
+		return "REVOKE " + g.Privilege + " ON DATABASE " + e.QuoteIdent(g.Object) + " FROM " + role + ";\n"
+	case "schema":
+		return "REVOKE " + g.Privilege + " ON SCHEMA " + e.QuoteIdent(g.Object) + " FROM " + role + ";\n"
+	case "table":
+		schema, tbl := cutDot(g.Object)
+		return "REVOKE " + g.Privilege + " ON " + e.QuoteIdent(schema) + "." + e.QuoteIdent(tbl) +
+			" FROM " + role + ";\n"
+	}
+	return ""
+}
+
 // CreateUserSQL templates what a usable Postgres login role needs, which is more
 // than one statement: the role, the right to connect to this database, the right
 // to see into the schema, and then the tables themselves. The last grant covers

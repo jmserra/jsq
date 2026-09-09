@@ -31,9 +31,10 @@ type pane struct {
 	baseNote     string   // human form of basePreds, shown in the header
 	sortCol      string
 	sortAsc      bool
-	adHoc        bool   // grid shows a free-form (s) query result, not a table
-	adHocQuery   string // SQL behind the adHoc result, so `r` can re-run it
-	adHocArgs    []any  // its bind values (jsq-composed reads: the grants view)
+	adHoc        bool    // grid shows a free-form (s) query result, not a table
+	adHocQuery   string  // SQL behind the adHoc result, so `r` can re-run it
+	adHocArgs    []any   // its bind values (jsq-composed reads: the grants view)
+	grantsFor    db.User // set when the adHoc result is this user's privileges (o/D → grant/revoke)
 
 	// Per-pane jumplist: visited views oldest→newest, viewIdx = current (-1
 	// before the first). See App.views' old doc comment for the semantics.

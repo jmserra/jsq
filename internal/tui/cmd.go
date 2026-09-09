@@ -126,6 +126,17 @@ func loadCmd(ctx context.Context, gen int, eng db.Engine, t db.Table, limit int,
 	}
 }
 
+// tablesCmd re-lists the current database's tables, for `r` on the table list.
+func tablesCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
+	return func() tea.Msg {
+		tables, err := eng.Tables(ctx)
+		if err != nil {
+			return dbErr(ctx, gen, err)
+		}
+		return tablesMsg{tables: tables, gen: gen}
+	}
+}
+
 // databasesCmd lists the databases on the current connection (for the T picker).
 func databasesCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
 	return func() tea.Msg {
@@ -282,7 +293,7 @@ func editorCmd(seed editorSeed) tea.Cmd {
 		if sub, ok := msg.(editorSubmitMsg); ok {
 			sub.remember = seed.remember // carry the s "remember for table" marker
 			sub.scratch = seed.scratch   // and the no-table scratch marker
-			sub.users = seed.users       // and the "this manages users" marker
+			sub.after = seed.after       // and what the write should refresh
 			return sub
 		}
 		return msg
@@ -358,7 +369,7 @@ func execRawCmd(ctx context.Context, gen int, eng db.Engine, query string, seed 
 		if err != nil {
 			return dbErrSeed(ctx, gen, err, seed)
 		}
-		return execDoneMsg{sql: query, affected: n, users: seed.users, gen: gen}
+		return execDoneMsg{sql: query, affected: n, after: seed.after, gen: gen}
 	}
 }
 
@@ -417,7 +428,7 @@ func grantsCmd(ctx context.Context, gen int, eng db.Engine, u db.User) tea.Cmd {
 		if err != nil {
 			return dbErr(ctx, gen, err)
 		}
-		return queryResultMsg{rs: rs, sql: query, args: args, gen: gen}
+		return queryResultMsg{rs: rs, sql: query, args: args, user: u, gen: gen}
 	}
 }
 

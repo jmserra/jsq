@@ -417,6 +417,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 
+	case tablesMsg:
+		if a.stale(msg.gen) {
+			return a, nil
+		}
+		a.stop()
+		a.sidebar.setTables(msg.tables)
+		a.status = fmt.Sprintf("%d table(s)", len(msg.tables))
+		return a, nil
+
 	case usersMsg:
 		if a.stale(msg.gen) {
 			return a, nil
@@ -464,7 +473,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.grid.reset()
 			a.resetGrid = false
 		}
-		p.adHoc = false // a table load leaves any prior s/S result behind
+		p.adHoc = false         // a table load leaves any prior s/S result behind
+		p.grantsFor = db.User{} // …and is certainly not a user's privileges
 		a.screen = screenBrowse
 		a.layout()
 		// The table itself is a header segment now (tableSegment), so a fresh load
@@ -534,7 +544,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// with a read verb, so a trailing write can't slip past unconfirmed.
 		// The failed statement reopens exactly as submitted, keeping its s remember/
 		// scratch markers so a re-run still continues the edit loop and records.
-		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch, users: msg.users}
+		seed := editorSeed{sql: msg.sql, remember: msg.remember, scratch: msg.scratch, after: msg.after}
 		if isReadSQL(msg.sql) && !(a.safe && isMultiStatement(msg.sql)) {
 			ctx := a.begin("running query", a.p().id)
 			a.status = "running query…"
@@ -571,6 +581,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.grid.reset()
 		p.adHoc = true
 		p.adHocQuery, p.adHocArgs = msg.sql, msg.args
+		p.grantsFor = msg.user // set by the grants read, zero (cleared) by any other
 		a.screen = screenBrowse
 		a.layout()
 		a.recordQueryCount(msg.sql, len(msg.rs.Rows), true)
@@ -586,14 +597,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.recordQueryCount(msg.sql, int(msg.affected), false)
-		// A user-management write (o on the user list) changed the server's
-		// accounts, not any
-		// pane's rows: reload that list instead, which also lands us back on it.
-		// begin() stops the finished op, so this needs no stop() of its own.
-		if msg.users {
+		// A user-management write changed the server's accounts, not any pane's
+		// rows, so it refreshes its own view instead. begin() stops the finished
+		// op, so neither branch needs a stop() of its own.
+		switch msg.after {
+		case afterWriteUsers: // create user → back to the (reloaded) list
 			ctx := a.begin("loading users", noPane)
 			a.nextStatus = "ran — user list reloaded"
 			return a, usersCmd(ctx, a.gen, a.engine)
+		case afterWriteGrants: // grant/revoke → re-read that user's privileges
+			if p, ok := a.opTarget(); ok && p.grantsFor.Name != "" {
+				u := p.grantsFor
+				ctx := a.begin("loading grants", p.id)
+				a.nextStatus = "grants for " + u.Label()
+				return a, grantsCmd(ctx, a.gen, a.engine, u)
+			}
 		}
 		p, ok := a.opTarget()
 		// No table to reload (e.g. a write scratch from the table list before any
@@ -1156,6 +1174,10 @@ func (a App) handleDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyBackspace:
 		a.screen = screenTables // step back to the table list
 		a.layout()
+	case tea.KeyRunes:
+		if string(msg.Runes) == "r" { // re-list the databases
+			return a.openDatabases()
+		}
 	}
 	return a, nil
 }
@@ -1193,8 +1215,8 @@ func (a App) openUsers() (tea.Model, tea.Cmd) {
 
 // handleUsersKey drives the full-screen user list (reached with `u`): navigation
 // by default, `/` filters, Enter shows that user's privileges in the grid, `o`
-// opens the CREATE USER template in $EDITOR, Backspace steps back to the table
-// list, and Esc clears the filter.
+// and `D` open the CREATE USER / DROP USER statements in $EDITOR, `r` re-lists
+// the users, Backspace steps back to the table list, and Esc clears the filter.
 func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if listKeys(&a.users, msg) {
 		return a, nil
@@ -1211,9 +1233,23 @@ func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.screen = screenTables // step back to the table list
 		a.layout()
 	case tea.KeyRunes:
-		// `o` — the grid's insert-a-row key. Same act, different list.
-		if string(msg.Runes) == "o" {
+		// `o` and `D` — the grid's insert-a-row and delete-a-row keys. Same acts,
+		// different list: the record here is a user.
+		switch string(msg.Runes) {
+		case "o":
 			return a.createUser()
+		case "D":
+			return a.dropUser()
+		case "r": // re-list the users
+			m, cmd := a.openUsers()
+			if cmd == nil {
+				return m, cmd
+			}
+			// begin() cleared any pending caption, so set it after: without one
+			// the reload lands silently and looks like nothing happened.
+			app := m.(App)
+			app.nextStatus = "user list reloaded"
+			return app, cmd
 		}
 	}
 	return a, nil
@@ -1225,6 +1261,67 @@ func (a App) handleUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // error modal. The template is generated text, not a DB call, so it is built here.
 func (a App) createUser() (tea.Model, tea.Cmd) {
 	seed := buildCreateUserStmt(a.engine, a.connName, a.dbName)
+	if seed.sql == "" {
+		a.status = "no users on this engine"
+		return a, nil
+	}
+	return a, editorCmd(seed)
+}
+
+// grantMore opens the engine's GRANT template for the user whose privileges are
+// on screen — `o` on a grants view, the same key that inserts a row in a table:
+// one more privilege is the new record here.
+func (a App) grantMore(u db.User) (tea.Model, tea.Cmd) {
+	seed := buildGrantStmt(a.engine, u, a.dbName)
+	if seed.sql == "" {
+		a.status = "no grants on this engine"
+		return a, nil
+	}
+	return a, editorCmd(seed)
+}
+
+// revokeGrant opens the statement that takes back the grants row under the
+// cursor — `D` on a grants view, the same key that deletes a row. The row IS the
+// grant, so nothing needs re-querying: scope, object and privilege come straight
+// off the grid.
+func (a App) revokeGrant(u db.User) (tea.Model, tea.Cmd) {
+	// currentRowMap, not currentRowValues: the latter is gated on editable(),
+	// which a grants view (an adHoc result with no table or PK) never is.
+	vals, ok := a.g().currentRowMap()
+	if !ok {
+		return a, nil
+	}
+	text := func(col string) string {
+		if v, ok := vals[col]; ok && v != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return ""
+	}
+	g := db.Grant{Scope: text("scope"), Object: text("object"), Privilege: text("privilege")}
+	if g.Privilege == "" {
+		return a, nil
+	}
+	seed := buildRevokeStmt(a.engine, u, g)
+	if seed.sql == "" {
+		a.status = "cannot revoke a " + g.Scope + " row"
+		return a, nil
+	}
+	return a, editorCmd(seed)
+}
+
+// dropUser opens the DROP statement for the highlighted user in $EDITOR. Nothing
+// is dropped by the keystroke: the statement is reviewed, :wq runs it, and a safe
+// connection confirms it on top of that.
+func (a App) dropUser() (tea.Model, tea.Cmd) {
+	t, ok := a.users.selected()
+	if !ok {
+		return a, nil
+	}
+	u, ok := a.findUser(t.Name)
+	if !ok {
+		return a, nil
+	}
+	seed := buildDropUserStmt(a.engine, u)
 	if seed.sql == "" {
 		a.status = "no users on this engine"
 		return a, nil
@@ -1283,6 +1380,13 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.openDatabases()
 		case "s": // free-form scratch query for this connection/database
 			return a, editorCmd(a.blankScratchSeed())
+		case "r": // re-list the tables
+			if a.engine == nil {
+				return a, nil
+			}
+			ctx := a.begin("loading tables", noPane)
+			a.status = "loading tables…"
+			return a, tablesCmd(ctx, a.gen, a.engine)
 		case "u": // go to the user list
 			return a.openUsers()
 		case ",": // the server's current process list
@@ -1785,6 +1889,9 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "o":
+		if u := a.p().grantsFor; u.Name != "" { // grants view: grant more
+			return a.grantMore(u)
+		}
 		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
 		} else {
@@ -1794,6 +1901,9 @@ func (a App) handleGridKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "D":
+		if u := a.p().grantsFor; u.Name != "" { // grants view: revoke this row
+			return a.revokeGrant(u)
+		}
 		if !a.g().editable() {
 			a.status = "not editable — no single-table primary key"
 		} else if keys, ok := a.g().rowKeys(); ok {
@@ -2041,6 +2151,12 @@ func (a App) loadPaneCmd(ctx context.Context, p *pane) tea.Cmd {
 // followed-FK predicate, column filters, and cursor; an adHoc result re-runs its
 // query. A no-op when there's nothing loaded yet.
 func (a App) reloadView() (tea.Model, tea.Cmd) {
+	if u := a.p().grantsFor; u.Name != "" { // a grants view re-reads the grants
+		ctx := a.begin("loading grants", a.p().id)
+		a.status = "reloading…"
+		a.nextStatus = "grants for " + u.Label()
+		return a, grantsCmd(ctx, a.gen, a.engine, u)
+	}
 	if a.p().adHoc {
 		if a.p().adHocQuery == "" {
 			return a, nil

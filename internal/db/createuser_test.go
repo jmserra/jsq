@@ -71,3 +71,29 @@ func TestCreateUserSQL(t *testing.T) {
 		t.Errorf("sqlite template = %q, want empty", got)
 	}
 }
+
+// TestDropUserSQL pins the drop statement. Postgres carries the two statements
+// that unblock it as comments — a role that owns objects cannot simply be
+// dropped, and REASSIGN OWNED is too consequential to run unasked.
+func TestDropUserSQL(t *testing.T) {
+	if got := (&myEngine{}).DropUserSQL(User{Name: "bob", Host: "%"}); got != "DROP USER 'bob'@'%';\n" {
+		t.Errorf("mysql DropUserSQL = %q", got)
+	}
+	got := (&pgEngine{}).DropUserSQL(User{Name: "bob"})
+	for _, want := range []string{
+		`DROP ROLE "bob";`,
+		`-- REASSIGN OWNED BY "bob" TO CURRENT_USER;`,
+		`-- DROP OWNED BY "bob";`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("postgres DropUserSQL is missing %q:\n%s", want, got)
+		}
+	}
+	// The DROP itself must not be commented out — only the two remedies are.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "DROP ROLE") {
+			return
+		}
+	}
+	t.Errorf("the DROP itself should be live SQL:\n%s", got)
+}

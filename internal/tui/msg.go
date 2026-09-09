@@ -57,8 +57,8 @@ type editorReadyMsg struct {
 type editorSubmitMsg struct {
 	sql      string
 	remember db.Table
-	scratch  bool // free-form table-list scratch → record in `b` history without a table
-	users    bool // user-management write (o on the user list) → reload that list
+	scratch  bool       // free-form table-list scratch → record in `b` history without a table
+	after    afterWrite // what to refresh when it lands (user list / grants view)
 }
 
 // editorAbortedMsg means the editor closed without saving (:q!) or the buffer was
@@ -70,7 +70,7 @@ type editorAbortedMsg struct{}
 type execDoneMsg struct {
 	sql      string
 	affected int64
-	users    bool // the write managed users → reload that list, not a table
+	after    afterWrite // what to refresh: the pane's view, the user list, its grants
 	gen      int
 }
 
@@ -78,11 +78,25 @@ type execDoneMsg struct {
 // sql is the query that produced them, kept so `r` can re-run it — with args,
 // its bind values, for the reads jsq composes itself (the grants view). A
 // user-authored s query has its values inlined and so carries none.
+//
+// user is set only by the grants read: it marks the result as one user's
+// privileges, which is what makes o/D on those rows mean grant/revoke. Every
+// other result leaves it zero, so landing one in a pane CLEARS that marker —
+// an s query run over a grants view must not leave its rows looking revocable.
 type queryResultMsg struct {
 	rs   *db.ResultSet
 	sql  string
 	args []any
+	user db.User
 	gen  int
+}
+
+// tablesMsg carries a re-listing of the current database's tables (`r` on the
+// table list). Connecting delivers its tables in connectedMsg instead — this is
+// only the refresh, which must not touch the engine or the screen.
+type tablesMsg struct {
+	tables []db.Table
+	gen    int
 }
 
 // usersMsg carries the server's users/roles for the `u` picker. Empty means the
