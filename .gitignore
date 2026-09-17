@@ -2,3 +2,9 @@
 *.db
 *.sqlite
 /.pgsql/
+
+# Dumps written by the export screen (`x`). Its path defaults to ./, so running
+# jsq from the repo drops them here — and they hold real data from whatever you
+# were connected to.
+*.sql
+*.sql.*.part
