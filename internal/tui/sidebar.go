@@ -26,6 +26,12 @@ type sidebar struct {
 	filtering bool      // in filter-input mode (entered with `/`); else navigation
 	filter    textField // current filter text + caret (empty → whole list)
 	label     string    // placeholder shown in the search prompt ("tables" / "databases")
+
+	// marks, when non-nil, makes this a CHECK list (the export screen): every item
+	// renders "[x] "/"[ ] " and toggle/toggleAll apply. It's keyed by label rather
+	// than index so a re-list — `r`, a reconnect — keeps the checks on the tables
+	// that survive it instead of sliding them onto whatever moved into those slots.
+	marks map[string]bool
 }
 
 func (s *sidebar) setTables(t []db.Table) {
@@ -85,6 +91,59 @@ func (s *sidebar) matchInto(pat string) {
 // hasFilter reports whether a filter is narrowing the list.
 func (s *sidebar) hasFilter() bool { return s.filter.val != "" }
 
+// --- check marks (the export screen) ---
+
+// markWidth is the "[x] " prefix a check list adds to every cell.
+const markWidth = 4
+
+// checkable reports whether this list carries check marks.
+func (s *sidebar) checkable() bool { return s.marks != nil }
+
+// toggle flips the mark on the item under the cursor.
+func (s *sidebar) toggle() {
+	if t, ok := s.selected(); ok {
+		lbl := tableLabel(t)
+		if s.marks[lbl] {
+			delete(s.marks, lbl)
+		} else {
+			s.marks[lbl] = true
+		}
+	}
+}
+
+// toggleAll marks every VISIBLE item, or clears them if they are all marked
+// already. Scoping it to the filtered view is the point: narrow to `log_%`,
+// press `a`, and only those are checked.
+func (s *sidebar) toggleAll() {
+	set := false
+	for _, i := range s.visible {
+		if !s.marks[tableLabel(s.tables[i])] {
+			set = true
+			break
+		}
+	}
+	for _, i := range s.visible {
+		lbl := tableLabel(s.tables[i])
+		if set {
+			s.marks[lbl] = true
+		} else {
+			delete(s.marks, lbl)
+		}
+	}
+}
+
+// checkedTables returns the marked tables in list order. Marks on labels that
+// are no longer in the list (a table dropped since) are silently skipped.
+func (s *sidebar) checkedTables() []db.Table {
+	var out []db.Table
+	for i := range s.tables {
+		if s.marks[tableLabel(s.tables[i])] {
+			out = append(out, s.tables[i])
+		}
+	}
+	return out
+}
+
 // rows is the grid height — one line is always taken by the search prompt.
 func (s *sidebar) rows() int {
 	if s.h > 1 {
@@ -103,6 +162,9 @@ func (s *sidebar) cellWidth() int {
 		}
 	}
 	w := m + 1
+	if s.checkable() {
+		w += markWidth
+	}
 	if s.w > 0 && w > s.w {
 		w = s.w
 	}
@@ -211,7 +273,15 @@ func (s *sidebar) View() string {
 			if idx == s.cursor {
 				prefix = "›"
 			}
-			cell := runewidth.FillRight(runewidth.Truncate(prefix+tableLabel(s.tables[s.visible[idx]]), cw, "…"), cw)
+			lbl := tableLabel(s.tables[s.visible[idx]])
+			if s.checkable() {
+				box := "[ ] "
+				if s.marks[lbl] {
+					box = "[x] "
+				}
+				lbl = box + lbl
+			}
+			cell := runewidth.FillRight(runewidth.Truncate(prefix+lbl, cw, "…"), cw)
 			if idx == s.cursor {
 				cell = selStyle.Render(cell)
 			}

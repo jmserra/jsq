@@ -356,3 +356,55 @@ func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	}
 	return acc.result(), nil
 }
+
+// --- SQL export (see dump.go) ---
+
+func (e *pgEngine) SQLLiteral(v any, colType string) string {
+	switch x := v.(type) {
+	case []byte:
+		return pgBytesLiteral(x, colType)
+	case string:
+		return pgBytesLiteral([]byte(x), colType)
+	case bool:
+		if x {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
+	return stdSQLLiteral(v, false)
+}
+
+// pgBytesLiteral writes text as a quoted string — with backslashes left alone,
+// since the prologue sets standard_conforming_strings=on — and binary as the
+// hex bytea input format. '\x' (empty) is valid, so no special case.
+func pgBytesLiteral(b []byte, colType string) string {
+	if !binaryBytes(b, colType) {
+		return sqlQuote(string(b), false)
+	}
+	return `'\x` + hexBytes(b) + `'::bytea`
+}
+
+// StructureSQL empties the table rather than recreating it. Postgres DDL cannot
+// be had from the server the way SHOW CREATE TABLE gives it on MySQL, and
+// rebuilding one from information_schema loses indexes, sequence ownership and
+// every constraint — so jsq emits no CREATE TABLE it would get wrong, and points
+// at pg_dump instead. The DELETE runs under session_replication_role='replica'
+// (the prologue), so it neither trips foreign keys nor fires ON DELETE CASCADE.
+func (e *pgEngine) StructureSQL(_ context.Context, t TableRef) (string, error) {
+	q := e.QualifiedName(t)
+	return fmt.Sprintf("-- structure: jsq writes no Postgres DDL — for the schema run\n"+
+		"--   pg_dump -s -t %s\n"+
+		"DELETE FROM %s;\n", q, q), nil
+}
+
+// DumpPrologue disables foreign-key triggers for the load, which lets the tables
+// replay in any order. session_replication_role needs superuser (or pg 15+'s
+// pg_write_all_data); without it the SET fails and the load runs with the
+// constraints live, which only matters if the table order is wrong.
+func (e *pgEngine) DumpPrologue() string {
+	return "SET client_encoding = 'UTF8';\n" +
+		"SET standard_conforming_strings = on;\n" +
+		"SET session_replication_role = 'replica';\n"
+}
+
+func (e *pgEngine) DumpEpilogue() string { return "SET session_replication_role = 'origin';\n" }

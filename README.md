@@ -136,6 +136,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
+| `x` | *(table list)* open the **SQL export** screen — the same table list with `[ ]` check boxes. `Space` checks the table under the cursor, `a` checks everything the filter is showing, `n` caps each table to its newest *N* rows, `S` adds the structure, `o` names the output file, and `Enter` writes one `.sql` file. See [SQL export](#sql-export-x) below |
 | `,` | *(table list)* show the server's current process list — MySQL's `information_schema.processlist` or Postgres's `pg_stat_activity`, longest-running first. It opens in the grid as a read-only ad-hoc result, so `r` re-runs it to watch it change and `/` is unavailable (SQLite has no server, so it reports that instead) |
 | `r` | reload the current view — the table load (keeping sort, filters, and cursor), the ad-hoc query behind an `s` result, or a user's privileges. On a **list** it re-lists: tables, databases, or users, so an account or table created elsewhere shows up without leaving |
 | `Space v` | **split vertically** — a second pane on the right showing exactly what you're looking at (same table, sort, filters, scroll position; an `s` query result clones as the result). The new pane takes focus, so you can navigate away and leave the original behind |
@@ -398,6 +399,82 @@ across sessions. Separately, `Ctrl-o` / the `` ` `` jumplist step back through
 visited *views* (table + filter + sort + cursor), which is the "previous read"
 navigation.
 
+### SQL export (`x`)
+
+`x` on the table list opens the export screen: the same list, in check mode,
+over a three-line settings footer.
+
+```
+⌕ tables to export
+›[x] users          [ ] sessions       [x] orders
+ [ ] products       [ ] invoices       [ ] events
+
+2 selected · rows: newest 5000 · structure: no
+→ ./prod_users_orders_last5000_20260917_1402.sql
+space select · a all · n rows · S structure · o path · enter export · bksp back
+```
+
+`Space` checks the table under the cursor; `a` checks everything currently
+visible, which is what makes the `/` filter useful here — narrow to `log_`, press
+`a`, and only those are ticked. `Enter` writes the file; `Backspace` steps back to
+the table list and keeps the selection, so a second export is a few keystrokes.
+
+The two settings:
+
+- **`n` — rows per table.** Empty means the whole table. A number takes the
+  **newest** *N* rows: the read is ordered by primary key descending and stopped
+  at *N*, so the server never materialises a 68M-row table to give you the last
+  five thousand. They are written back oldest-first, so a replay inserts in
+  insertion order. A table with no primary key has no "newest", so the cap becomes
+  an arbitrary slice — the file says so on that table's line.
+- **`S` — structure.** Off by default: the file is `INSERT`s only, to load into an
+  existing schema. On, each table is preceded by its `DROP TABLE` + `CREATE
+  TABLE` — the server's own DDL (MySQL's `SHOW CREATE TABLE`, SQLite's
+  `sqlite_master`), never something jsq composed. **Postgres is the exception**:
+  there is no server-side `SHOW CREATE TABLE`, and rebuilding one from
+  `information_schema` silently loses indexes, sequence ownership and constraints
+  — so jsq emits a `DELETE FROM` (to empty the table) and a comment naming the
+  `pg_dump -s -t …` that does it properly.
+
+The file is one `.sql` for the whole selection, bracketed by the session settings
+that let it replay in any table order (`FOREIGN_KEY_CHECKS=0` on MySQL,
+`session_replication_role='replica'` on Postgres, `PRAGMA foreign_keys=OFF` on
+SQLite). Values are inlined as literals, rendered per dialect — `0x…` vs
+`'\x…'::bytea` vs `X'…'` for binary, and backslashes escaped for MySQL but left
+alone for Postgres, which the file's own `standard_conforming_strings = on`
+requires.
+
+Rows **stream**: a table is read one row at a time and written straight out, so
+dumping a table far larger than memory costs nothing (the row cap is the one
+exception — taking the newest rows means holding that many to write them
+forwards).
+
+**The export runs in the background.** It is not the one-op slot every other
+query shares, so starting one and then walking off to browse a table does *not*
+cancel it — which is exactly what you want from something that can run for
+minutes. While it runs, the header carries its own indicator wherever you are:
+
+```
+prod > app > events > loading events…   ⠹ export 1/6 orders · 1.3M rows  ⠹ loading events · esc
+```
+
+— the export on the left, the query you just ran on the right. Progress advances
+per table and every few thousand rows, so a single huge table is never a silent
+wait. `Esc` cancels the export, but **only on the export screen**, whose footer
+says so: a stray `Esc` on some other screen must not be able to kill twenty
+minutes of work, so you come back with `x` to stop it. Only one export runs at a
+time; a second is refused while one is in flight.
+
+The file is written to a temp file beside the target and renamed on success, so a
+cancelled or failed export never leaves a truncated file looking finished — and
+quitting jsq mid-export cleans the temp file up too, the same way a connection's
+`cmd` tunnel is reaped.
+
+The output path is prefilled with a generated name — connection, what's in it,
+the row cap, a timestamp — which follows your selection until you type over it
+with `o`. Nothing is written to any database: export only reads, so safe mode
+doesn't gate it.
+
 ### Modes
 
 Only **Normal** and **Filter**, plus transient overlays (cell-edit input,
@@ -479,8 +556,9 @@ Where jsq differs is scope: it trades breadth for a smaller, more opinionated
 surface, and pushes text-editing work out to `$EDITOR`. Concretely, jsq leaves
 out (by design): the connection manager UI, the built-in SQL editor / completer /
 lexer / highlighter, the staged pending-changes buffer + commit/rollback,
-persistent saved queries / on-disk history, and ancillary UI (CSV export,
-standalone JSON viewer, MSSQL, multi-step connection screens).
+persistent saved queries / on-disk history, and ancillary UI (CSV/XLSX export,
+standalone JSON viewer, MSSQL, multi-step connection screens). Export here is one
+format — `.sql` — done from the table list.
 
 The result does less, in fewer keystrokes, with a codebase small enough to keep
 entirely in your head. If you want the full-featured experience, use lazysql —

@@ -66,6 +66,9 @@ func run() error {
 	// so a port-forward never outlives jsq. The registry is populated the instant
 	// a helper starts, so this doesn't depend on the connect flow having finished.
 	defer tui.KillRunHelpers()
+	// Same contract for a running export's temp file: an early Ctrl-C must not
+	// leave a half-written dump behind.
+	defer tui.CleanupExports()
 
 	p := tea.NewProgram(tui.New(conns, direct), tea.WithAltScreen())
 	final, err := p.Run()

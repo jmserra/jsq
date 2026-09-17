@@ -146,6 +146,32 @@ type Engine interface {
 	// its own. Empty when the engine has no users (SQLite).
 	CreateUserSQL(name, dbName string) string
 
+	// --- SQL export (dump.go + each engine's dialect half) ---
+
+	// Stream runs a query and delivers it row by row, one row in memory at a
+	// time — the read behind an export, where a table is far larger than any
+	// window the grid loads. Implemented once on stdEngine for every engine.
+	Stream(ctx context.Context, query string, args []any, s RowStream) error
+
+	// SQLLiteral renders one scanned value as a literal for a dump's INSERT.
+	// colType is the driver's name for the column it came from ("VARCHAR",
+	// "BLOB", "bytea"), which is what tells a MySQL BLOB from a MySQL VARCHAR —
+	// the driver returns []byte for both.
+	SQLLiteral(v any, colType string) string
+
+	// StructureSQL is the statement block that makes room for t's rows in a
+	// dump: DROP TABLE + CREATE TABLE where the engine can hand over its own DDL
+	// (MySQL's SHOW CREATE TABLE, SQLite's sqlite_master), and a DELETE FROM
+	// plus a comment naming pg_dump where it cannot (Postgres — a hand-rolled
+	// CREATE TABLE off information_schema drops indexes, sequences and
+	// constraints, so jsq writes no DDL it can't write correctly).
+	StructureSQL(ctx context.Context, t TableRef) (string, error)
+
+	// DumpPrologue/DumpEpilogue bracket a dump file: the session settings that
+	// let it be replayed in any table order (foreign keys off, then back on).
+	DumpPrologue() string
+	DumpEpilogue() string
+
 	QuoteIdent(s string) string
 	QualifiedName(t TableRef) string // schema-qualified, quoted table name
 	Placeholder(i int) string

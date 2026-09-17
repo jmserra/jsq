@@ -397,3 +397,54 @@ func (e *myEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	}
 	return acc.result(), nil
 }
+
+// --- SQL export (see dump.go) ---
+
+func (e *myEngine) SQLLiteral(v any, colType string) string {
+	switch x := v.(type) {
+	case []byte:
+		return myBytesLiteral(x, colType)
+	case string:
+		return myBytesLiteral([]byte(x), colType)
+	case bool:
+		// MySQL has no boolean type — BOOL is TINYINT(1). 1/0 is what a column
+		// actually holds, and it reloads into a numeric column too.
+		if x {
+			return "1"
+		}
+		return "0"
+	}
+	return stdSQLLiteral(v, true)
+}
+
+// myBytesLiteral writes text as a quoted string and binary as 0x… (MySQL's hex
+// literal). An empty blob has no hex form — 0x is a syntax error — so it goes as
+// the empty string, which MySQL accepts into a BLOB.
+func myBytesLiteral(b []byte, colType string) string {
+	if !binaryBytes(b, colType) {
+		return sqlQuote(string(b), true)
+	}
+	if len(b) == 0 {
+		return "''"
+	}
+	return "0x" + hexBytes(b)
+}
+
+// StructureSQL hands over the server's own DDL — SHOW CREATE TABLE is exact
+// (indexes, engine, charset, auto_increment), so jsq never composes its own.
+func (e *myEngine) StructureSQL(ctx context.Context, t TableRef) (string, error) {
+	q := e.QualifiedName(t)
+	var name, ddl string
+	if err := e.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+q).Scan(&name, &ddl); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", q, ddl), nil
+}
+
+func (e *myEngine) DumpPrologue() string {
+	return "SET sql_mode='NO_ENGINE_SUBSTITUTION';\n" +
+		"SET time_zone='+00:00';\n" +
+		"SET FOREIGN_KEY_CHECKS=0;\n"
+}
+
+func (e *myEngine) DumpEpilogue() string { return "SET FOREIGN_KEY_CHECKS=1;\n" }

@@ -14,6 +14,12 @@ what README's design section describes. Don't duplicate README here.
 - `internal/db` **Postgres/MySQL tests are live and skipped unless env vars are
   set**: `JSQ_TEST_PG=<dsn>`; `JSQ_TEST_MYSQL_DB` (+ optional `_HOST`/`_USER`/
   `_PASS`). For a local MySQL, per global config just run `mysql <dbname>`.
+- `internal/db/dump_test.go` + `internal/tui/export_test.go` cover the export;
+  `TestExportReplays` is the load-bearing one — it replays a generated dump into a
+  fresh sqlite db, which is the only check that the file is actually runnable
+  rather than merely plausible. `internal/db/dumplive_test.go` checks the MySQL /
+  Postgres dialect halves against real servers (same env vars as the other live
+  tests).
 - `internal/tui/app_test.go` drives the whole bubbletea model **headlessly** —
   feed `tea.Msg`/`tea.KeyMsg` into `Update`, assert on `View()`. That's the
   pattern for any UI behavior test; no terminal needed. Follow it.
@@ -30,16 +36,18 @@ main.go                     # flag parse (-c + one positional), resolve conn, bo
 internal/config/config.go   # load connections.toml, read-only (url, cmd, safe)
 internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/Users/GrantsSQL/…) + the User type + Open() dispatch + shared scanQuery + stdEngine base (Query/Exec/Close over *sql.DB, embedded by each engine) + openStd/namesToTables + DSN/HostPort helpers
+  dump.go       # the shared half of the SQL export: stdEngine.Stream (row-at-a-time reads, []byte kept RAW so a BLOB is distinguishable from a VARCHAR) + sqlQuote/stdSQLLiteral/binaryBytes. The dialect halves (SQLLiteral/StructureSQL/DumpPrologue/DumpEpilogue) are in each engine file
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
-  app.go        # root App Model. Screens: screenPicker (bare `jsq`, or Backspace from the table list), screenTables (full-screen table list, Backspace from the grid), screenDatabases (database list, `d` → switchDBCmd reopens the engine on another db), screenUsers (user/role list, `u`), screenBrowse (grid). The four list screens (`connList`/`sidebar`/`dbs`/`users`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey`/`handleUsersKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `d` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `d` and users via `u`, both reachable from the grid too; `,` on the table list runs `Engine.ProcessListSQL()` — empty on sqlite — through `runQueryCmd`, so the server's process list lands in the grid as an ordinary adHoc result). Backspace is the ONLY way left — there are no `t`/`T`/`c` jump-to-screen shortcuts (they were redundant with the chain). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). **The overlay commands (`?` help, `` ` `` jumplist, `b` history) and the jumplist steps (`Ctrl-o`/`Ctrl-i`/`Tab`) are screen-independent** — they inspect session-wide state, so handleKey runs them before the screen switch, gated only on `App.typing()` (true while the grid's quick-edit/column filter or a list's `/` filter owns the keyboard, so a letter meant for a filter stays literal). Their overlays must therefore be rendered in `View()` **before** the screen switch (like confirm/errView) — drawing them in `browseView` would make them openable on a list screen but invisible. Only `cellview` stays grid-only (it shows the cell under the grid cursor). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
+  app.go        # root App Model. Screens: screenPicker (bare `jsq`, or Backspace from the table list), screenTables (full-screen table list, Backspace from the grid), screenDatabases (database list, `d` → switchDBCmd reopens the engine on another db), screenUsers (user/role list, `u`), screenExport (the export check list, `x` from the table list), screenBrowse (grid). The four list screens (`connList`/`sidebar`/`dbs`/`users`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey`/`handleUsersKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `d` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `d` and users via `u`, both reachable from the grid too; `,` on the table list runs `Engine.ProcessListSQL()` — empty on sqlite — through `runQueryCmd`, so the server's process list lands in the grid as an ordinary adHoc result). Backspace is the ONLY way left — there are no `t`/`T`/`c` jump-to-screen shortcuts (they were redundant with the chain). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). **The overlay commands (`?` help, `` ` `` jumplist, `b` history) and the jumplist steps (`Ctrl-o`/`Ctrl-i`/`Tab`) are screen-independent** — they inspect session-wide state, so handleKey runs them before the screen switch, gated only on `App.typing()` (true while the grid's quick-edit/column filter or a list's `/` filter owns the keyboard, so a letter meant for a filter stays literal). Their overlays must therefore be rendered in `View()` **before** the screen switch (like confirm/errView) — drawing them in `browseView` would make them openable on a list screen but invisible. Only `cellview` stays grid-only (it shows the cell under the grid cursor). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
   pane.go       # the `pane` struct + splits. A pane is one independently-navigable view: grid, currentTable, basePreds/baseNote, sort, adHoc/adHocQuery/adHocArgs (the bind values of a jsq-composed read, so `r` can re-run it), its OWN jumplist (views/viewIdx), and its layout rect. App holds `panes []pane` + `focus`; `p()`/`g()` are the focused-pane accessors and `paneByID` resolves a stable id. `<space>` is a leader (App.leader): `v` = new column right, `s` = stack below in the current column, `h/j/k/l` = focusDir. Closing a pane is **`Ctrl-d`**, off the leader (one keystroke; handled in handleKey's screenBrowse switch so it's inert while an edit/filter captures). Note this deliberately spends vim's half-page-down key — `Ctrl-u` is still free but its partner is gone. **Layout = columns of stacked panes** (`pane.col`; a.panes stays ordered by (col, top→bottom) so `paneCols` runs are contiguous — closePane renumbers to close a gap, since paneCols indexes by col and a hole renders as an empty column). Deliberately not a vim-style tree: the one divergence is `v` after `s`, which opens a full-height column rather than splitting just the focused pane's half. `focusDir` moves by **rect geometry**, and a candidate must overlap on the perpendicular axis — else `j` from a full-height left pane would jump to whatever merely sits lower in another column. **clonePane/grid.clone deep-copy rows (outer), visible, filters/filtersWide, and views** — every one is mutated in place, so sharing corrupts: appendRows appends past len into a shared backing array (rows arrive from scanQuery with spare cap), and a clone starts at an identical viewIdx so a shared `views` would have the first navigation clobber the other pane's history. Inner `[]any` rows ARE shared on purpose (applyEdit writes row[col] in place; one connection, one row → an edit should show in both). NOT implemented via restore(snapshot()) — that path shares rows.
-  cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner. yankCmd (y/Y) copies to the clipboard via an OSC 52 escape (go-osc52) written to stderr — no external binary, works over SSH; not a DB cmd.
+  cmd.go        # tea.Cmd constructors — the ONLY place db.Engine is called; also $EDITOR spawn (editorCmd). Each DB cmd takes a ctx (App.begin); dbErr() swallows a cancelled ctx to a nil msg. tickCmd drives the header spinner. yankCmd (y/Y) copies to the clipboard via an OSC 52 escape (go-osc52) written to stderr — no external binary, works over SSH; not a DB cmd. exportCmd/writeDump/dumpTable (the SQL export) live here too, for the same reason: they call the engine.
   sqlgen.go     # SQL-text generation for the $EDITOR full paths (buildUpdateStmt E, buildInsertStmt o, buildDeleteStmt D, buildDuplicateStmt p; renderInsert shared by o/p) + s helpers (selectTemplate, isReadSQL)
-  msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, errMsg)
+  msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, exportDoneMsg, errMsg)
   proc.go       # the connection `cmd` helper (port-forward etc.): startRun (registers in a package-level live set), waitPort, runProc.kill (deregisters + bounded group-kill), KillRunHelpers (exit backstop), tailBuffer. proc_unix.go/proc_other.go = process-group kill (unix) vs single-process fallback. The wait address comes from db.HostPort(url).
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget. yankCell (raw cell text)/currentRowJSON (column-ordered JSON) feed the y/Y clipboard yank.
-  sidebar.go    # full-screen list Model, laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓/j-k = ∓1, ←→/h-l = ∓rows, g/G to the ends). Two modes: navigation (default) and a `/`-triggered filter (`filtering` flag; type to narrow live via `filterPatterns` — prefix then substring; Enter opens the match, Esc clears). Used for the table list (screenTables), the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`), the user list (`a.users`, screenUsers — items are `db.Table{Name: user.Label()}`, Enter maps back to a `db.User` via `findUser`), AND the connection picker (`a.connList`, screenPicker — items are `db.Table{Name: conn}`, Enter maps back to a `config.Conn` via `findConn`). `label` is the search placeholder. (No separate picker.go — it was folded in here.)
+  export.go     # the SQL-export screen (`x` on the table list): a `sidebar` in check mode + the settings footer (rows cap / structure / output path, each a textField). Presentation only — the write is exportCmd/writeDump in cmd.go
+  sidebar.go    # full-screen list Model, laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓/j-k = ∓1, ←→/h-l = ∓rows, g/G to the ends). Two modes: navigation (default) and a `/`-triggered filter (`filtering` flag; type to narrow live via `filterPatterns` — prefix then substring; Enter opens the match, Esc clears). Used for the table list (screenTables), the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`), the user list (`a.users`, screenUsers — items are `db.Table{Name: user.Label()}`, Enter maps back to a `db.User` via `findUser`), AND the connection picker (`a.connList`, screenPicker — items are `db.Table{Name: conn}`, Enter maps back to a `config.Conn` via `findConn`). `label` is the search placeholder. `marks` (non-nil → a CHECK list, the export screen) renders `[x] `/`[ ] ` and enables toggle/toggleAll; it is keyed by LABEL, not index, so `setTables` (a re-list, a reconnect) keeps the checks on the tables that survive rather than sliding them onto whatever moved into those slots. (No separate picker.go — it was folded in here.)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
   histview.go   # query-history buffer overlay (b): histEntry + histView list; badge (row/affected count, `+` on a LIMIT hit) + snippet renderers
   confirm.go    # safe-mode (connection safe=true) "run this mutation?" y/n overlay
@@ -148,6 +156,57 @@ such a pane re-dispatches `grantsCmd` rather than replaying `adHocQuery`, so the
 marker survives a reload. `afterWrite` (on the seed → editorSubmitMsg →
 execDoneMsg) is the enum saying what a full-path write refreshes when it lands:
 the pane's view (default), the user list, or that pane's grants.
+
+**SQL export** (`x` on the table list → `screenExport`): the export screen is
+`export` in export.go — a `sidebar` with `marks` non-nil (so it renders check
+boxes) plus a settings footer of two `textField`s and a bool. Reusing the sidebar
+is the point: the `/` filter is how you pick twenty tables out of four hundred,
+and `a` marks the **visible** set so filter-then-`a` is the idiom. Marks are keyed
+by label, so Backspace→`e` keeps the selection. The key is `x`, not `e`: e/E are the edit keys
+everywhere else, and a third meaning for that letter would read as one. It is
+table-list-only, which keeps the screen on the left↔right chain. Two footer subtleties: `<space>` is claimed
+**before** `listKeys` (which would swallow it as unrecognised navigation) and
+matched on `msg.String()`, since a terminal sends it as either `KeySpace` or a
+`' '` rune; and an `Enter` out of filter mode commits the filter rather than
+exporting, because "Enter to accept a search" must never write a file.
+`App.typing()` returns true while a footer field is open, so `?`/`b` land in the
+field.
+
+**The export is a background job, deliberately outside the one-op slot**
+(`App.exportJob` + `exportCh` + `exportSeq`, NOT `begin()`/`gen`). An export runs
+for minutes, so the op slot's semantics — the next op cancels the one before it —
+would mean navigating away silently killed it (`dbErr` swallows a cancelled ctx,
+so it wouldn't even report). The job owns its own ctx/cancel and token; a query
+dispatched meanwhile takes the op slot as usual and the two coexist in the header
+(`exportStyle` left, `activityStyle` right). Progress is the standard bubbletea
+channel loop: `exportCmd` = `tea.Batch(exportRunCmd, exportWaitCmd)`, and the
+`exportProgressMsg` handler **re-arms `exportWaitCmd`** — forget that and progress
+stops after one message. Progress sends are non-blocking (a dropped one costs
+nothing); the terminal `exportDoneMsg` is sent blocking and is the ONLY place job
+state is cleared, so cancelling reports itself instead of vanishing. `Esc` cancels
+**only on screenExport** (a stray Esc elsewhere must not kill a long job); one job
+at a time. Temp files are registered in `liveExportTemps` and reaped by
+`CleanupExports`, which main defers alongside `KillRunHelpers` — a Ctrl-C exits
+without unwinding the export goroutine, so writeDump's own defer can't cover it.
+
+The write is `exportCmd` → `writeDump` → `dumpTable` in cmd.go (invariant 1: it
+calls the engine). It **streams** — `Engine.Stream`, one row in memory, rendered
+straight to a `bufio.Writer` — because a full table dwarfs any window the grid
+loads. The row cap is the exception: it reads newest-first (`orderKeys("", false,
+pk)`, the same total order the grid's default sort uses) and therefore buffers
+those N rendered lines to write them back forwards. Output goes to a UNIQUE temp file beside the
+target (not `<path>.part` — a second export dispatched over a cancelled one would
+otherwise delete the newer job's file) and is renamed on success, so a cancelled
+or failed export leaves nothing that looks finished. The per-engine halves are `SQLLiteral` (dialect
+literals: `0x…`/`'\x…'::bytea`/`X'…'`, and backslash-doubling for MySQL only —
+Postgres's prologue sets `standard_conforming_strings=on`, where doubling
+corrupts), `StructureSQL` (the `S` toggle: MySQL/SQLite hand over the server's own
+DDL; **Postgres deliberately emits no CREATE TABLE** — an information_schema
+rebuild loses indexes/sequences/constraints, so it writes `DELETE FROM` + a
+pg_dump pointer), and `DumpPrologue`/`DumpEpilogue`. `Stream` keeps `[]byte`
+**raw**, unlike `scanQuery` — MySQL returns []byte for VARCHAR and BLOB alike, so
+the driver's column type name is the only thing that tells them apart
+(`binaryBytes`).
 
 **Jumplist**: one **session-wide** list (`App.views`, oldest→newest, `viewIdx` =
 current); a `viewState` is `{conn, db, table, basePreds, baseNote, sort, pos}`
@@ -321,7 +380,10 @@ DESIGN.md — harmless shorthand, but they no longer resolve to a numbered doc.
    `QuoteIdent`. **Sole exception:** the `$EDITOR` full path runs user-authored
    SQL verbatim (values inlined by `sqlLiteral`) — that's the documented model,
    not a leak. New `$EDITOR`-authored statements follow it; anything jsq runs
-   *without* the user seeing the SQL must be parameter-bound.
+   *without* the user seeing the SQL must be parameter-bound. The SQL export is
+   **not** an exception: the `SELECT` it runs carries no values at all, and the
+   `INSERT`s it inlines are written to a file for another client, never executed
+   by jsq.
 
 ## Scroll/paging — intentional behavior, don't "fix"
 

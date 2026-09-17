@@ -141,3 +141,27 @@ type connectErrMsg struct {
 // tickMsg drives the header activity spinner; it self-perpetuates once the
 // connection is up (see the connectedMsg handler).
 type tickMsg struct{}
+
+// exportProgressMsg is one step of a running export: which table it is on and
+// how many rows it has written across the whole job. It arrives over the job's
+// channel (App.exportCh), and its handler re-issues the waiter — that loop is
+// what keeps progress flowing without the export owning the op slot.
+type exportProgressMsg struct {
+	table string // the table being written
+	index int    // its 1-based position in the selection
+	total int    // tables in the selection
+	rows  int64  // rows written so far, across every table
+	job   int    // the job token (App.exportJob.id); a stale job's messages are dropped
+}
+
+// exportDoneMsg is the terminal message of an export, success or not: err is nil
+// when the file landed, context.Canceled when the user stopped it, and the real
+// failure otherwise. It is always sent — the App clears its job state here and
+// nowhere else, so a cancelled export reports itself rather than vanishing.
+type exportDoneMsg struct {
+	path   string
+	tables int
+	rows   int64
+	err    error
+	job    int
+}

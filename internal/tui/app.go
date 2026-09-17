@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	screenTables                  // the full-screen table list
 	screenDatabases               // the full-screen database list (T)
 	screenUsers                   // the full-screen user/role list (u)
+	screenExport                  // the SQL-export check list (e, from the table list)
 )
 
 const leftPad = 1 // 1-char blank margin before the table list / grid
@@ -57,10 +59,20 @@ type App struct {
 	dbs      sidebar   // the full-screen database list (screenDatabases; items are db.Table{Name: db})
 	users    sidebar   // the full-screen user list (screenUsers; items are db.Table{Name: user.Label()})
 	userList []db.User // the users behind that list, in the same order (findUser maps a label back)
-	cell     cellView
-	help     help
-	confirm  confirmView // safe-mode "run this mutation?" overlay
-	errView  errView     // failed-statement modal (full error + query, e to re-edit)
+	export   export    // the SQL-export screen (check list + settings footer)
+
+	// exportJob is the running export, if any, and its channel of progress
+	// messages. It is deliberately NOT the one op slot: an export runs for
+	// minutes and the point is that you keep browsing while it does, so opening a
+	// table mid-export must not cancel it (begin() would). exportSeq tokens the
+	// jobs so a cancelled one's late messages are dropped.
+	exportJob *exportJob
+	exportCh  chan tea.Msg
+	exportSeq int
+	cell      cellView
+	help      help
+	confirm   confirmView // safe-mode "run this mutation?" overlay
+	errView   errView     // failed-statement modal (full error + query, e to re-edit)
 
 	// panes are the split views (`<space>v`), left→right; focus indexes the live
 	// one. There is always at least one. Each owns its grid, what it's showing,
@@ -268,6 +280,40 @@ func (a *App) begin(label string, paneID int) context.Context {
 	return ctx
 }
 
+// exportJob is a running SQL export: its own cancel func and token, plus the
+// progress last reported. It lives outside the gen/op-slot machinery on purpose
+// — see App.exportJob — so the only things that end it are finishing, failing,
+// and an explicit cancel from the export screen.
+type exportJob struct {
+	id     int
+	cancel context.CancelFunc
+	path   string
+	table  string // the table currently being written
+	index  int    // its position in the selection
+	total  int    // tables in the selection
+	rows   int64  // rows written so far
+}
+
+// label is the header segment for a running export: what it's on and how far.
+func (j *exportJob) label() string {
+	if j.total == 0 {
+		return "export"
+	}
+	return fmt.Sprintf("export %d/%d %s · %s", j.index, j.total, j.table, compactCount(j.rows))
+}
+
+// compactCount abbreviates a row count so the header segment keeps its width as
+// a dump runs into the millions.
+func compactCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM rows", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk rows", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d %s", n, plural(int(n), "row"))
+}
+
 // noPane marks an op whose result isn't destined for a pane.
 const noPane = 0
 
@@ -445,6 +491,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.layout()
 		a.status = a.nextStatus // "" unless a c write is reporting through the reload
 		a.nextStatus = ""
+		return a, nil
+
+	case exportProgressMsg:
+		if a.exportJob == nil || a.exportJob.id != msg.job {
+			return a, nil // a cancelled job's last words
+		}
+		a.exportJob.table, a.exportJob.index = msg.table, msg.index
+		a.exportJob.total, a.exportJob.rows = msg.total, msg.rows
+		// Re-arm the waiter: this is the loop that keeps progress coming.
+		return a, exportWaitCmd(a.exportCh)
+
+	case exportDoneMsg:
+		if a.exportJob == nil || a.exportJob.id != msg.job {
+			return a, nil
+		}
+		a.exportJob.cancel()
+		a.exportJob = nil
+		switch {
+		case msg.err == nil:
+			a.status = exportSummary(msg.path, msg.tables, msg.rows)
+		case errors.Is(msg.err, context.Canceled):
+			a.status = "export cancelled"
+		default:
+			a.status = "export failed: " + msg.err.Error()
+		}
 		return a, nil
 
 	case rowsMsg:
@@ -650,6 +721,8 @@ func (a *App) layout() {
 	a.dbs.w, a.dbs.h = avail, bodyH
 	a.users.w, a.users.h = avail, bodyH
 	a.connList.w, a.connList.h = avail, bodyH
+	// The export screen splits the body between its list and the settings footer.
+	a.export.list.w, a.export.list.h = avail, max(1, bodyH-exportLines)
 	a.layoutPanes(avail, bodyH)
 }
 
@@ -944,6 +1017,9 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenUsers:
 		return a.handleUsersKey(msg)
 
+	case screenExport:
+		return a.handleExportKey(msg)
+
 	case screenBrowse:
 		switch msg.String() {
 		case "backspace": // step left to the table list
@@ -988,6 +1064,11 @@ func (a App) typing() bool {
 		return a.dbs.filtering
 	case screenUsers:
 		return a.users.filtering
+	case screenExport:
+		// The footer's own fields count too: a path or a row count is text, so a
+		// stray `b` or `?` while typing one must land in the field, not open an
+		// overlay over it.
+		return a.export.list.filtering || a.export.opts.editing != exportFieldNone
 	}
 	return false
 }
@@ -1389,11 +1470,209 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tablesCmd(ctx, a.gen, a.engine)
 		case "u": // go to the user list
 			return a.openUsers()
+		case "x": // the SQL-export check list over these tables
+			return a.openExport()
 		case ",": // the server's current process list
 			return a.showProcessList()
 		}
 	}
 	return a, nil
+}
+
+// openExport opens the SQL-export screen over the current table list: the same
+// names in check mode, plus the settings footer.
+//
+// The key is `x`, not `e`: e/E are the edit keys everywhere else in jsq, and a
+// third meaning for the same letter would read as one. It is table-list-only,
+// which keeps the screen on the Connections → Tables → Grid chain rather than
+// adding a jump.
+func (a App) openExport() (tea.Model, tea.Cmd) {
+	if a.engine == nil || len(a.sidebar.tables) == 0 {
+		a.status = "no tables to export"
+		return a, nil
+	}
+	a.export.open(a.exportPrefix(), a.sidebar.tables)
+	a.screen = screenExport
+	a.layout()
+	return a, nil
+}
+
+// exportPrefix is what the generated file name leads with: the connection, or —
+// when jsq was started on a bare DSN and so has no connection name — the
+// database. (The status line says "adhoc" there, which is no use in a filename.)
+func (a App) exportPrefix() string {
+	if a.connName != "" {
+		return a.connName
+	}
+	return a.dbName
+}
+
+// handleExportKey drives the export screen: the shared list navigation and `/`
+// filter, <space> to check the table under the cursor, `a` to check everything
+// the filter is showing, n/o/S for the settings, Enter to write the file, and
+// Backspace to step back to the table list.
+func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A settings field takes every key while it's open (it's a text input).
+	if a.export.opts.editing != exportFieldNone {
+		return a.handleExportFieldKey(msg)
+	}
+	// Esc cancels a running export — but ONLY here, on the screen that started it
+	// and whose footer says so. An export is a background job that outlives this
+	// screen, and a stray Esc elsewhere must not be able to kill twenty minutes of
+	// work; coming back to `x` to stop it is the deliberate act.
+	if msg.Type == tea.KeyEsc && a.exportJob != nil {
+		a.cancelExport()
+		return a, nil
+	}
+	// <space> is claimed before listKeys, which would otherwise swallow it as an
+	// unrecognized navigation key. (It can't reach the split leader: that's armed
+	// only on the grid.) Matched on String(), since a terminal may deliver it as
+	// either KeySpace or a ' ' rune.
+	if msg.String() == " " && !a.export.list.filtering {
+		a.export.list.toggle()
+		a.export.refreshPath(a.exportPrefix())
+		return a, nil
+	}
+	if listKeys(&a.export.list, msg) {
+		return a, nil
+	}
+	switch msg.Type {
+	case tea.KeyEnter:
+		// An Enter out of filter mode commits the filter, as on every other list.
+		// Only an Enter in navigation mode exports — writing a file is not what
+		// you meant by pressing Enter to accept a search.
+		if a.export.list.filtering {
+			a.export.list.commitFilter()
+			return a, nil
+		}
+		return a.runExport()
+	case tea.KeyBackspace:
+		a.screen = screenTables // step back to the table list
+		a.layout()
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "a": // check everything visible (or clear it, if it all is already)
+			a.export.list.toggleAll()
+			a.export.refreshPath(a.exportPrefix())
+		case "n": // the per-table row cap
+			a.export.editField(exportFieldRows)
+		case "o": // the output file
+			a.export.editField(exportFieldPath)
+		case "S": // include the structure (DROP/CREATE) before each table's rows
+			a.export.opts.structure = !a.export.opts.structure
+		}
+	}
+	return a, nil
+}
+
+// handleExportFieldKey edits the row-cap or output-path field. It mirrors
+// sidebarFilterEdit's key set (the fields are the same textField the filters
+// use), with Enter to accept and Esc to put back what was there before.
+func (a App) handleExportFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	o := &a.export.opts
+	f := &o.rows
+	if o.editing == exportFieldPath {
+		f = &o.path
+	}
+	// A space is a legitimate character in a path (and never in a row count), and
+	// arrives as either KeySpace or a ' ' rune depending on the terminal.
+	if msg.String() == " " {
+		if o.editing == exportFieldPath {
+			f.insert(" ")
+		}
+		return a, nil
+	}
+	switch msg.Type {
+	case tea.KeyEnter:
+		if o.editing == exportFieldPath {
+			// A path typed by hand stops the generated name following the
+			// selection; emptying it hands the naming back to jsq.
+			o.pathSet = strings.TrimSpace(f.val) != ""
+		}
+		o.editing = exportFieldNone
+		a.export.refreshPath(a.exportPrefix()) // a new cap changes the generated name
+	case tea.KeyEsc:
+		f.setVal(o.orig)
+		o.editing = exportFieldNone
+	case tea.KeyBackspace:
+		f.backspace()
+	case tea.KeyDelete:
+		f.del()
+	case tea.KeyCtrlW:
+		f.deleteWord()
+	case tea.KeyLeft:
+		f.left()
+	case tea.KeyRight:
+		f.right()
+	case tea.KeyHome, tea.KeyCtrlA:
+		f.home()
+	case tea.KeyEnd, tea.KeyCtrlE:
+		f.end()
+	case tea.KeyRunes:
+		s := string(msg.Runes)
+		// The cap is a number: refusing non-digits here is why limit() can treat
+		// anything unparseable as "no cap" without ever showing an error.
+		if o.editing == exportFieldRows {
+			s = strings.Map(func(r rune) rune {
+				if r >= '0' && r <= '9' {
+					return r
+				}
+				return -1
+			}, s)
+		}
+		f.insert(s)
+	}
+	return a, nil
+}
+
+// runExport writes the checked tables to the named file. Nothing about it is a
+// mutation — it only reads — so safe mode doesn't gate it.
+func (a App) runExport() (tea.Model, tea.Cmd) {
+	if a.exportJob != nil {
+		// One job at a time: two exports would race over the op-free slot's state
+		// and, if pointed at the same file, over the file itself.
+		a.status = "an export is already running — esc cancels it"
+		return a, nil
+	}
+	tables := a.export.list.checkedTables()
+	if len(tables) == 0 {
+		a.status = "nothing checked — <space> selects the table under the cursor"
+		return a, nil
+	}
+	path := expandHome(strings.TrimSpace(a.export.opts.path.val))
+	if path == "" {
+		a.status = "no output file — `o` names one"
+		return a, nil
+	}
+	req := exportReq{
+		path:      path,
+		tables:    tables,
+		limit:     a.export.opts.limit(),
+		structure: a.export.opts.structure,
+		conn:      a.connName,
+		dbName:    a.dbName,
+	}
+	// Not a.begin(): an export owns its own slot, so it survives everything you
+	// do next (and, conversely, can't cancel a query you run meanwhile).
+	ctx, cancel := context.WithCancel(context.Background())
+	a.exportSeq++
+	a.exportJob = &exportJob{id: a.exportSeq, cancel: cancel, path: path, total: len(tables)}
+	// A fresh channel per job: a previous job's undelivered progress must not
+	// surface under the new one's token.
+	a.exportCh = make(chan tea.Msg, 8)
+	a.status = fmt.Sprintf("exporting %d %s to %s…",
+		len(tables), plural(len(tables), "table"), path)
+	return a, exportCmd(ctx, a.exportJob.id, a.engine, req, a.exportCh)
+}
+
+// cancelExport stops a running export. The job state is cleared by the
+// exportDoneMsg that follows, not here, so cancelling reports itself the same
+// way finishing does.
+func (a *App) cancelExport() {
+	if a.exportJob != nil {
+		a.exportJob.cancel()
+		a.status = "cancelling export…"
+	}
 }
 
 // showProcessList runs the engine's process-list query (information_schema on
@@ -2227,6 +2506,9 @@ func (a App) View() string {
 	case screenUsers:
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.users.View())
 		return a.statusLine() + "\n" + body
+	case screenExport:
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.export.View(a.exportJob))
+		return a.statusLine() + "\n" + body
 	case screenBrowse:
 		return a.browseView()
 	}
@@ -2400,11 +2682,21 @@ func (a App) statusLine() string {
 	// rows loaded) a compact paging hint — cursor row / loaded count, with a ↓ when
 	// more rows exist below the loaded buffer.
 	var right string
+	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
+	// A running export shows wherever you are — it outlives the screen that
+	// started it, so the header is the only place that can say it's still going.
+	// It sits to the LEFT of the op indicator: the op is the one Esc kills from
+	// here, so that stays next to its own hint.
+	var job string
+	if a.exportJob != nil {
+		job = exportStyle.Render(frame + " " + a.exportJob.label() + " ")
+	}
 	switch {
 	case a.activity != "":
 		// spinner + label + a hint that Esc kills it.
-		frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
-		right = activityStyle.Render(frame + " " + a.activity + " · esc ")
+		right = job + activityStyle.Render(frame+" "+a.activity+" · esc ")
+	case job != "":
+		right = job
 	case a.screen == screenBrowse && !split && len(a.g().visible) > 0:
 		row, loaded, more := a.g().posSummary()
 		s := fmt.Sprintf("%d/%d", row, loaded)
@@ -2424,6 +2716,10 @@ func (a App) statusLine() string {
 }
 
 var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+
+// exportStyle marks the background-export segment — a different colour from the
+// op spinner so two spinners in the header are never read as one thing.
+var exportStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 
 // safeConnStyle marks a safe (likely production) connection name in the header.
 var safeConnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))

@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aymanbagabas/go-osc52/v2"
@@ -596,4 +598,265 @@ func keysetCursor(eng db.Engine, keys []orderKey, anchor map[string]any, startId
 		terms = append(terms, "("+strings.Join(conj, " AND ")+")")
 	}
 	return "(" + strings.Join(terms, " OR ") + ")", args
+}
+
+// --- SQL export (`e` on the table list) ---
+
+// liveExportTemps tracks the temp file of every running export so CleanupExports
+// — deferred by main, exactly like KillRunHelpers — removes it however the
+// program quits. writeDump's own defer can't cover a Ctrl-C: the process exits
+// without unwinding the export's goroutine, which would leave a half-written
+// file sitting next to the one you asked for.
+var liveExportTemps = struct {
+	mu sync.Mutex
+	m  map[string]struct{}
+}{m: map[string]struct{}{}}
+
+func trackExportTemp(p string) {
+	liveExportTemps.mu.Lock()
+	liveExportTemps.m[p] = struct{}{}
+	liveExportTemps.mu.Unlock()
+}
+
+func untrackExportTemp(p string) {
+	liveExportTemps.mu.Lock()
+	delete(liveExportTemps.m, p)
+	liveExportTemps.mu.Unlock()
+}
+
+// CleanupExports removes the temp file of any export still in flight.
+func CleanupExports() {
+	liveExportTemps.mu.Lock()
+	paths := make([]string, 0, len(liveExportTemps.m))
+	for p := range liveExportTemps.m {
+		paths = append(paths, p)
+	}
+	liveExportTemps.m = map[string]struct{}{}
+	liveExportTemps.mu.Unlock()
+	for _, p := range paths {
+		os.Remove(p)
+	}
+}
+
+// exportReq is one dump: which tables, how much of each, and where it goes.
+type exportReq struct {
+	path      string
+	tables    []db.Table
+	limit     int  // newest-N rows per table (0 = the whole table)
+	structure bool // DROP/CREATE (Postgres: DELETE) before each table's rows
+	conn      string
+	dbName    string
+}
+
+// exportCmd starts an export job: a command that writes the file while reporting
+// progress into ch, batched with the one that waits for ch's first message.
+//
+// It is deliberately NOT a gen-stamped op like every other DB command. Those
+// share one slot, so the next thing you do cancels the one before it — right for
+// a query, fatal for an export, which is exactly the thing you start and then
+// walk away from. The job carries its own ctx and its own token instead.
+//
+// The progress loop is the standard bubbletea shape: the handler for each
+// message re-issues exportWaitCmd, so messages keep arriving until the terminal
+// exportDoneMsg, after which nobody waits again.
+func exportCmd(ctx context.Context, job int, eng db.Engine, req exportReq, ch chan tea.Msg) tea.Cmd {
+	return tea.Batch(exportRunCmd(ctx, job, eng, req, ch), exportWaitCmd(ch))
+}
+
+// exportRunCmd does the writing. Progress sends are non-blocking — a dropped
+// progress message costs nothing and must never stall the export — while the
+// terminal message is sent blocking, because the App clears its job state on it
+// and there is always exactly one waiter pending to receive it.
+func exportRunCmd(ctx context.Context, job int, eng db.Engine, req exportReq, ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		rows, err := writeDump(ctx, eng, req, func(p exportProgressMsg) {
+			p.job = job
+			select {
+			case ch <- p:
+			default:
+			}
+		})
+		// A cancelled export still reports: err is the ctx's, which the handler
+		// renders as "cancelled" rather than a failure.
+		if err == nil && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		ch <- exportDoneMsg{path: req.path, tables: len(req.tables), rows: rows, err: err, job: job}
+		return nil
+	}
+}
+
+// exportWaitCmd blocks for the job's next message.
+func exportWaitCmd(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg { return <-ch }
+}
+
+// exportProgressEvery is how many rows a table writes between progress reports.
+// A var so a test can lower it rather than having to write a big table.
+var exportProgressEvery int64 = 2000
+
+// writeDump streams every selected table into one file and returns the total row
+// count. It writes to a sibling temp file and renames on success, so an
+// interrupted or failed export never leaves a truncated file looking like a
+// finished one. The temp name is unique rather than "<path>.part": a second
+// export dispatched over a running one (begin() cancels the first, but its
+// cleanup still runs) would otherwise delete the newer export's file.
+//
+// Rows stream: a table is read one row at a time and rendered straight to the
+// buffered writer, so dumping a table far larger than memory costs nothing. The
+// exception is a row cap, which reads the NEWEST rows (primary key descending)
+// and therefore has to buffer them to write them back in insertion order — but
+// that buffer is exactly the cap the user asked for.
+func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(exportProgressMsg)) (int64, error) {
+	f, err := os.CreateTemp(filepath.Dir(req.path), filepath.Base(req.path)+".*.part")
+	if err != nil {
+		return 0, err
+	}
+	tmp := f.Name()
+	trackExportTemp(tmp)
+	w := bufio.NewWriter(f)
+	done := false
+	defer func() {
+		f.Close()
+		untrackExportTemp(tmp)
+		if !done {
+			os.Remove(tmp)
+		}
+	}()
+
+	// The heading names whichever of connection/database jsq actually has — a
+	// bare-DSN session has no connection name, and an empty one would leave a
+	// dangling separator.
+	var from []string
+	for _, part := range []string{req.conn, req.dbName} {
+		if part != "" && (len(from) == 0 || from[0] != part) {
+			from = append(from, part)
+		}
+	}
+	fmt.Fprintf(w, "-- jsq export · %s\n-- %s\n",
+		strings.Join(from, " · "), time.Now().Format("2006-01-02 15:04:05"))
+	if req.limit > 0 {
+		fmt.Fprintf(w, "-- PARTIAL: newest %d rows per table, by primary key descending\n", req.limit)
+	}
+	fmt.Fprintf(w, "\n%s\n", eng.DumpPrologue())
+
+	var total int64
+	for i, t := range req.tables {
+		step := exportProgressMsg{table: tableLabel(t), index: i + 1, total: len(req.tables)}
+		if report != nil {
+			step.rows = total
+			report(step)
+		}
+		// The per-table callback reports mid-table progress, so one huge table
+		// isn't a silent wait — which is the case the whole job design exists for.
+		n, err := dumpTable(ctx, w, eng, t, req, func(done int64) {
+			if report != nil {
+				step.rows = total + done
+				report(step)
+			}
+		})
+		if err != nil {
+			// A cancelled export is not a failure to report — the caller turns the
+			// ctx error into "cancelled" — but it must still stop here.
+			return total, fmt.Errorf("exporting %s: %w", tableLabel(t), err)
+		}
+		total += n
+	}
+
+	fmt.Fprintf(w, "%s", eng.DumpEpilogue())
+	if err := w.Flush(); err != nil {
+		return 0, err
+	}
+	if err := f.Close(); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmp, req.path); err != nil {
+		return 0, err
+	}
+	done = true
+	return total, nil
+}
+
+// dumpTable writes one table's section: its heading, the optional structure
+// block, then an INSERT per row. The row count lands in a trailing comment
+// because streaming means we don't know it until the scan ends.
+func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, error) {
+	ref := t.Ref()
+	qual := eng.QualifiedName(ref)
+
+	// The row cap takes the newest rows, which needs the key to order by. Without
+	// a primary key there is no "newest", so the cap becomes an arbitrary slice —
+	// said out loud in the file rather than silently.
+	var pk []string
+	order, note := "", ""
+	if req.limit > 0 {
+		var err error
+		if pk, err = eng.PrimaryKey(ctx, ref); err != nil {
+			return 0, err
+		}
+		if len(pk) > 0 {
+			order = orderClauseKeys(eng, orderKeys("", false, pk))
+			note = fmt.Sprintf(" · newest %d by %s desc", req.limit, strings.Join(pk, ", "))
+		} else {
+			note = fmt.Sprintf(" · an arbitrary %d rows (no primary key to take the newest by)", req.limit)
+		}
+	}
+
+	fmt.Fprintf(w, "-- %s%s\n", tableLabel(t), note)
+	if req.structure {
+		ddl, err := eng.StructureSQL(ctx, ref)
+		if err != nil {
+			return 0, err
+		}
+		fmt.Fprintf(w, "%s", ddl)
+	}
+
+	q := "SELECT * FROM " + qual + order
+	if req.limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", req.limit)
+	}
+
+	var prefix string
+	var types []string
+	var n int64
+	var buf []string // only used for a capped read, which arrives newest-first
+	err := eng.Stream(ctx, q, nil, db.RowStream{
+		Head: func(cols, colTypes []string) error {
+			quoted := make([]string, len(cols))
+			for i, c := range cols {
+				quoted[i] = eng.QuoteIdent(c)
+			}
+			prefix = "INSERT INTO " + qual + " (" + strings.Join(quoted, ", ") + ") VALUES ("
+			types = colTypes
+			return nil
+		},
+		Row: func(vals []any) error {
+			lits := make([]string, len(vals))
+			for i, v := range vals {
+				lits[i] = eng.SQLLiteral(v, types[i])
+			}
+			line := prefix + strings.Join(lits, ", ") + ");\n"
+			n++
+			if report != nil && n%exportProgressEvery == 0 {
+				report(n)
+			}
+			if len(pk) > 0 { // read backwards — hold it and write it forwards
+				buf = append(buf, line)
+				return nil
+			}
+			_, err := w.WriteString(line)
+			return err
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	for i := len(buf) - 1; i >= 0; i-- {
+		if _, err := w.WriteString(buf[i]); err != nil {
+			return 0, err
+		}
+	}
+
+	fmt.Fprintf(w, "-- %d %s\n\n", n, plural(int(n), "row"))
+	return n, nil
 }

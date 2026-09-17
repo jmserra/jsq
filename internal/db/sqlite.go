@@ -294,3 +294,48 @@ func (e *sqliteEngine) resolveImplicitPK(ctx context.Context, fk *ForeignKey) er
 	}
 	return nil
 }
+
+// --- SQL export (see dump.go) ---
+
+func (e *sqliteEngine) SQLLiteral(v any, colType string) string {
+	switch x := v.(type) {
+	case []byte:
+		return liteBytesLiteral(x, colType)
+	case string:
+		return liteBytesLiteral([]byte(x), colType)
+	case bool:
+		if x {
+			return "1"
+		}
+		return "0"
+	}
+	return stdSQLLiteral(v, false)
+}
+
+// liteBytesLiteral writes text as a quoted string — SQLite has no escape
+// character inside one (a quote is doubled, nothing else is special), so a
+// backslash passes through as itself — and binary as the X'…' blob literal,
+// whose empty form is valid, so there is no special case for it.
+func liteBytesLiteral(b []byte, colType string) string {
+	if !binaryBytes(b, colType) {
+		return sqlQuote(string(b), false)
+	}
+	return "X'" + hexBytes(b) + "'"
+}
+
+// StructureSQL replays the CREATE TABLE sqlite_master stored verbatim.
+func (e *sqliteEngine) StructureSQL(ctx context.Context, t TableRef) (string, error) {
+	var ddl string
+	err := e.db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, t.Name).Scan(&ddl)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", e.QualifiedName(t), ddl), nil
+}
+
+func (e *sqliteEngine) DumpPrologue() string {
+	return "PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n"
+}
+
+func (e *sqliteEngine) DumpEpilogue() string { return "COMMIT;\n" }
