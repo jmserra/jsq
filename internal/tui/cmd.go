@@ -640,21 +640,20 @@ func CleanupExports() {
 
 // exportReq is one dump: which tables, how much of each, and where it goes.
 type exportReq struct {
-	path      string
-	tables    []db.Table
-	limit     int  // newest-N rows per table (0 = the whole table)
-	structure bool // DROP/CREATE (Postgres: DELETE) before each table's rows
-	conn      string
-	dbName    string
+	path   string
+	tables []db.Table
+	limit  int // newest-N rows per table; 0 = the whole table, which also means DROP + CREATE
+	conn   string
+	dbName string
 }
 
 // exportCmd starts an export job: a command that writes the file while reporting
 // progress into ch, batched with the one that waits for ch's first message.
 //
-// It is deliberately NOT a gen-stamped op like every other DB command. Those
-// share one slot, so the next thing you do cancels the one before it — right for
-// a query, fatal for an export, which is exactly the thing you start and then
-// walk away from. The job carries its own ctx and its own token instead.
+// It is not a gen-stamped op like every other DB command: it needs a progress
+// channel the one-shot op msgs don't have, so the job carries its own ctx and
+// token. The UI is blocked behind its loader while it runs (App.exportJob), so
+// nothing else can be dispatched meanwhile anyway.
 //
 // The progress loop is the standard bubbletea shape: the handler for each
 // message re-issues exportWaitCmd, so messages keep arriving until the terminal
@@ -681,7 +680,13 @@ func exportRunCmd(ctx context.Context, job int, eng db.Engine, req exportReq, ch
 		if err == nil && ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		ch <- exportDoneMsg{path: req.path, tables: len(req.tables), rows: rows, err: err, job: job}
+		var size int64
+		if err == nil {
+			if fi, serr := os.Stat(req.path); serr == nil {
+				size = fi.Size()
+			}
+		}
+		ch <- exportDoneMsg{path: req.path, tables: len(req.tables), rows: rows, bytes: size, err: err, job: job}
 		return nil
 	}
 }
@@ -698,9 +703,14 @@ var exportProgressEvery int64 = 2000
 // writeDump streams every selected table into one file and returns the total row
 // count. It writes to a sibling temp file and renames on success, so an
 // interrupted or failed export never leaves a truncated file looking like a
-// finished one. The temp name is unique rather than "<path>.part": a second
-// export dispatched over a running one (begin() cancels the first, but its
-// cleanup still runs) would otherwise delete the newer export's file.
+// finished one. The temp name is unique rather than "<path>.part", so a second
+// export can never delete the file of one still being cleaned up.
+//
+// The shape of the file follows the row cap. A full export recreates each table
+// — DROP + CREATE, then plain INSERTs — so replaying it makes the target match
+// the source. A capped one carries no DDL at all and writes upserts, so it can
+// be replayed over an existing table, and replayed again, without dropping
+// anything or failing on the rows already there.
 //
 // Rows stream: a table is read one row at a time and rendered straight to the
 // buffered writer, so dumping a table far larger than memory costs nothing. The
@@ -736,11 +746,16 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 	fmt.Fprintf(w, "-- jsq export · %s\n-- %s\n",
 		strings.Join(from, " · "), time.Now().Format("2006-01-02 15:04:05"))
 	if req.limit > 0 {
-		fmt.Fprintf(w, "-- PARTIAL: newest %d rows per table, by primary key descending\n", req.limit)
+		fmt.Fprintf(w, "-- PARTIAL: newest %d rows per table, by primary key descending.\n"+
+			"-- No DDL; rows are upserts, so this replays over the existing tables (and reruns).\n", req.limit)
+	} else {
+		fmt.Fprintf(w, "-- FULL: each table is dropped and recreated before its rows.\n")
 	}
 	fmt.Fprintf(w, "\n%s\n", eng.DumpPrologue())
 
 	var total int64
+	var final []string
+	seen := map[string]bool{}
 	for i, t := range req.tables {
 		step := exportProgressMsg{table: tableLabel(t), index: i + 1, total: len(req.tables)}
 		if report != nil {
@@ -748,8 +763,8 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 			report(step)
 		}
 		// The per-table callback reports mid-table progress, so one huge table
-		// isn't a silent wait — which is the case the whole job design exists for.
-		n, err := dumpTable(ctx, w, eng, t, req, func(done int64) {
+		// isn't a silent wait.
+		n, fin, err := dumpTable(ctx, w, eng, t, req, func(done int64) {
 			if report != nil {
 				step.rows = total + done
 				report(step)
@@ -761,6 +776,17 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 			return total, fmt.Errorf("exporting %s: %w", tableLabel(t), err)
 		}
 		total += n
+		// Two dumped tables report the same foreign key between them; it goes in
+		// once.
+		for _, s := range fin {
+			if !seen[s] {
+				seen[s] = true
+				final = append(final, s)
+			}
+		}
+	}
+	if len(final) > 0 {
+		fmt.Fprintf(w, "-- foreign keys, once every table exists\n%s\n\n", strings.Join(final, "\n"))
 	}
 
 	fmt.Fprintf(w, "%s", eng.DumpEpilogue())
@@ -777,56 +803,61 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 	return total, nil
 }
 
-// dumpTable writes one table's section: its heading, the optional structure
-// block, then an INSERT per row. The row count lands in a trailing comment
-// because streaming means we don't know it until the scan ends.
-func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, error) {
+// dumpTable writes one table's section: its heading, the structure (a full
+// export) or nothing (a capped one), an INSERT per row, and whatever of the
+// structure goes behind the rows. It returns the row count and the statements
+// that must wait until every table is written. The count also lands in a
+// trailing comment, since streaming means it isn't known until the scan ends.
+func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, []string, error) {
 	ref := t.Ref()
 	qual := eng.QualifiedName(ref)
+
+	cols, err := eng.DumpColumns(ctx, ref)
+	if err != nil {
+		return 0, nil, err
+	}
+	pk, err := eng.PrimaryKey(ctx, ref)
+	if err != nil {
+		return 0, nil, err
+	}
 
 	// The row cap takes the newest rows, which needs the key to order by. Without
 	// a primary key there is no "newest", so the cap becomes an arbitrary slice —
 	// said out loud in the file rather than silently.
-	var pk []string
 	order, note := "", ""
 	if req.limit > 0 {
-		var err error
-		if pk, err = eng.PrimaryKey(ctx, ref); err != nil {
-			return 0, err
-		}
 		if len(pk) > 0 {
 			order = orderClauseKeys(eng, orderKeys("", false, pk))
 			note = fmt.Sprintf(" · newest %d by %s desc", req.limit, strings.Join(pk, ", "))
 		} else {
-			note = fmt.Sprintf(" · an arbitrary %d rows (no primary key to take the newest by)", req.limit)
+			note = fmt.Sprintf(" · an arbitrary %d rows (no primary key to take the newest by, or to upsert on)", req.limit)
 		}
 	}
 
 	fmt.Fprintf(w, "-- %s%s\n", tableLabel(t), note)
-	if req.structure {
-		ddl, err := eng.StructureSQL(ctx, ref)
-		if err != nil {
-			return 0, err
+	var ddl db.TableDDL
+	if req.limit == 0 {
+		if ddl, err = eng.StructureSQL(ctx, ref); err != nil {
+			return 0, nil, err
 		}
-		fmt.Fprintf(w, "%s", ddl)
+		fmt.Fprintf(w, "%s", ddl.Create)
 	}
 
-	q := "SELECT * FROM " + qual + order
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = eng.QuoteIdent(c)
+	}
+	q := "SELECT " + strings.Join(quoted, ", ") + " FROM " + qual + order
 	if req.limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", req.limit)
 	}
+	head, tail := eng.DumpInsert(qual, cols, pk, req.limit > 0)
 
-	var prefix string
 	var types []string
 	var n int64
 	var buf []string // only used for a capped read, which arrives newest-first
-	err := eng.Stream(ctx, q, nil, db.RowStream{
-		Head: func(cols, colTypes []string) error {
-			quoted := make([]string, len(cols))
-			for i, c := range cols {
-				quoted[i] = eng.QuoteIdent(c)
-			}
-			prefix = "INSERT INTO " + qual + " (" + strings.Join(quoted, ", ") + ") VALUES ("
+	err = eng.Stream(ctx, q, nil, db.RowStream{
+		Head: func(_, colTypes []string) error {
 			types = colTypes
 			return nil
 		},
@@ -835,12 +866,12 @@ func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, 
 			for i, v := range vals {
 				lits[i] = eng.SQLLiteral(v, types[i])
 			}
-			line := prefix + strings.Join(lits, ", ") + ");\n"
+			line := head + strings.Join(lits, ", ") + tail
 			n++
 			if report != nil && n%exportProgressEvery == 0 {
 				report(n)
 			}
-			if len(pk) > 0 { // read backwards — hold it and write it forwards
+			if order != "" { // read backwards — hold it and write it forwards
 				buf = append(buf, line)
 				return nil
 			}
@@ -849,14 +880,15 @@ func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, 
 		},
 	})
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	for i := len(buf) - 1; i >= 0; i-- {
 		if _, err := w.WriteString(buf[i]); err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 	}
+	fmt.Fprintf(w, "%s", ddl.After)
 
 	fmt.Fprintf(w, "-- %d %s\n\n", n, plural(int(n), "row"))
-	return n, nil
+	return n, ddl.Final, nil
 }

@@ -15,8 +15,9 @@ what README's design section describes. Don't duplicate README here.
   set**: `JSQ_TEST_PG=<dsn>`; `JSQ_TEST_MYSQL_DB` (+ optional `_HOST`/`_USER`/
   `_PASS`). For a local MySQL, per global config just run `mysql <dbname>`.
 - `internal/db/dump_test.go` + `internal/tui/export_test.go` cover the export;
-  `TestExportReplays` is the load-bearing one — it replays a generated dump into a
-  fresh sqlite db, which is the only check that the file is actually runnable
+  `TestExportReplays` (a full dump replayed into a fresh sqlite db) and
+  `TestExportPartialReruns` (a capped dump replayed twice over the live table)
+  are the load-bearing ones — the only checks that the file is actually runnable
   rather than merely plausible. `internal/db/dumplive_test.go` checks the MySQL /
   Postgres dialect halves against real servers (same env vars as the other live
   tests).
@@ -36,7 +37,7 @@ main.go                     # flag parse (-c + one positional), resolve conn, bo
 internal/config/config.go   # load connections.toml, read-only (url, cmd, safe)
 internal/db/
   db.go                     # Engine interface (Tables/Columns/PrimaryKey/ForeignKeys/Users/GrantsSQL/…) + the User type + Open() dispatch + shared scanQuery + stdEngine base (Query/Exec/Close over *sql.DB, embedded by each engine) + openStd/namesToTables + DSN/HostPort helpers
-  dump.go       # the shared half of the SQL export: stdEngine.Stream (row-at-a-time reads, []byte kept RAW so a BLOB is distinguishable from a VARCHAR) + sqlQuote/stdSQLLiteral/binaryBytes. The dialect halves (SQLLiteral/StructureSQL/DumpPrologue/DumpEpilogue) are in each engine file
+  dump.go       # the shared half of the SQL export: stdEngine.Stream (row-at-a-time reads, []byte kept RAW so a BLOB is distinguishable from a VARCHAR) + sqlQuote/stdSQLLiteral/binaryBytes + insertHead/onConflictTail (the pg/sqlite upsert). The dialect halves (SQLLiteral/DumpColumns/DumpInsert/StructureSQL/DumpPrologue/DumpEpilogue) are in each engine file
   sqlite.go postgres.go mysql.go   # one Engine impl each
 internal/tui/
   app.go        # root App Model. Screens: screenPicker (bare `jsq`, or Backspace from the table list), screenTables (full-screen table list, Backspace from the grid), screenDatabases (database list, `d` → switchDBCmd reopens the engine on another db), screenUsers (user/role list, `u`), screenExport (the export check list, `x` from the table list), screenBrowse (grid). The four list screens (`connList`/`sidebar`/`dbs`/`users`) share one `sidebar` component and route keys the same way: `handlePickerKey`/`handleTablesKey`/`handleDatabasesKey`/`handleUsersKey` each run `sidebarFilterEdit` while `s.filtering` (text-edit + arrows), else nav mode where `/` starts the filter and a bare letter is NOT a filter (so screen commands like `d` stay live); `sidebarNav` is the shared arrow/Ctrl-NP mover. **Screen navigation is a left↔right chain: Connections → Tables → Grid** (databases hang off Tables via `d` and users via `u`, both reachable from the grid too; `,` on the table list runs `Engine.ProcessListSQL()` — empty on sqlite — through `runQueryCmd`, so the server's process list lands in the grid as an ordinary adHoc result). Backspace is the ONLY way left — there are no `t`/`T`/`c` jump-to-screen shortcuts (they were redundant with the chain). `Enter` moves right (connect / open table / open cell); `Backspace` moves left (grid→tables→picker; databases→tables; the picker is leftmost so its Backspace is a no-op). `Esc` never changes screens — it only clears an active list/column filter (and, via the global handler, kills an in-flight op or cancels a connect). **The overlay commands (`?` help, `` ` `` jumplist, `b` history) and the jumplist steps (`Ctrl-o`/`Ctrl-i`/`Tab`) are screen-independent** — they inspect session-wide state, so handleKey runs them before the screen switch, gated only on `App.typing()` (true while the grid's quick-edit/column filter or a list's `/` filter owns the keyboard, so a letter meant for a filter stays literal). Their overlays must therefore be rendered in `View()` **before** the screen switch (like confirm/errView) — drawing them in `browseView` would make them openable on a list screen but invisible. Only `cellview` stays grid-only (it shows the cell under the grid cursor). ALL key routing (hardcoded — no keymap.go), layout, View. `begin(label)`/`stop()` drive the top-right activity indicator: begin cancels any prior op, bumps a monotonic `gen` token, stores a `context.CancelFunc`, and hands the cancellable ctx to the dispatched DB cmd; a terminal msg (or Esc, or a new begin) calls stop. Each DB cmd stamps its result msg with the `gen` it was dispatched under; `Update` drops any result whose `gen` no longer matches `a.gen` (`App.stale`) — so a superseded op that finished late can neither cancel the current op nor apply its rows over it. Non-op msgs (connect/editor errors) carry `gen 0` and are never stale. A perpetual `tickCmd` (started on connectedMsg) animates the spinner and idles invisibly when `activity==""`.
@@ -46,7 +47,7 @@ internal/tui/
   msg.go        # tea.Msg types (connectedMsg, rowsMsg, moreRowsMsg, editDoneMsg, editorSubmitMsg/AbortedMsg, execDoneMsg, exportDoneMsg, errMsg)
   proc.go       # the connection `cmd` helper (port-forward etc.): startRun (registers in a package-level live set), waitPort, runProc.kill (deregisters + bounded group-kill), KillRunHelpers (exit backstop), tailBuffer. proc_unix.go/proc_other.go = process-group kill (unix) vs single-process fallback. The wait address comes from db.HostPort(url).
   grid.go       # fixed-width grid Model: cursor, scroll, sort marker, filter, e-edit overlay, fullEditTarget. yankCell (raw cell text)/currentRowJSON (column-ordered JSON) feed the y/Y clipboard yank.
-  export.go     # the SQL-export screen (`x` on the table list): a `sidebar` in check mode + the settings footer (rows cap / structure / output path, each a textField). Presentation only — the write is exportCmd/writeDump in cmd.go
+  export.go     # the SQL-export screen (`x` on the table list): a `sidebar` in check mode + the settings footer (the rows cap, a textField — the only setting; the file name is generated by defaultExportPath into `exportDir`). Presentation only — the write is exportCmd/writeDump in cmd.go
   sidebar.go    # full-screen list Model, laid out as a column-major grid sized to the widest name (multi-column on wide screens; ↑↓/j-k = ∓1, ←→/h-l = ∓rows, g/G to the ends). Two modes: navigation (default) and a `/`-triggered filter (`filtering` flag; type to narrow live via `filterPatterns` — prefix then substring; Enter opens the match, Esc clears). Used for the table list (screenTables), the database list (`a.dbs`, screenDatabases — items are `db.Table{Name: db}`), the user list (`a.users`, screenUsers — items are `db.Table{Name: user.Label()}`, Enter maps back to a `db.User` via `findUser`), AND the connection picker (`a.connList`, screenPicker — items are `db.Table{Name: conn}`, Enter maps back to a `config.Conn` via `findConn`). `label` is the search placeholder. `marks` (non-nil → a CHECK list, the export screen) renders `[x] `/`[ ] ` and enables toggle/toggleAll; it is keyed by LABEL, not index, so `setTables` (a re-list, a reconnect) keeps the checks on the tables that survive rather than sliding them onto whatever moved into those slots. (No separate picker.go — it was folded in here.)
   cellview.go   # read-only full-cell viewer (Enter); pretty-prints JSON
   histview.go   # query-history buffer overlay (b): histEntry + histView list; badge (row/affected count, `+` on a LIMIT hit) + snippet renderers
@@ -159,33 +160,39 @@ the pane's view (default), the user list, or that pane's grants.
 
 **SQL export** (`x` on the table list → `screenExport`): the export screen is
 `export` in export.go — a `sidebar` with `marks` non-nil (so it renders check
-boxes) plus a settings footer of two `textField`s and a bool. Reusing the sidebar
+boxes) plus a settings footer with ONE field, the row cap (`n`). There is
+deliberately no file-name or structure setting: the name is generated
+(`defaultExportPath`, stamped to the second, into `exportDir` = the cwd — tests
+point it at a temp dir), and **the cap decides the file's shape** — no cap = full
+recreate (DROP + CREATE + plain INSERT), a cap = upserts with no DDL, rerunnable
+over the live table. Reusing the sidebar
 is the point: the `/` filter is how you pick twenty tables out of four hundred,
 and `a` marks the **visible** set so filter-then-`a` is the idiom. Marks are keyed
-by label, so Backspace→`e` keeps the selection. The key is `x`, not `e`: e/E are the edit keys
+by label, so Backspace→`x` keeps the selection. The key is `x`, not `e`: e/E are the edit keys
 everywhere else, and a third meaning for that letter would read as one. It is
 table-list-only, which keeps the screen on the left↔right chain. Two footer subtleties: `<space>` is claimed
 **before** `listKeys` (which would swallow it as unrecognised navigation) and
 matched on `msg.String()`, since a terminal sends it as either `KeySpace` or a
 `' '` rune; and an `Enter` out of filter mode commits the filter rather than
 exporting, because "Enter to accept a search" must never write a file.
-`App.typing()` returns true while a footer field is open, so `?`/`b` land in the
+`App.typing()` returns true while the rows field is open, so `?`/`b` land in the
 field.
 
-**The export is a background job, deliberately outside the one-op slot**
-(`App.exportJob` + `exportCh` + `exportSeq`, NOT `begin()`/`gen`). An export runs
-for minutes, so the op slot's semantics — the next op cancels the one before it —
-would mean navigating away silently killed it (`dbErr` swallows a cancelled ctx,
-so it wouldn't even report). The job owns its own ctx/cancel and token; a query
-dispatched meanwhile takes the op slot as usual and the two coexist in the header
-(`exportStyle` left, `activityStyle` right). Progress is the standard bubbletea
-channel loop: `exportCmd` = `tea.Batch(exportRunCmd, exportWaitCmd)`, and the
-`exportProgressMsg` handler **re-arms `exportWaitCmd`** — forget that and progress
-stops after one message. Progress sends are non-blocking (a dropped one costs
-nothing); the terminal `exportDoneMsg` is sent blocking and is the ONLY place job
-state is cleared, so cancelling reports itself instead of vanishing. `Esc` cancels
-**only on screenExport** (a stray Esc elsewhere must not kill a long job); one job
-at a time. Temp files are registered in `liveExportTemps` and reaped by
+**The export blocks the UI** (`App.exportJob` + `exportCh` + `exportSeq`, NOT
+`begin()`/`gen`): while `exportJob` is set, `View()` renders `exportingView`
+(before the screen switch, like the connect loader) and `handleKey` swallows every
+key but Esc (cancel) and Ctrl-C. It still has its own ctx/cancel and token rather
+than the op slot because it streams progress, which one-shot op msgs can't.
+Progress is the standard bubbletea channel loop: `exportCmd` =
+`tea.Batch(exportRunCmd, exportWaitCmd)`, and the `exportProgressMsg` handler
+**re-arms `exportWaitCmd`** — forget that and progress stops after one message.
+Progress sends are non-blocking (a dropped one costs nothing); the terminal
+`exportDoneMsg` is sent blocking and is the ONLY place job state is cleared, so
+cancelling reports itself instead of vanishing (the loader says "cancelling…"
+meanwhile). exportDoneMsg turns the loader into `exportDoneView` (`App.exportDone`,
+an `exportOutcome`: the msg + elapsed; `bytes` is stat'd after the rename), which
+swallows the next key: `dismissExportDone` → success: table list with marks
+cleared; cancel/failure: back to screenExport, selection kept. Temp files are registered in `liveExportTemps` and reaped by
 `CleanupExports`, which main defers alongside `KillRunHelpers` — a Ctrl-C exits
 without unwinding the export goroutine, so writeDump's own defer can't cover it.
 
@@ -195,15 +202,24 @@ straight to a `bufio.Writer` — because a full table dwarfs any window the grid
 loads. The row cap is the exception: it reads newest-first (`orderKeys("", false,
 pk)`, the same total order the grid's default sort uses) and therefore buffers
 those N rendered lines to write them back forwards. Output goes to a UNIQUE temp file beside the
-target (not `<path>.part` — a second export dispatched over a cancelled one would
-otherwise delete the newer job's file) and is renamed on success, so a cancelled
+target (not `<path>.part`, so no export can delete another's file) and is renamed on success, so a cancelled
 or failed export leaves nothing that looks finished. The per-engine halves are `SQLLiteral` (dialect
 literals: `0x…`/`'\x…'::bytea`/`X'…'`, and backslash-doubling for MySQL only —
 Postgres's prologue sets `standard_conforming_strings=on`, where doubling
-corrupts), `StructureSQL` (the `S` toggle: MySQL/SQLite hand over the server's own
-DDL; **Postgres deliberately emits no CREATE TABLE** — an information_schema
-rebuild loses indexes/sequences/constraints, so it writes `DELETE FROM` + a
-pg_dump pointer), and `DumpPrologue`/`DumpEpilogue`. `Stream` keeps `[]byte`
+corrupts), `DumpColumns` (the read/insert column list: every column minus
+generated ones, which reject a value), `DumpInsert` (head/tail around a row's
+values; `upsert` on a capped dump — MySQL `ON DUPLICATE KEY UPDATE c=VALUES(c)`,
+deliberately not REPLACE, which deletes and so cascades; pg/sqlite `ON CONFLICT
+(pk) DO UPDATE`, DO NOTHING with no PK or nothing but key columns; pg always adds
+`OVERRIDING SYSTEM VALUE` for GENERATED ALWAYS identities), `StructureSQL` (full
+dumps only, returns a `db.TableDDL{Create, After, Final}`: MySQL = SHOW CREATE
+TABLE with inline FKs, fine under FOREIGN_KEY_CHECKS=0; SQLite = sqlite_master's
+CREATE + its indexes/triggers in After; **Postgres composes it from the
+catalogs**, pg_dump-style, inside a read-only tx with `SET LOCAL search_path = ''`
+so every name the server prints comes back schema-qualified — `DROP … CASCADE`,
+serial sequences pre-created, indexes + `setval` in After, and every FK from OR
+to the table in Final, which `writeDump` dedupes and writes after all tables since
+the CASCADE drops other tables' FKs), and `DumpPrologue`/`DumpEpilogue`. `Stream` keeps `[]byte`
 **raw**, unlike `scanQuery` — MySQL returns []byte for VARCHAR and BLOB alike, so
 the driver's column type name is the only thing that tells them apart
 (`binaryBytes`).

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -62,17 +63,22 @@ type App struct {
 	export   export    // the SQL-export screen (check list + settings footer)
 
 	// exportJob is the running export, if any, and its channel of progress
-	// messages. It is deliberately NOT the one op slot: an export runs for
-	// minutes and the point is that you keep browsing while it does, so opening a
-	// table mid-export must not cancel it (begin() would). exportSeq tokens the
-	// jobs so a cancelled one's late messages are dropped.
+	// messages. While it is set the export loader owns the screen and every key
+	// but Esc (cancel) and Ctrl-C is swallowed — an export is a long, one-shot
+	// job, and nothing you could do meanwhile is worth racing it. It keeps its
+	// own ctx/token rather than the op slot because it streams progress, which
+	// the one-shot op messages can't. exportSeq tokens the jobs so a cancelled
+	// one's late messages are dropped.
 	exportJob *exportJob
-	exportCh  chan tea.Msg
-	exportSeq int
-	cell      cellView
-	help      help
-	confirm   confirmView // safe-mode "run this mutation?" overlay
-	errView   errView     // failed-statement modal (full error + query, e to re-edit)
+	// exportDone is the finished export's outcome, held on screen (exportDoneView)
+	// until any key dismisses it — see dismissExportDone.
+	exportDone *exportOutcome
+	exportCh   chan tea.Msg
+	exportSeq  int
+	cell       cellView
+	help       help
+	confirm    confirmView // safe-mode "run this mutation?" overlay
+	errView    errView     // failed-statement modal (full error + query, e to re-edit)
 
 	// panes are the split views (`<space>v`), left→right; focus indexes the live
 	// one. There is always at least one. Each owns its grid, what it's showing,
@@ -281,9 +287,8 @@ func (a *App) begin(label string, paneID int) context.Context {
 }
 
 // exportJob is a running SQL export: its own cancel func and token, plus the
-// progress last reported. It lives outside the gen/op-slot machinery on purpose
-// — see App.exportJob — so the only things that end it are finishing, failing,
-// and an explicit cancel from the export screen.
+// progress last reported (see App.exportJob). The only things that end it are
+// finishing, failing, and Esc on its loader.
 type exportJob struct {
 	id     int
 	cancel context.CancelFunc
@@ -292,18 +297,13 @@ type exportJob struct {
 	index  int    // its position in the selection
 	total  int    // tables in the selection
 	rows   int64  // rows written so far
+	start  time.Time
+
+	cancelling bool // Esc was pressed; the exportDoneMsg that ends it is on its way
 }
 
-// label is the header segment for a running export: what it's on and how far.
-func (j *exportJob) label() string {
-	if j.total == 0 {
-		return "export"
-	}
-	return fmt.Sprintf("export %d/%d %s · %s", j.index, j.total, j.table, compactCount(j.rows))
-}
-
-// compactCount abbreviates a row count so the header segment keeps its width as
-// a dump runs into the millions.
+// compactCount abbreviates a row count so the loader's progress line keeps its
+// width as a dump runs into the millions.
 func compactCount(n int64) string {
 	switch {
 	case n >= 1_000_000:
@@ -506,6 +506,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.exportJob == nil || a.exportJob.id != msg.job {
 			return a, nil
 		}
+		start := a.exportJob.start
 		a.exportJob.cancel()
 		a.exportJob = nil
 		switch {
@@ -516,6 +517,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			a.status = "export failed: " + msg.err.Error()
 		}
+		// The loader becomes the outcome screen: it stays up until a key
+		// dismisses it, rather than dropping you back on the check list.
+		a.exportDone = &exportOutcome{exportDoneMsg: msg, took: time.Since(start)}
 		return a, nil
 
 	case rowsMsg:
@@ -808,6 +812,19 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a.handleLeaderKey(msg)
 		}
 	}
+	// While an export runs its loader owns the screen: Esc cancels it, every
+	// other key but Ctrl-C (above) is swallowed.
+	if a.exportJob != nil {
+		if msg.Type == tea.KeyEsc {
+			a.cancelExport()
+		}
+		return a, nil
+	}
+	// The finished export's outcome screen: any key dismisses it.
+	if a.exportDone != nil {
+		a.dismissExportDone()
+		return a, nil
+	}
 	// While a connect is in flight the loader owns the screen. Esc cancels it and
 	// returns to the previous page (or quits if this is the very first connect, with
 	// nowhere to go back to); every other key but Ctrl-C is swallowed so a stray key
@@ -1065,10 +1082,9 @@ func (a App) typing() bool {
 	case screenUsers:
 		return a.users.filtering
 	case screenExport:
-		// The footer's own fields count too: a path or a row count is text, so a
-		// stray `b` or `?` while typing one must land in the field, not open an
-		// overlay over it.
-		return a.export.list.filtering || a.export.opts.editing != exportFieldNone
+		// The footer's row field counts too: it is text, so a stray `b` or `?`
+		// while typing in it must land in the field, not open an overlay over it.
+		return a.export.list.filtering || a.export.opts.editing
 	}
 	return false
 }
@@ -1491,7 +1507,7 @@ func (a App) openExport() (tea.Model, tea.Cmd) {
 		a.status = "no tables to export"
 		return a, nil
 	}
-	a.export.open(a.exportPrefix(), a.sidebar.tables)
+	a.export.open(a.sidebar.tables)
 	a.screen = screenExport
 	a.layout()
 	return a, nil
@@ -1509,20 +1525,13 @@ func (a App) exportPrefix() string {
 
 // handleExportKey drives the export screen: the shared list navigation and `/`
 // filter, <space> to check the table under the cursor, `a` to check everything
-// the filter is showing, n/o/S for the settings, Enter to write the file, and
-// Backspace to step back to the table list.
+// the filter is showing, n for the row cap, Enter to write the file, and
+// Backspace to step back to the table list. (A running export never gets here:
+// its loader takes every key in handleKey.)
 func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// A settings field takes every key while it's open (it's a text input).
-	if a.export.opts.editing != exportFieldNone {
-		return a.handleExportFieldKey(msg)
-	}
-	// Esc cancels a running export — but ONLY here, on the screen that started it
-	// and whose footer says so. An export is a background job that outlives this
-	// screen, and a stray Esc elsewhere must not be able to kill twenty minutes of
-	// work; coming back to `x` to stop it is the deliberate act.
-	if msg.Type == tea.KeyEsc && a.exportJob != nil {
-		a.cancelExport()
-		return a, nil
+	// The rows field takes every key while it's open (it's a text input).
+	if a.export.opts.editing {
+		return a.handleExportRowsKey(msg)
 	}
 	// <space> is claimed before listKeys, which would otherwise swallow it as an
 	// unrecognized navigation key. (It can't reach the split leader: that's armed
@@ -1530,7 +1539,6 @@ func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// either KeySpace or a ' ' rune.
 	if msg.String() == " " && !a.export.list.filtering {
 		a.export.list.toggle()
-		a.export.refreshPath(a.exportPrefix())
 		return a, nil
 	}
 	if listKeys(&a.export.list, msg) {
@@ -1553,47 +1561,25 @@ func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch string(msg.Runes) {
 		case "a": // check everything visible (or clear it, if it all is already)
 			a.export.list.toggleAll()
-			a.export.refreshPath(a.exportPrefix())
 		case "n": // the per-table row cap
-			a.export.editField(exportFieldRows)
-		case "o": // the output file
-			a.export.editField(exportFieldPath)
-		case "S": // include the structure (DROP/CREATE) before each table's rows
-			a.export.opts.structure = !a.export.opts.structure
+			a.export.editRows()
 		}
 	}
 	return a, nil
 }
 
-// handleExportFieldKey edits the row-cap or output-path field. It mirrors
-// sidebarFilterEdit's key set (the fields are the same textField the filters
-// use), with Enter to accept and Esc to put back what was there before.
-func (a App) handleExportFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleExportRowsKey edits the row-cap field. It mirrors sidebarFilterEdit's
+// key set (the field is the same textField the filters use), with Enter to
+// accept and Esc to put back what was there before.
+func (a App) handleExportRowsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	o := &a.export.opts
 	f := &o.rows
-	if o.editing == exportFieldPath {
-		f = &o.path
-	}
-	// A space is a legitimate character in a path (and never in a row count), and
-	// arrives as either KeySpace or a ' ' rune depending on the terminal.
-	if msg.String() == " " {
-		if o.editing == exportFieldPath {
-			f.insert(" ")
-		}
-		return a, nil
-	}
 	switch msg.Type {
 	case tea.KeyEnter:
-		if o.editing == exportFieldPath {
-			// A path typed by hand stops the generated name following the
-			// selection; emptying it hands the naming back to jsq.
-			o.pathSet = strings.TrimSpace(f.val) != ""
-		}
-		o.editing = exportFieldNone
-		a.export.refreshPath(a.exportPrefix()) // a new cap changes the generated name
+		o.editing = false
 	case tea.KeyEsc:
 		f.setVal(o.orig)
-		o.editing = exportFieldNone
+		o.editing = false
 	case tea.KeyBackspace:
 		f.backspace()
 	case tea.KeyDelete:
@@ -1609,59 +1595,44 @@ func (a App) handleExportFieldKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnd, tea.KeyCtrlE:
 		f.end()
 	case tea.KeyRunes:
-		s := string(msg.Runes)
 		// The cap is a number: refusing non-digits here is why limit() can treat
 		// anything unparseable as "no cap" without ever showing an error.
-		if o.editing == exportFieldRows {
-			s = strings.Map(func(r rune) rune {
-				if r >= '0' && r <= '9' {
-					return r
-				}
-				return -1
-			}, s)
-		}
-		f.insert(s)
+		f.insert(strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, string(msg.Runes)))
 	}
 	return a, nil
 }
 
-// runExport writes the checked tables to the named file. Nothing about it is a
-// mutation — it only reads — so safe mode doesn't gate it.
+// runExport writes the checked tables to a generated file in the working
+// directory. Nothing about it is a mutation — it only reads — so safe mode
+// doesn't gate it.
 func (a App) runExport() (tea.Model, tea.Cmd) {
-	if a.exportJob != nil {
-		// One job at a time: two exports would race over the op-free slot's state
-		// and, if pointed at the same file, over the file itself.
-		a.status = "an export is already running — esc cancels it"
-		return a, nil
-	}
 	tables := a.export.list.checkedTables()
 	if len(tables) == 0 {
 		a.status = "nothing checked — <space> selects the table under the cursor"
 		return a, nil
 	}
-	path := expandHome(strings.TrimSpace(a.export.opts.path.val))
-	if path == "" {
-		a.status = "no output file — `o` names one"
-		return a, nil
-	}
+	limit := a.export.opts.limit()
+	path := defaultExportPath(a.exportPrefix(), tables, limit, time.Now())
 	req := exportReq{
-		path:      path,
-		tables:    tables,
-		limit:     a.export.opts.limit(),
-		structure: a.export.opts.structure,
-		conn:      a.connName,
-		dbName:    a.dbName,
+		path:   path,
+		tables: tables,
+		limit:  limit,
+		conn:   a.connName,
+		dbName: a.dbName,
 	}
-	// Not a.begin(): an export owns its own slot, so it survives everything you
-	// do next (and, conversely, can't cancel a query you run meanwhile).
 	ctx, cancel := context.WithCancel(context.Background())
 	a.exportSeq++
-	a.exportJob = &exportJob{id: a.exportSeq, cancel: cancel, path: path, total: len(tables)}
+	a.exportJob = &exportJob{id: a.exportSeq, cancel: cancel, path: path, total: len(tables), start: time.Now()}
 	// A fresh channel per job: a previous job's undelivered progress must not
 	// surface under the new one's token.
 	a.exportCh = make(chan tea.Msg, 8)
-	a.status = fmt.Sprintf("exporting %d %s to %s…",
-		len(tables), plural(len(tables), "table"), path)
+	// No ensureTick: the spinner loop has run since connectedMsg, and the loader
+	// animates off it.
 	return a, exportCmd(ctx, a.exportJob.id, a.engine, req, a.exportCh)
 }
 
@@ -1671,7 +1642,7 @@ func (a App) runExport() (tea.Model, tea.Cmd) {
 func (a *App) cancelExport() {
 	if a.exportJob != nil {
 		a.exportJob.cancel()
-		a.status = "cancelling export…"
+		a.exportJob.cancelling = true
 	}
 }
 
@@ -2465,6 +2436,12 @@ func (a App) View() string {
 	if a.isConnecting() {
 		return a.connectingView()
 	}
+	if a.exportJob != nil {
+		return a.exportingView()
+	}
+	if a.exportDone != nil {
+		return a.exportDoneView()
+	}
 	// The safe-mode confirmation is modal — it captures every key — and can be armed
 	// from any screen (e.g. a scratch write from the table list), so it's rendered
 	// here, before the screen switch, rather than only in browseView.
@@ -2507,7 +2484,7 @@ func (a App) View() string {
 		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.users.View())
 		return a.statusLine() + "\n" + body
 	case screenExport:
-		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.export.View(a.exportJob))
+		body := lipgloss.NewStyle().PaddingLeft(leftPad).Render(a.export.View(a.exportPrefix()))
 		return a.statusLine() + "\n" + body
 	case screenBrowse:
 		return a.browseView()
@@ -2683,20 +2660,10 @@ func (a App) statusLine() string {
 	// more rows exist below the loaded buffer.
 	var right string
 	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
-	// A running export shows wherever you are — it outlives the screen that
-	// started it, so the header is the only place that can say it's still going.
-	// It sits to the LEFT of the op indicator: the op is the one Esc kills from
-	// here, so that stays next to its own hint.
-	var job string
-	if a.exportJob != nil {
-		job = exportStyle.Render(frame + " " + a.exportJob.label() + " ")
-	}
 	switch {
 	case a.activity != "":
 		// spinner + label + a hint that Esc kills it.
-		right = job + activityStyle.Render(frame+" "+a.activity+" · esc ")
-	case job != "":
-		right = job
+		right = activityStyle.Render(frame + " " + a.activity + " · esc ")
 	case a.screen == screenBrowse && !split && len(a.g().visible) > 0:
 		row, loaded, more := a.g().posSummary()
 		s := fmt.Sprintf("%d/%d", row, loaded)
@@ -2716,10 +2683,6 @@ func (a App) statusLine() string {
 }
 
 var activityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-
-// exportStyle marks the background-export segment — a different colour from the
-// op spinner so two spinners in the header are never read as one thing.
-var exportStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 
 // safeConnStyle marks a safe (likely production) connection name in the header.
 var safeConnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
@@ -2750,6 +2713,91 @@ func (a App) connectingView() string {
 	}
 	b.WriteString("\n " + label.Render("esc to cancel") + "\n")
 	return b.String()
+}
+
+// exportingView is the full-screen loader an export runs behind: the file, the
+// table it's on, the rows so far. It blocks the UI like the connect loader does,
+// and like it offers exactly one way out.
+func (a App) exportingView() string {
+	j := a.exportJob
+	frame := string(spinnerFrames[a.spinner%len(spinnerFrames)])
+	label := lipgloss.NewStyle().Faint(true)
+	var b strings.Builder
+	b.WriteString("\n " + activityStyle.Render(frame) + " exporting to " + j.path + "\n\n")
+	if j.index > 0 {
+		fmt.Fprintf(&b, " %s  %d/%d %s\n", label.Render("table"), j.index, j.total, j.table)
+		fmt.Fprintf(&b, " %s   %s\n", label.Render("rows"), compactCount(j.rows))
+	}
+	hint := "esc to cancel"
+	if j.cancelling {
+		hint = "cancelling…"
+	}
+	b.WriteString("\n " + label.Render(hint) + "\n")
+	return b.String()
+}
+
+// exportOutcome is a finished export as its outcome screen shows it.
+type exportOutcome struct {
+	exportDoneMsg
+	took time.Duration
+}
+
+// exportDoneView is what the loader turns into when the export ends: on success
+// the file, its size, and what's in it; otherwise why it stopped. It waits for
+// any key (dismissExportDone).
+func (a App) exportDoneView() string {
+	d := a.exportDone
+	label := lipgloss.NewStyle().Faint(true)
+	var b strings.Builder
+	switch {
+	case d.err == nil:
+		b.WriteString("\n " + okStyle.Render("✓ export complete") + "\n\n")
+		fmt.Fprintf(&b, " %s     %s\n", label.Render("file"), d.path)
+		fmt.Fprintf(&b, " %s     %s\n", label.Render("size"), humanBytes(d.bytes))
+		fmt.Fprintf(&b, " %s   %d\n", label.Render("tables"), d.tables)
+		fmt.Fprintf(&b, " %s     %d\n", label.Render("rows"), d.rows)
+		fmt.Fprintf(&b, " %s     %s\n", label.Render("took"), d.took.Round(100*time.Millisecond))
+		b.WriteString("\n " + label.Render("any key → table list") + "\n")
+	case errors.Is(d.err, context.Canceled):
+		b.WriteString("\n " + activityStyle.Render("export cancelled") + " — no file written\n")
+		b.WriteString("\n " + label.Render("any key → back to the selection") + "\n")
+	default:
+		b.WriteString("\n " + safeConnStyle.Render("export failed") + " — no file written\n\n")
+		b.WriteString(" " + a.wrapIndent(d.err.Error(), 1) + "\n")
+		b.WriteString("\n " + label.Render("any key → back to the selection") + "\n")
+	}
+	return b.String()
+}
+
+var okStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
+
+// dismissExportDone leaves the outcome screen. A finished export is done with
+// its selection, so it goes back to the table list with every check cleared; a
+// cancelled or failed one returns to the export screen with the selection kept,
+// so a retry is one Enter.
+func (a *App) dismissExportDone() {
+	ok := a.exportDone.err == nil
+	a.exportDone = nil
+	if ok {
+		a.export.list.marks = map[string]bool{}
+		a.screen = screenTables
+	} else {
+		a.screen = screenExport
+	}
+	a.layout()
+}
+
+// humanBytes formats a file size the way ls -h would.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 // wrapIndent soft-wraps s to the terminal width, indenting continuation lines by

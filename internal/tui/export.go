@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -14,46 +13,33 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// export is the SQL-dump screen (`e` on the table list): the same full-screen
+// export is the SQL-dump screen (`x` on the table list): the same full-screen
 // list every other screen uses, in check mode, plus a settings footer. Tick the
-// tables, set the two options, Enter writes one .sql file.
+// tables, optionally cap the rows, Enter writes one .sql file.
 //
 // It reuses `sidebar` rather than growing its own list so the export screen gets
 // the `/` filter, the column-major grid and the movement keys for free — picking
 // twenty tables out of four hundred is exactly the case the filter exists for.
 //
-// The whole of it is presentation; the write itself is exportCmd in cmd.go, like
-// every other piece of DB work.
+// There is nothing else to set. The file is named for you (defaultExportPath),
+// and its shape follows the cap: the whole table is recreated (DROP + CREATE +
+// INSERT), a capped one is upserted with no DDL, so it can be rerun over the
+// live table. The whole of it is presentation; the write itself is exportCmd in
+// cmd.go, like every other piece of DB work.
 type export struct {
 	list sidebar // the table list in check mode (marks non-nil)
 	opts exportOpts
 }
 
-// exportField names the footer field currently taking keystrokes (none by
-// default — the list has the keyboard).
-type exportField int
-
-const (
-	exportFieldNone exportField = iota
-	exportFieldRows
-	exportFieldPath
-)
-
-// exportOpts is the settings footer's state. rows/path are textFields so they
-// edit exactly like the filters do (caret, Ctrl-w, Home/End) through the one
-// shared renderer.
+// exportOpts is the settings footer's state: the one field there is. rows is a
+// textField so it edits exactly like the filters do (caret, Ctrl-w, Home/End)
+// through the one shared renderer.
 type exportOpts struct {
-	rows      textField // newest-N rows per table; empty → the whole table
-	path      textField // output file
-	structure bool      // emit DROP/CREATE (Postgres: DELETE) before the rows
-	editing   exportField
+	rows    textField // newest-N rows per table; empty → the whole table
+	editing bool      // the rows field has the keyboard
 
-	// pathSet records that the path was typed rather than generated, so the
-	// default name stops following the selection once you've named the file.
-	pathSet bool
-
-	// orig is what the field being edited held when it opened, so Esc can put it
-	// back (the hint promises a cancel, not just a way out of the field).
+	// orig is what the field held when it opened, so Esc can put it back (the
+	// hint promises a cancel, not just a way out of the field).
 	orig string
 }
 
@@ -67,13 +53,13 @@ func (o exportOpts) limit() int {
 	return n
 }
 
-// exportLines is the footer's height (settings, path, key hints).
+// exportLines is the footer's height (settings, file, key hints).
 const exportLines = 3
 
-// defaultExportPath is the generated file name: where it came from, what's in
-// it, the row cap, and a timestamp — enough to tell two dumps of the same tables
-// apart. It follows the selection until the path is typed over.
-func defaultExportPath(from string, tables []db.Table, limit int) string {
+// defaultExportPath is the file an export writes, in the directory jsq was
+// started from: where it came from, what's in it, the row cap, and a timestamp —
+// enough to tell two dumps of the same tables apart, and to never overwrite one.
+func defaultExportPath(from string, tables []db.Table, limit int, now time.Time) string {
 	name := "export"
 	switch {
 	case len(tables) == 0:
@@ -93,23 +79,13 @@ func defaultExportPath(from string, tables []db.Table, limit int) string {
 	if from = safeFileName(from); from != "" {
 		from += "_"
 	}
-	return fmt.Sprintf("./%s%s%s_%s.sql",
-		from, name, limitTag, time.Now().Format("20060102_1504"))
+	return fmt.Sprintf("%s/%s%s%s_%s.sql",
+		exportDir, from, name, limitTag, now.Format("20060102_150405"))
 }
 
-// expandHome turns a leading ~/ into the home directory: a typed path is the one
-// place in jsq where a shell would have done it for you, and the failure without
-// it ("no such file or directory: ~") reads like a bug.
-func expandHome(p string) string {
-	if p != "~" && !strings.HasPrefix(p, "~/") {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
-	}
-	return filepath.Join(home, strings.TrimPrefix(p, "~"))
-}
+// exportDir is where exports land: the directory jsq was started from. A var so
+// a test can point it at a temp dir.
+var exportDir = "."
 
 var unsafeFileChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
@@ -124,75 +100,53 @@ func safeFileName(s string) string {
 // open (re)seeds the screen from the live table list. Marks survive because
 // they're keyed by label, so stepping out to the grid and back in keeps the
 // selection — and a table that has since vanished simply stops being checked.
-func (e *export) open(from string, tables []db.Table) {
+func (e *export) open(tables []db.Table) {
 	if e.list.marks == nil {
 		e.list = sidebar{label: "tables to export", marks: map[string]bool{}}
 	}
-	e.opts.editing = exportFieldNone
+	e.opts.editing = false
 	e.list.setTables(tables)
-	e.refreshPath(from)
-}
-
-// refreshPath regenerates the default file name for the current selection,
-// unless the user has typed one.
-func (e *export) refreshPath(from string) {
-	if e.opts.pathSet {
-		return
-	}
-	e.opts.path.setVal(defaultExportPath(from, e.list.checkedTables(), e.opts.limit()))
 }
 
 // --- footer ---
 
 // View is the check list with the settings footer beneath it. The list block is
 // padded to its full height so the footer sits at the bottom of the screen even
-// when the filter has narrowed the list to nothing.
-func (e export) View(job *exportJob) string {
+// when the filter has narrowed the list to nothing. from names the file.
+func (e export) View(from string) string {
 	list := lipgloss.NewStyle().Height(e.list.h).Render(e.list.View())
-	return list + "\n" + e.footer(job)
+	return list + "\n" + e.footer(from)
 }
 
-// footer renders the settings under the list: what will be written, where, and
-// the keys. The field being edited draws with the shared caret, so it looks like
-// every other text input in the app.
-func (e export) footer(job *exportJob) string {
-	w, n := e.list.w, len(e.list.checkedTables())
+// footer renders the settings under the list: what will be written and where,
+// and the keys. The rows field, while open, draws with the shared caret, so it
+// looks like every other text input in the app.
+func (e export) footer(from string) string {
+	w, tables := e.list.w, e.list.checkedTables()
 	var b strings.Builder
 
-	rows := "all"
-	if l := e.opts.limit(); l > 0 {
-		rows = fmt.Sprintf("newest %d", l)
-	}
-	structure := "no"
-	if e.opts.structure {
-		structure = "yes"
-	}
-	switch e.opts.editing {
-	case exportFieldRows:
+	if e.opts.editing {
 		b.WriteString(headerStyle.Render("rows: "))
 		b.WriteString(renderCaretField(e.opts.rows.val, e.opts.rows.pos, 12, filterStyle))
-		b.WriteString(faintStyle.Render("  (empty = all)"))
-	default:
-		b.WriteString(faintStyle.Render(fmt.Sprintf(
-			"%d selected · rows: %s · structure: %s", n, rows, structure)))
-	}
-	b.WriteByte('\n')
-
-	if e.opts.editing == exportFieldPath {
-		b.WriteString(headerStyle.Render("→ "))
-		b.WriteString(renderCaretField(e.opts.path.val, e.opts.path.pos, max(1, w-2), filterStyle))
+		b.WriteString(faintStyle.Render("  (newest N per table · empty = all)"))
 	} else {
-		b.WriteString(runewidth.Truncate("→ "+e.opts.path.val, w, "…"))
+		mode := "rows: all · drop + create + insert"
+		if l := e.opts.limit(); l > 0 {
+			mode = fmt.Sprintf("rows: newest %d · upsert, no ddl", l)
+		}
+		b.WriteString(faintStyle.Render(runewidth.Truncate(
+			fmt.Sprintf("%d selected · %s", len(tables), mode), w, "…")))
 	}
 	b.WriteByte('\n')
 
-	hint := "space select · a all · n rows · S structure · o path · enter export · bksp back"
-	switch {
-	case e.opts.editing != exportFieldNone:
+	// The name is stamped when the export starts; this shows its shape.
+	path := defaultExportPath(from, tables, e.opts.limit(), time.Now())
+	b.WriteString(faintStyle.Render(runewidth.Truncate("→ "+path, w, "…")))
+	b.WriteByte('\n')
+
+	hint := "space select · a all · n rows · enter export · bksp back"
+	if e.opts.editing {
 		hint = "enter accept · esc cancel"
-	case job != nil:
-		// The only place an export can be stopped, so it has to say so.
-		hint = "export running — esc cancels it · bksp leaves it running"
 	}
 	b.WriteString(faintStyle.Render(runewidth.Truncate(hint, w, "…")))
 	return b.String()
@@ -213,15 +167,10 @@ func plural(n int, word string) string {
 	return word + "s"
 }
 
-// editField opens one of the footer's text fields, remembering what it held so
-// Esc can put it back.
-func (e *export) editField(f exportField) {
-	e.opts.editing = f
-	if f == exportFieldPath {
-		e.opts.orig = e.opts.path.val
-		e.opts.path.end()
-		return
-	}
+// editRows opens the row-cap field, remembering what it held so Esc can put it
+// back.
+func (e *export) editRows() {
+	e.opts.editing = true
 	e.opts.orig = e.opts.rows.val
 	e.opts.rows.end()
 }

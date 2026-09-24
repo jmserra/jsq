@@ -162,6 +162,7 @@ type exportDoneMsg struct {
 	path   string
 	tables int
 	rows   int64
+	bytes  int64 // the finished file's size (success only)
 	err    error
 	job    int
 }

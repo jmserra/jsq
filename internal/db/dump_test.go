@@ -107,14 +107,68 @@ func TestBinaryBytesDetection(t *testing.T) {
 
 func TestSQLiteStructureSQL(t *testing.T) {
 	e := newTestDB(t)
+	mustExec(t, e, `CREATE INDEX users_name ON users (name)`)
 	got, err := e.StructureSQL(context.Background(), TableRef{Name: "users"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(got, `DROP TABLE IF EXISTS "users";`) {
-		t.Errorf("structure does not start with the DROP:\n%s", got)
+	if !strings.HasPrefix(got.Create, `DROP TABLE IF EXISTS "users";`) {
+		t.Errorf("structure does not start with the DROP:\n%s", got.Create)
 	}
-	if !strings.Contains(got, "CREATE TABLE users") {
-		t.Errorf("structure carries no CREATE TABLE:\n%s", got)
+	if !strings.Contains(got.Create, "CREATE TABLE users") {
+		t.Errorf("structure carries no CREATE TABLE:\n%s", got.Create)
+	}
+	// The index is dropped with the table, so it has to come back after the rows.
+	if got.After != "CREATE INDEX users_name ON users (name);\n" {
+		t.Errorf("After = %q, want the index", got.After)
+	}
+}
+
+// TestSQLiteDumpColumnsSkipsGenerated: a generated column rejects an explicit
+// value, so the dump neither reads nor inserts it.
+func TestSQLiteDumpColumnsSkipsGenerated(t *testing.T) {
+	e := newTestDB(t)
+	mustExec(t, e, `CREATE TABLE g (id INTEGER PRIMARY KEY, a INT, b INT GENERATED ALWAYS AS (a * 2) STORED, c INT)`)
+	cols, err := e.DumpColumns(context.Background(), TableRef{Name: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cols, ",") != "id,a,c" {
+		t.Errorf("DumpColumns = %v, want [id a c]", cols)
+	}
+}
+
+// TestDumpInsertUpsert pins each dialect's upsert, including the two fallbacks:
+// no primary key, and nothing but key columns.
+func TestDumpInsertUpsert(t *testing.T) {
+	lite, pg, my := &sqliteEngine{}, &pgEngine{}, &myEngine{}
+	cols, pk := []string{"id", "name"}, []string{"id"}
+	for _, c := range []struct {
+		name       string
+		e          Engine
+		cols, pk   []string
+		upsert     bool
+		head, tail string
+	}{
+		{"plain", lite, cols, pk, false, `INSERT INTO t ("id", "name") VALUES (`, ");\n"},
+		{"sqlite", lite, cols, pk, true, `INSERT INTO t ("id", "name") VALUES (`,
+			`) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name";` + "\n"},
+		{"sqlite no pk", lite, cols, nil, true, "", ") ON CONFLICT DO NOTHING;\n"},
+		{"sqlite all key", lite, []string{"a", "b"}, []string{"a", "b"}, true, "", ") ON CONFLICT DO NOTHING;\n"},
+		{"pg", pg, cols, pk, true, `INSERT INTO t ("id", "name") OVERRIDING SYSTEM VALUE VALUES (`,
+			`) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name";` + "\n"},
+		{"mysql", my, cols, pk, true, "INSERT INTO t (`id`, `name`) VALUES (",
+			") ON DUPLICATE KEY UPDATE `name` = VALUES(`name`);\n"},
+		{"mysql no pk", my, cols, nil, true, "",
+			") ON DUPLICATE KEY UPDATE `id` = VALUES(`id`), `name` = VALUES(`name`);\n"},
+		{"mysql all key", my, []string{"a"}, []string{"a"}, true, "", ") ON DUPLICATE KEY UPDATE `a` = `a`;\n"},
+	} {
+		head, tail := c.e.DumpInsert("t", c.cols, c.pk, c.upsert)
+		if c.head != "" && head != c.head {
+			t.Errorf("%s: head = %q, want %q", c.name, head, c.head)
+		}
+		if tail != c.tail {
+			t.Errorf("%s: tail = %q, want %q", c.name, tail, c.tail)
+		}
 	}
 }

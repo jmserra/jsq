@@ -10,10 +10,11 @@ import (
 	"unicode/utf8"
 )
 
-// This file is the shared half of the SQL export (`e` on the table list): the
+// This file is the shared half of the SQL export (`x` on the table list): the
 // streaming reader every engine inherits, and the literal rendering the three
 // dialects specialise. The dialect-specific halves live in each engine file
-// (SQLLiteral / StructureSQL / DumpPrologue / DumpEpilogue).
+// (SQLLiteral / DumpColumns / DumpInsert / StructureSQL / DumpPrologue /
+// DumpEpilogue).
 //
 // A dump INLINES its values rather than binding them — the output is a file of
 // statements for another client to run, not something jsq executes, so the
@@ -137,3 +138,51 @@ func isBinaryType(name string) bool {
 // hexBytes is the hex body of a binary literal (prefix and quoting are the
 // engine's, since all three spell it differently: 0x… / '\x…'::bytea / X'…').
 func hexBytes(b []byte) string { return hex.EncodeToString(b) }
+
+// insertHead is "INSERT INTO <qual> (<cols>) <mid>VALUES (" — the part of a
+// dump's INSERT every dialect spells alike. mid is Postgres's OVERRIDING clause.
+func insertHead(quote func(string) string, qual string, cols []string, mid string) string {
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = quote(c)
+	}
+	return "INSERT INTO " + qual + " (" + strings.Join(quoted, ", ") + ") " + mid + "VALUES ("
+}
+
+// onConflictTail is the Postgres/SQLite upsert: on a primary-key clash the row
+// is overwritten with the dumped values. A table whose columns are all key has
+// nothing to overwrite, and one with no primary key has nothing to key on — both
+// fall back to DO NOTHING, which still makes a rerun skip what a unique
+// constraint already holds rather than fail on it.
+func onConflictTail(quote func(string) string, cols, pk []string, upsert bool) string {
+	if !upsert {
+		return ");\n"
+	}
+	var sets []string
+	for _, c := range nonKey(cols, pk) {
+		sets = append(sets, quote(c)+" = EXCLUDED."+quote(c))
+	}
+	if len(pk) == 0 || len(sets) == 0 {
+		return ") ON CONFLICT DO NOTHING;\n"
+	}
+	quoted := make([]string, len(pk))
+	for i, c := range pk {
+		quoted[i] = quote(c)
+	}
+	return ") ON CONFLICT (" + strings.Join(quoted, ", ") + ") DO UPDATE SET " + strings.Join(sets, ", ") + ";\n"
+}
+
+// nonKey is cols minus the primary-key columns, in order.
+func nonKey(cols, pk []string) []string {
+	key := map[string]bool{}
+	for _, c := range pk {
+		key[c] = true
+	}
+	var out []string
+	for _, c := range cols {
+		if !key[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}

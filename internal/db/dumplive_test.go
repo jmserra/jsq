@@ -54,10 +54,11 @@ func TestMySQLLiveDump(t *testing.T) {
 	}
 	ref := tables[0].Ref()
 
-	ddl, err := e.StructureSQL(ctx, ref)
+	st, err := e.StructureSQL(ctx, ref)
 	if err != nil {
 		t.Fatalf("StructureSQL(%s): %v", ref.Name, err)
 	}
+	ddl := st.Create
 	if !strings.HasPrefix(ddl, "DROP TABLE IF EXISTS `") || !strings.Contains(ddl, "CREATE TABLE") {
 		t.Errorf("structure of %s is not a DROP+CREATE:\n%s", ref.Name, ddl)
 	}
@@ -90,8 +91,8 @@ func TestMySQLLiveDump(t *testing.T) {
 	t.Logf("first row of %s: %s", ref.Name, firstLines(strings.Join(rendered, ", "), 1))
 }
 
-// TestPostgresLiveDump is the same check for Postgres, where the structure block
-// is deliberately a DELETE plus a pointer at pg_dump rather than composed DDL.
+// TestPostgresLiveDump is the same check for Postgres, where the structure is
+// composed from the catalogs rather than handed over by the server.
 func TestPostgresLiveDump(t *testing.T) {
 	dsn := os.Getenv("JSQ_TEST_PG")
 	if dsn == "" {
@@ -113,13 +114,14 @@ func TestPostgresLiveDump(t *testing.T) {
 	}
 	ref := tables[0].Ref()
 
-	ddl, err := e.StructureSQL(ctx, ref)
+	st, err := e.StructureSQL(ctx, ref)
 	if err != nil {
 		t.Fatalf("StructureSQL: %v", err)
 	}
-	if !strings.Contains(ddl, "pg_dump") || !strings.Contains(ddl, "DELETE FROM") {
-		t.Errorf("postgres structure block is not the DELETE + pg_dump note:\n%s", ddl)
+	if !strings.HasPrefix(st.Create, "DROP TABLE IF EXISTS ") || !strings.Contains(st.Create, "CREATE TABLE") {
+		t.Errorf("postgres structure is not a DROP+CREATE:\n%s", st.Create)
 	}
+	t.Logf("structure of %s:\n%s\n%s\n%v", tableLabel(ref), st.Create, st.After, st.Final)
 
 	var types []string
 	var rendered []string

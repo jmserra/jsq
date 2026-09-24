@@ -36,6 +36,13 @@ type Column struct {
 	Unique        bool
 }
 
+// TableDDL is one table's structure in a dump, split by where it has to go.
+type TableDDL struct {
+	Create string   // before the rows: DROP TABLE IF EXISTS + CREATE TABLE
+	After  string   // after the rows: secondary indexes, triggers, sequence positions
+	Final  []string // after every table: foreign keys, which may name a table later in the file (the writer dedupes)
+}
+
 // ForeignKey is one foreign-key constraint: the local Columns reference
 // RefTable's RefColumns (parallel slices — one entry per column, so a composite
 // key has len>1). Used to follow a value to the row it points at.
@@ -159,13 +166,23 @@ type Engine interface {
 	// the driver returns []byte for both.
 	SQLLiteral(v any, colType string) string
 
-	// StructureSQL is the statement block that makes room for t's rows in a
-	// dump: DROP TABLE + CREATE TABLE where the engine can hand over its own DDL
-	// (MySQL's SHOW CREATE TABLE, SQLite's sqlite_master), and a DELETE FROM
-	// plus a comment naming pg_dump where it cannot (Postgres — a hand-rolled
-	// CREATE TABLE off information_schema drops indexes, sequences and
-	// constraints, so jsq writes no DDL it can't write correctly).
-	StructureSQL(ctx context.Context, t TableRef) (string, error)
+	// DumpColumns is the columns a dump reads and re-inserts, in table order:
+	// every column except the generated ones, which the server computes and
+	// refuses an explicit value for.
+	DumpColumns(ctx context.Context, t TableRef) ([]string, error)
+
+	// DumpInsert is the text around one row's value list: head ends at the
+	// opening "VALUES (", tail starts at its closing ")" and ends the statement.
+	// cols are the (unquoted) column names; upsert makes the statement rerunnable
+	// — keyed on pk, a row that is already there is overwritten rather than
+	// failing (MySQL ON DUPLICATE KEY UPDATE, Postgres/SQLite ON CONFLICT).
+	DumpInsert(qual string, cols, pk []string, upsert bool) (head, tail string)
+
+	// StructureSQL is the DDL that recreates t for a full dump: DROP TABLE IF
+	// EXISTS + CREATE TABLE before the rows, and whatever must follow them. MySQL
+	// and SQLite hand over the server's own DDL; Postgres has none to hand over,
+	// so it is composed from the catalogs (see pgEngine.StructureSQL).
+	StructureSQL(ctx context.Context, t TableRef) (TableDDL, error)
 
 	// DumpPrologue/DumpEpilogue bracket a dump file: the session settings that
 	// let it be replayed in any table order (foreign keys off, then back on).

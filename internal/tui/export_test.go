@@ -16,7 +16,7 @@ import (
 
 // exportApp drives the model to the table list of a two-table database, ready
 // for `x`. It stops short of loading a table — the export screen is reached from
-// the list, not the grid.
+// the list, not the grid. Exports land in a temp dir (exportDir).
 func exportApp(t *testing.T) App {
 	t.Helper()
 	ctx := context.Background()
@@ -26,10 +26,15 @@ func exportApp(t *testing.T) App {
 		t.Fatal(err)
 	}
 	mustExecT(t, e, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, note TEXT)`)
+	mustExecT(t, e, `CREATE INDEX users_name ON users (name)`)
 	mustExecT(t, e, `INSERT INTO users (name, note) VALUES ('Ada','it''s fine'),('Linus',NULL),('Grace','C:\path')`)
 	mustExecT(t, e, `CREATE TABLE logs (id INTEGER PRIMARY KEY, msg TEXT)`)
 	mustExecT(t, e, `INSERT INTO logs (msg) VALUES ('one'),('two')`)
 	e.Close()
+
+	old := exportDir
+	exportDir = t.TempDir()
+	t.Cleanup(func() { exportDir = old })
 
 	app := New(nil, config.Conn{URL: path, Name: "test"})
 	app = update(t, app, app.Init()())
@@ -45,7 +50,7 @@ func mustExecT(t *testing.T, e db.Engine, q string) {
 
 // runExportTo drives the export screen to completion and returns the file it
 // wrote. keys are pressed on the check list before Enter.
-func runExportTo(t *testing.T, app App, out string, keys string) (App, string) {
+func runExportTo(t *testing.T, app App, keys string) (App, string) {
 	t.Helper()
 	app = runeKey(t, app, 'x')
 	if app.screen != screenExport {
@@ -53,57 +58,62 @@ func runExportTo(t *testing.T, app App, out string, keys string) (App, string) {
 	}
 	app = typeRunes(t, app, keys)
 
-	// Name the output file: `o`, clear the generated name, type ours.
-	app = runeKey(t, app, 'o')
-	for range app.export.opts.path.val {
-		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
-	}
-	app = typeRunes(t, app, out)
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter}) // accept the path
-
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter}) // export
 	app = m.(App)
 	if cmd == nil {
 		t.Fatal("Enter on the export screen returned no command")
 	}
+	path := app.exportJob.path
 	app, _ = drainExport(t, app, cmd)
 
-	body, err := os.ReadFile(out)
+	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the export: %v", err)
 	}
 	return app, string(body)
 }
 
-// TestExportWritesSelectedTables is the whole feature end to end: `e`, check two
-// tables with <space>, Enter, and the file holds replayable INSERTs for both.
+// TestExportWritesSelectedTables is the whole feature end to end: `x`, check two
+// tables with <space>, Enter, and a generated file in exportDir holds the whole
+// of both — recreated, then filled.
 func TestExportWritesSelectedTables(t *testing.T) {
 	app := exportApp(t)
-	out := filepath.Join(t.TempDir(), "dump.sql")
 
 	// The list is alphabetical (logs, users): check the first, move down, check
 	// the second.
-	app, body := runExportTo(t, app, out, " j ")
+	app, body := runExportTo(t, app, " j ")
 
 	for _, want := range []string{
 		"PRAGMA foreign_keys=OFF;",
+		`DROP TABLE IF EXISTS "logs";`,
+		"CREATE TABLE logs",
 		`INSERT INTO "logs" ("id", "msg") VALUES (1, 'one');`,
 		`INSERT INTO "users" ("id", "name", "note") VALUES (1, 'Ada', 'it''s fine');`,
 		`INSERT INTO "users" ("id", "name", "note") VALUES (2, 'Linus', NULL);`,
 		// A backslash survives verbatim: SQLite string literals have no escape
 		// character, so doubling it would corrupt the value on reload.
 		`(3, 'Grace', 'C:\path');`,
+		// The index is its own sqlite_master entry, which the DROP took with it.
+		"CREATE INDEX users_name ON users (name);",
 		"COMMIT;",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("export is missing %q:\n%s", want, body)
 		}
 	}
-	// Structure is off by default — data only, into an existing schema.
-	if strings.Contains(body, "CREATE TABLE") || strings.Contains(body, "DROP TABLE") {
-		t.Errorf("structure is off but the dump carries DDL:\n%s", body)
+	// The DDL must precede the rows, or the reload inserts into a dropped table.
+	if strings.Index(body, "CREATE TABLE logs") > strings.Index(body, `INSERT INTO "logs"`) {
+		t.Errorf("CREATE TABLE comes after the INSERTs:\n%s", body)
 	}
-	if !strings.Contains(app.status, "wrote dump.sql") {
+	// A full dump lands in a table it just created: plain INSERTs.
+	if strings.Contains(body, "ON CONFLICT") {
+		t.Errorf("a full dump should not upsert:\n%s", body)
+	}
+	files, _ := filepath.Glob(filepath.Join(exportDir, "test_logs_users_*.sql"))
+	if len(files) != 1 {
+		t.Errorf("want one generated file named for the connection and tables, got %v", files)
+	}
+	if !strings.Contains(app.status, "wrote test_logs_users_") {
 		t.Errorf("status = %q, want it to name the file", app.status)
 	}
 	if !strings.Contains(app.status, "5 rows") {
@@ -111,60 +121,38 @@ func TestExportWritesSelectedTables(t *testing.T) {
 	}
 }
 
-// TestExportStructureToggle checks that `S` puts the engine's own DDL in front
-// of each table's rows.
-func TestExportStructureToggle(t *testing.T) {
-	app := exportApp(t)
-	out := filepath.Join(t.TempDir(), "dump.sql")
-	_, body := runExportTo(t, app, out, " S") // check `logs`, turn structure on
-
-	if !strings.Contains(body, `DROP TABLE IF EXISTS "logs";`) {
-		t.Errorf("no DROP TABLE:\n%s", body)
-	}
-	if !strings.Contains(body, "CREATE TABLE logs") {
-		t.Errorf("no CREATE TABLE:\n%s", body)
-	}
-	// The DDL must precede the rows, or the reload inserts into a dropped table.
-	if strings.Index(body, "CREATE TABLE logs") > strings.Index(body, `INSERT INTO "logs"`) {
-		t.Errorf("CREATE TABLE comes after the INSERTs:\n%s", body)
-	}
+// capRows sets the row cap from the export screen.
+func capRows(t *testing.T, app App, n string) App {
+	t.Helper()
+	app = runeKey(t, app, 'n')
+	app = typeRunes(t, app, n)
+	return update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
 }
 
 // TestExportRowLimit checks the cap takes the NEWEST rows (primary key
-// descending) and still writes them oldest-first, so a replay inserts in
-// insertion order.
+// descending), still writes them oldest-first, and writes them as upserts with
+// no DDL — a partial dump goes over the live table, it does not replace it.
 func TestExportRowLimit(t *testing.T) {
 	app := exportApp(t)
-	out := filepath.Join(t.TempDir(), "dump.sql")
-
 	app = runeKey(t, app, 'x')
 	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace}) // check `logs`
 	app = runeKey(t, app, 'j')
 	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace}) // check `users`
-	app = runeKey(t, app, 'n')                           // the row cap
-	app = typeRunes(t, app, "2")
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
-
+	app = capRows(t, app, "2")
 	if got := app.export.opts.limit(); got != 2 {
 		t.Fatalf("limit = %d, want 2", got)
 	}
-	// The generated name follows the cap.
-	if !strings.Contains(app.export.opts.path.val, "_last2_") {
-		t.Errorf("generated path %q does not record the cap", app.export.opts.path.val)
-	}
-
-	app = runeKey(t, app, 'o')
-	for range app.export.opts.path.val {
-		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
-	}
-	app = typeRunes(t, app, out)
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
 
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
+	path := app.exportJob.path
+	// The generated name records the cap.
+	if !strings.Contains(filepath.Base(path), "_last2_") {
+		t.Errorf("generated path %q does not record the cap", path)
+	}
 	app, _ = drainExport(t, app, cmd)
 
-	raw, err := os.ReadFile(out)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +171,50 @@ func TestExportRowLimit(t *testing.T) {
 	}
 	if !strings.Contains(body, "newest 2 by id desc") {
 		t.Errorf("the dump does not say it is partial:\n%s", body)
+	}
+	if strings.Contains(body, "DROP TABLE") || strings.Contains(body, "CREATE TABLE") {
+		t.Errorf("a partial dump must carry no DDL:\n%s", body)
+	}
+	if !strings.Contains(body, `ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "note" = EXCLUDED."note";`) {
+		t.Errorf("a partial dump should upsert on the primary key:\n%s", body)
+	}
+}
+
+// TestExportPartialReruns replays a partial dump over the very database it came
+// from — twice — and checks it overwrote rather than failed or duplicated: the
+// point of writing upserts.
+func TestExportPartialReruns(t *testing.T) {
+	app := exportApp(t)
+	app = runeKey(t, app, 'x')
+	app = runeKey(t, app, 'j')
+	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace}) // check `users`
+	app = capRows(t, app, "2")
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = m.(App)
+	path := app.exportJob.path
+	drainExport(t, app, cmd)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	e := app.engine
+	mustExecT(t, e, `UPDATE users SET note = 'changed' WHERE id = 3`)
+	for i := 0; i < 2; i++ {
+		if _, err := e.Exec(ctx, string(raw)); err != nil {
+			t.Fatalf("replay %d over the live table: %v\n%s", i+1, err, raw)
+		}
+	}
+	rs, err := e.Query(ctx, `SELECT id, note FROM users ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs.Rows) != 3 {
+		t.Fatalf("users has %d rows after two replays, want 3", len(rs.Rows))
+	}
+	if rs.Rows[2][1] != `C:\path` {
+		t.Errorf("the replay did not put the dumped value back: %#v", rs.Rows[2][1])
 	}
 }
 
@@ -235,16 +267,24 @@ func TestExportBackspaceReturns(t *testing.T) {
 	}
 }
 
-// TestExportView checks the screen renders its check boxes and settings.
+// TestExportView checks the screen renders its check boxes, the mode the cap
+// implies, and the file it will write.
 func TestExportView(t *testing.T) {
 	app := exportApp(t)
 	app = runeKey(t, app, 'x')
 	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
 
 	view := lipgloss.NewStyle().Render(app.View())
-	for _, want := range []string{"[x] logs", "[ ] users", "1 selected", "rows: all", "structure: no", ".sql"} {
+	for _, want := range []string{"[x] logs", "[ ] users", "1 selected", "rows: all · drop + create", "test_logs_", ".sql"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("export view missing %q:\n%s", want, view)
+		}
+	}
+	app = capRows(t, app, "50")
+	view = lipgloss.NewStyle().Render(app.View())
+	for _, want := range []string{"newest 50 · upsert", "_last50_"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("capped export view missing %q:\n%s", want, view)
 		}
 	}
 }
@@ -279,8 +319,7 @@ func TestExportCancelledLeavesNoFile(t *testing.T) {
 // proves the file is actually replayable rather than merely plausible.
 func TestExportReplays(t *testing.T) {
 	app := exportApp(t)
-	out := filepath.Join(t.TempDir(), "dump.sql")
-	_, body := runExportTo(t, app, out, " j S") // both tables, with structure
+	_, body := runExportTo(t, app, " j ") // both tables, whole
 
 	ctx := context.Background()
 	fresh, err := db.Open(ctx, filepath.Join(t.TempDir(), "restored.db"))
@@ -307,22 +346,6 @@ func TestExportReplays(t *testing.T) {
 	}
 	if rs.Rows[2][1] != `C:\path` {
 		t.Errorf("backslash did not survive the round trip: %#v", rs.Rows[2][1])
-	}
-}
-
-func TestExpandHome(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory")
-	}
-	if got := expandHome("~/dump.sql"); got != filepath.Join(home, "dump.sql") {
-		t.Errorf("expandHome(~/dump.sql) = %q", got)
-	}
-	// Only a leading ~/ is a home reference; anything else is a real name.
-	for _, p := range []string{"./dump.sql", "/tmp/dump.sql", "~weird/dump.sql"} {
-		if got := expandHome(p); got != p {
-			t.Errorf("expandHome(%q) = %q, want it untouched", p, got)
-		}
 	}
 }
 
@@ -362,160 +385,83 @@ func drainExport(t *testing.T, app App, cmd tea.Cmd) (App, []exportProgressMsg) 
 	return app, seen
 }
 
-// startExport drives the screen up to a dispatched export of everything, writing
-// to out, and returns the still-running job's batch command.
-func startExport(t *testing.T, app App, out string) (App, tea.Cmd) {
+// startExport drives the screen up to a dispatched export of everything and
+// returns the still-running job's batch command.
+func startExport(t *testing.T, app App) (App, tea.Cmd) {
 	t.Helper()
 	app = runeKey(t, app, 'x')
 	app = runeKey(t, app, 'a') // check every table
-	app = runeKey(t, app, 'o')
-	for range app.export.opts.path.val {
-		app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
-	}
-	app = typeRunes(t, app, out)
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
-
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	return m.(App), cmd
 }
 
-// TestExportSurvivesNavigation is the point of the job slot: an export must not
-// be cancelled by whatever you do next. Opening a table takes the op slot, which
-// would cancel any ordinary DB command — the export has to be untouched.
-func TestExportSurvivesNavigation(t *testing.T) {
-	app := exportApp(t)
-	out := filepath.Join(t.TempDir(), "dump.sql")
-	app, cmd := startExport(t, app, out)
-
-	if app.exportJob == nil {
-		t.Fatal("no export job was recorded")
-	}
-	job := app.exportJob.id
-
-	// Walk away: back to the table list, then open a table (a real op).
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace})
-	if app.screen != screenTables {
-		t.Fatalf("Backspace should return to the table list, got %d", app.screen)
-	}
-	m, loadCmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	app = m.(App)
-	if app.exportJob == nil || app.exportJob.id != job {
-		t.Fatal("opening a table cancelled the running export")
-	}
-	if app.activity == "" {
-		t.Fatal("the table load should have taken the op slot")
-	}
-	app = update(t, app, loadCmd()) // let the load land
-
-	app, _ = drainExport(t, app, cmd)
-	if app.exportJob != nil {
-		t.Error("the job should be cleared once it finishes")
-	}
-	if _, err := os.Stat(out); err != nil {
-		t.Errorf("the export did not survive: %v", err)
-	}
-	if !strings.Contains(app.status, "wrote dump.sql") {
-		t.Errorf("status = %q", app.status)
-	}
-}
-
-// TestExportProgress checks that a long export reports as it goes, rather than
-// going silent until it lands.
-func TestExportProgress(t *testing.T) {
-	old := exportProgressEvery
-	exportProgressEvery = 10
-	defer func() { exportProgressEvery = old }()
-
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "t.db")
-	e, err := db.Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustExecT(t, e, `CREATE TABLE big (id INTEGER PRIMARY KEY, v TEXT)`)
-	mustExecT(t, e, `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 60)
-	                 INSERT INTO big (v) SELECT 'row ' || i FROM n`)
-	e.Close()
-
-	app := New(nil, config.Conn{URL: path, Name: "test"})
-	app = update(t, app, app.Init()())
-	app = update(t, app, tea.WindowSizeMsg{Width: 100, Height: 24})
-
-	out := filepath.Join(t.TempDir(), "dump.sql")
-	app, cmd := startExport(t, app, out)
-	app, seen := drainExport(t, app, cmd)
-
-	if len(seen) < 2 {
-		t.Fatalf("got %d progress messages for a 60-row table, want several", len(seen))
-	}
-	last := seen[len(seen)-1]
-	if last.table != "big" || last.total != 1 {
-		t.Errorf("progress names the wrong table: %+v", last)
-	}
-	// Progress must actually advance, not just repeat the starting state.
-	if last.rows == 0 {
-		t.Errorf("progress never reported any rows: %+v", seen)
-	}
-	if !strings.Contains(app.status, "60 rows") {
-		t.Errorf("final status = %q", app.status)
-	}
-}
-
-// TestExportHeaderShowsJob checks the running export is visible from any screen —
-// it outlives the screen that started it, so the header is the only thing that
-// can say it is still going.
-func TestExportHeaderShowsJob(t *testing.T) {
-	app := exportApp(t)
-	app.exportJob = &exportJob{id: 1, cancel: func() {}, table: "entries", index: 2, total: 7, rows: 12345}
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyBackspace}) // leave the export screen
-
-	view := lipgloss.NewStyle().Render(app.View())
-	for _, want := range []string{"export 2/7 entries", "12.3k rows"} {
-		if !strings.Contains(view, want) {
-			t.Errorf("header missing %q:\n%s", want, view)
-		}
-	}
-}
-
-// TestExportCancelOnlyFromItsScreen checks that Esc stops the job where the
-// footer promises it does — and nowhere else, so a stray Esc elsewhere can't
-// kill a long export.
-func TestExportCancelOnlyFromItsScreen(t *testing.T) {
+// TestExportBlocksUI checks that a running export owns the screen: its loader
+// replaces the list, every key but Esc is swallowed, and Esc cancels it.
+func TestExportBlocksUI(t *testing.T) {
 	app := exportApp(t)
 	cancelled := false
-	app.exportJob = &exportJob{id: 1, cancel: func() { cancelled = true }, total: 1}
+	app.screen = screenExport
+	app.exportJob = &exportJob{id: 1, cancel: func() { cancelled = true }, path: "./x.sql",
+		table: "entries", index: 2, total: 7, rows: 12345}
 
-	// On the table list, Esc must leave it alone.
-	app.screen = screenTables
-	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
-	if cancelled {
-		t.Fatal("Esc on the table list cancelled the background export")
+	view := lipgloss.NewStyle().Render(app.View())
+	for _, want := range []string{"exporting to ./x.sql", "2/7 entries", "12.3k rows", "esc to cancel"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("loader missing %q:\n%s", want, view)
+		}
 	}
 
-	// On the export screen it cancels.
-	app.screen = screenExport
+	for _, k := range []tea.KeyMsg{
+		{Type: tea.KeyBackspace}, {Type: tea.KeyEnter}, {Type: tea.KeySpace},
+		{Type: tea.KeyRunes, Runes: []rune("a")}, {Type: tea.KeyRunes, Runes: []rune("?")},
+	} {
+		m, cmd := app.Update(k)
+		app = m.(App)
+		if cmd != nil || app.screen != screenExport || app.help.active {
+			t.Fatalf("%q reached the UI behind a running export", k.String())
+		}
+	}
+	if len(app.export.list.checkedTables()) != 0 {
+		t.Error("a key behind the loader changed the selection")
+	}
+	if cancelled {
+		t.Fatal("only Esc may cancel the export")
+	}
+
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc})
 	if !cancelled {
-		t.Error("Esc on the export screen did not cancel the export")
+		t.Error("Esc did not cancel the export")
 	}
-	if !strings.Contains(app.status, "cancelling") {
-		t.Errorf("status = %q", app.status)
+	if view := app.View(); !strings.Contains(view, "cancelling") {
+		t.Errorf("the loader should say it is cancelling:\n%s", view)
 	}
 }
 
-// TestExportRefusesSecond keeps it to one job at a time.
-func TestExportRefusesSecond(t *testing.T) {
+// TestExportCancelReports runs a real export, cancels it, and checks the job
+// clears with a status rather than vanishing — and leaves no file.
+func TestExportCancelReports(t *testing.T) {
 	app := exportApp(t)
-	app.exportJob = &exportJob{id: 1, cancel: func() {}, total: 1}
-	app = runeKey(t, app, 'x')
-	app = update(t, app, tea.KeyMsg{Type: tea.KeySpace})
-	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	app = m.(App)
-	if cmd != nil {
-		t.Fatal("a second export should not dispatch while one runs")
+	app, cmd := startExport(t, app)
+	path := app.exportJob.path
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // cancel before it runs
+	app, _ = drainExport(t, app, cmd)
+	if app.exportJob != nil {
+		t.Fatal("the job should be cleared once the cancel lands")
 	}
-	if !strings.Contains(app.status, "already running") {
+	if app.status != "export cancelled" {
 		t.Errorf("status = %q", app.status)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a cancelled export left %s behind", path)
+	}
+	if !strings.Contains(app.View(), "export cancelled") {
+		t.Errorf("the outcome screen should say it was cancelled:\n%s", app.View())
+	}
+	// A cancel goes back to the selection, intact, so a retry is one Enter.
+	app = update(t, app, tea.KeyMsg{Type: tea.KeyEnter})
+	if app.screen != screenExport || len(app.export.list.checkedTables()) != 2 {
+		t.Errorf("after a cancel: screen %d, %d checked; want the export screen, selection kept",
+			app.screen, len(app.export.list.checkedTables()))
 	}
 }
 
@@ -531,5 +477,30 @@ func TestCleanupExports(t *testing.T) {
 	CleanupExports()
 	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
 		t.Errorf("CleanupExports left %s behind", tmp)
+	}
+}
+
+// TestExportOutcomeScreen checks the loader turns into a result screen that
+// waits for a key, and that dismissing a success lands on the table list with
+// the selection cleared.
+func TestExportOutcomeScreen(t *testing.T) {
+	app := exportApp(t)
+	app, _ = runExportTo(t, app, " j ")
+	if app.exportDone == nil {
+		t.Fatal("a finished export should hold its outcome on screen")
+	}
+	view := app.View()
+	for _, want := range []string{"export complete", "test_logs_users_", "size", " B", "tables   2", "rows     5", "any key"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("outcome screen missing %q:\n%s", want, view)
+		}
+	}
+	app = runeKey(t, app, 'q')
+	if app.exportDone != nil || app.screen != screenTables {
+		t.Fatalf("a key should dismiss to the table list, got screen %d", app.screen)
+	}
+	app = runeKey(t, app, 'x')
+	if n := len(app.export.list.checkedTables()); n != 0 {
+		t.Errorf("the selection should be cleared after a successful export, %d still checked", n)
 	}
 }

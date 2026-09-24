@@ -323,15 +323,69 @@ func liteBytesLiteral(b []byte, colType string) string {
 	return "X'" + hexBytes(b) + "'"
 }
 
-// StructureSQL replays the CREATE TABLE sqlite_master stored verbatim.
-func (e *sqliteEngine) StructureSQL(ctx context.Context, t TableRef) (string, error) {
+// DumpColumns reads table_xinfo, which — unlike table_info — lists generated
+// columns, flagged hidden=2 (virtual) or 3 (stored). Those are left out, and so
+// is hidden=1, a virtual table's hidden column.
+func (e *sqliteEngine) DumpColumns(ctx context.Context, t TableRef) ([]string, error) {
+	rows, err := e.db.QueryContext(ctx,
+		`SELECT name FROM pragma_table_xinfo(?) WHERE hidden = 0 ORDER BY cid`, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("no such table: %s", t.Name)
+	}
+	return cols, nil
+}
+
+func (e *sqliteEngine) DumpInsert(qual string, cols, pk []string, upsert bool) (string, string) {
+	return insertHead(e.QuoteIdent, qual, cols, ""), onConflictTail(e.QuoteIdent, cols, pk, upsert)
+}
+
+// StructureSQL replays the CREATE TABLE sqlite_master stored verbatim, then —
+// after the rows — the table's indexes and triggers, which are separate
+// sqlite_master entries the DROP took with it. (Triggers going last also keeps
+// them from firing on the load.) Auto-indexes have no sql and need none: the
+// CREATE TABLE's own constraints rebuild them.
+func (e *sqliteEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, error) {
 	var ddl string
 	err := e.db.QueryRowContext(ctx,
 		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, t.Name).Scan(&ddl)
 	if err != nil {
-		return "", err
+		return TableDDL{}, err
 	}
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", e.QualifiedName(t), ddl), nil
+	out := TableDDL{Create: fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", e.QualifiedName(t), ddl)}
+
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT sql FROM sqlite_master
+		WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+		ORDER BY type, name`, t.Name)
+	if err != nil {
+		return TableDDL{}, err
+	}
+	defer rows.Close()
+	var after strings.Builder
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return TableDDL{}, err
+		}
+		after.WriteString(s + ";\n")
+	}
+	out.After = after.String()
+	return out, rows.Err()
 }
 
 func (e *sqliteEngine) DumpPrologue() string {

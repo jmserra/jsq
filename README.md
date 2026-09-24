@@ -136,7 +136,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `p` | duplicate the current row — opens an `INSERT` pre-filled from it in `$EDITOR` (auto-generated PK omitted, natural PK/UNIQUE flagged to change); `:wq` runs it |
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
-| `x` | *(table list)* open the **SQL export** screen — the same table list with `[ ]` check boxes. `Space` checks the table under the cursor, `a` checks everything the filter is showing, `n` caps each table to its newest *N* rows, `S` adds the structure, `o` names the output file, and `Enter` writes one `.sql` file. See [SQL export](#sql-export-x) below |
+| `x` | *(table list)* open the **SQL export** screen — the same table list with `[ ]` check boxes. `Space` checks the table under the cursor, `a` checks everything the filter is showing, `n` caps each table to its newest *N* rows, and `Enter` writes one `.sql` file with a generated name. The whole table is recreated (`DROP` + `CREATE` + `INSERT`); a capped one is upserted with no DDL, so it reruns over the live table. See [SQL export](#sql-export-x) below |
 | `,` | *(table list)* show the server's current process list — MySQL's `information_schema.processlist` or Postgres's `pg_stat_activity`, longest-running first. It opens in the grid as a read-only ad-hoc result, so `r` re-runs it to watch it change and `/` is unavailable (SQLite has no server, so it reports that instead) |
 | `r` | reload the current view — the table load (keeping sort, filters, and cursor), the ad-hoc query behind an `s` result, or a user's privileges. On a **list** it re-lists: tables, databases, or users, so an account or table created elsewhere shows up without leaving |
 | `Space v` | **split vertically** — a second pane on the right showing exactly what you're looking at (same table, sort, filters, scroll position; an `s` query result clones as the result). The new pane takes focus, so you can navigate away and leave the original behind |
@@ -409,9 +409,9 @@ over a three-line settings footer.
 ›[x] users          [ ] sessions       [x] orders
  [ ] products       [ ] invoices       [ ] events
 
-2 selected · rows: newest 5000 · structure: no
-→ ./prod_users_orders_last5000_20260917_1402.sql
-space select · a all · n rows · S structure · o path · enter export · bksp back
+2 selected · rows: newest 5000 · upsert, no ddl
+→ ./prod_users_orders_last5000_20260917_140233.sql
+space select · a all · n rows · enter export · bksp back
 ```
 
 `Space` checks the table under the cursor; `a` checks everything currently
@@ -419,22 +419,31 @@ visible, which is what makes the `/` filter useful here — narrow to `log_`, pr
 `a`, and only those are ticked. `Enter` writes the file; `Backspace` steps back to
 the table list and keeps the selection, so a second export is a few keystrokes.
 
-The two settings:
+There is one setting, **`n` — rows per table**, and it decides what kind of file
+you get:
 
-- **`n` — rows per table.** Empty means the whole table. A number takes the
-  **newest** *N* rows: the read is ordered by primary key descending and stopped
-  at *N*, so the server never materialises a 68M-row table to give you the last
-  five thousand. They are written back oldest-first, so a replay inserts in
-  insertion order. A table with no primary key has no "newest", so the cap becomes
-  an arbitrary slice — the file says so on that table's line.
-- **`S` — structure.** Off by default: the file is `INSERT`s only, to load into an
-  existing schema. On, each table is preceded by its `DROP TABLE` + `CREATE
-  TABLE` — the server's own DDL (MySQL's `SHOW CREATE TABLE`, SQLite's
-  `sqlite_master`), never something jsq composed. **Postgres is the exception**:
-  there is no server-side `SHOW CREATE TABLE`, and rebuilding one from
-  `information_schema` silently loses indexes, sequence ownership and constraints
-  — so jsq emits a `DELETE FROM` (to empty the table) and a comment naming the
-  `pg_dump -s -t …` that does it properly.
+- **Empty: the whole table, recreated.** Each table gets `DROP TABLE IF EXISTS`
+  + `CREATE TABLE`, then plain `INSERT`s — replaying it makes the target match
+  the source. MySQL and SQLite hand over their own DDL (`SHOW CREATE TABLE`,
+  `sqlite_master` plus the table's indexes and triggers). Postgres has no
+  server-side `SHOW CREATE TABLE`, so jsq composes one from the catalogs the way
+  `pg_dump` does: columns with their types, identity/serial and defaults and
+  generated expressions, the primary-key/unique/check/exclusion constraints,
+  indexes, sequence positions, and every foreign key from *or to* the table
+  (re-added at the end of the file, since the `DROP … CASCADE` takes the ones
+  other tables hold). Not carried there: triggers, policies, comments, grants,
+  partitioning, and views that depend on the table — `pg_dump` is still the tool
+  for a schema.
+- **A number: the newest *N* rows, upserted.** The read is ordered by primary key
+  descending and stopped at *N*, so the server never materialises a 68M-row table
+  to give you the last five thousand; they are written back oldest-first. There
+  is no DDL, and every row is an upsert keyed on the primary key — `ON DUPLICATE
+  KEY UPDATE` on MySQL (not `REPLACE`, which is a delete and would cascade), `ON
+  CONFLICT (…) DO UPDATE` on Postgres and SQLite — so the file loads over an
+  existing table and can be rerun as often as you like. A table with no primary
+  key has no "newest" and nothing to key on, so the cap becomes an arbitrary
+  slice and a clash is skipped rather than overwritten — the file says so on that
+  table's line.
 
 The file is one `.sql` for the whole selection, bracketed by the session settings
 that let it replay in any table order (`FOREIGN_KEY_CHECKS=0` on MySQL,
@@ -442,38 +451,29 @@ that let it replay in any table order (`FOREIGN_KEY_CHECKS=0` on MySQL,
 SQLite). Values are inlined as literals, rendered per dialect — `0x…` vs
 `'\x…'::bytea` vs `X'…'` for binary, and backslashes escaped for MySQL but left
 alone for Postgres, which the file's own `standard_conforming_strings = on`
-requires.
+requires. Generated columns are left out; the server recomputes them.
 
 Rows **stream**: a table is read one row at a time and written straight out, so
 dumping a table far larger than memory costs nothing (the row cap is the one
 exception — taking the newest rows means holding that many to write them
 forwards).
 
-**The export runs in the background.** It is not the one-op slot every other
-query shares, so starting one and then walking off to browse a table does *not*
-cancel it — which is exactly what you want from something that can run for
-minutes. While it runs, the header carries its own indicator wherever you are:
+**The export blocks the UI while it runs.** A full-screen loader shows the file,
+the table it's on and the rows so far, advancing per table and every few thousand
+rows; the only thing you can do is wait or press `Esc` to cancel (Ctrl-C still
+quits). When it ends, the loader turns into a result screen — the file, its size,
+the table and row counts, how long it took — and waits for any key. After a
+success that key takes you to the table list with the selection cleared; after a
+cancel or a failure it goes back to the export screen with the selection intact,
+so a retry is one `Enter`. The file is written to a temp file beside the target and renamed on
+success, so a cancelled or failed export never leaves a truncated file looking
+finished — and quitting jsq mid-export cleans the temp file up too, the same way
+a connection's `cmd` tunnel is reaped.
 
-```
-prod > app > events > loading events…   ⠹ export 1/6 orders · 1.3M rows  ⠹ loading events · esc
-```
-
-— the export on the left, the query you just ran on the right. Progress advances
-per table and every few thousand rows, so a single huge table is never a silent
-wait. `Esc` cancels the export, but **only on the export screen**, whose footer
-says so: a stray `Esc` on some other screen must not be able to kill twenty
-minutes of work, so you come back with `x` to stop it. Only one export runs at a
-time; a second is refused while one is in flight.
-
-The file is written to a temp file beside the target and renamed on success, so a
-cancelled or failed export never leaves a truncated file looking finished — and
-quitting jsq mid-export cleans the temp file up too, the same way a connection's
-`cmd` tunnel is reaped.
-
-The output path is prefilled with a generated name — connection, what's in it,
-the row cap, a timestamp — which follows your selection until you type over it
-with `o`. Nothing is written to any database: export only reads, so safe mode
-doesn't gate it.
+The file lands in the directory jsq was started from, named for you —
+connection, what's in it, the row cap, a timestamp to the second — so there is
+nothing to type and no export ever overwrites another. Nothing is written to any
+database: export only reads, so safe mode doesn't gate it.
 
 ### Modes
 

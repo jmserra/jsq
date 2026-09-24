@@ -430,15 +430,78 @@ func myBytesLiteral(b []byte, colType string) string {
 	return "0x" + hexBytes(b)
 }
 
+// DumpColumns leaves out generated columns (extra "VIRTUAL GENERATED" /
+// "STORED GENERATED"), which reject an explicit value. Not DEFAULT_GENERATED,
+// which only marks an expression default and takes a value like any column.
+func (e *myEngine) DumpColumns(ctx context.Context, t TableRef) ([]string, error) {
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT column_name FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ?
+		  AND extra NOT LIKE '%VIRTUAL GENERATED%' AND extra NOT LIKE '%STORED GENERATED%'
+		ORDER BY ordinal_position`, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("no such table: %s", t.Name)
+	}
+	return cols, nil
+}
+
+// DumpInsert's upsert is ON DUPLICATE KEY UPDATE, not REPLACE: REPLACE is a
+// delete plus an insert, so a rerun would fire ON DELETE CASCADE on the
+// children of every row it touched. VALUES(col) is deprecated from 8.0.20 in
+// favour of a row alias, but the alias is 8.0.19+ only and MariaDB never had
+// it — VALUES() still works on every server a dump might be replayed into.
+//
+// Without a primary key, every column is updated, which upserts against
+// whatever unique key the table does have. When every column is key, the no-op
+// "first = first" keeps the statement valid and makes a clash a silent skip.
+func (e *myEngine) DumpInsert(qual string, cols, pk []string, upsert bool) (string, string) {
+	head := insertHead(e.QuoteIdent, qual, cols, "")
+	if !upsert {
+		return head, ");\n"
+	}
+	upd := cols
+	if len(pk) > 0 {
+		upd = nonKey(cols, pk)
+	}
+	sets := make([]string, len(upd))
+	for i, c := range upd {
+		q := e.QuoteIdent(c)
+		sets[i] = q + " = VALUES(" + q + ")"
+	}
+	if len(sets) == 0 {
+		q := e.QuoteIdent(cols[0])
+		sets = []string{q + " = " + q}
+	}
+	return head, ") ON DUPLICATE KEY UPDATE " + strings.Join(sets, ", ") + ";\n"
+}
+
 // StructureSQL hands over the server's own DDL — SHOW CREATE TABLE is exact
-// (indexes, engine, charset, auto_increment), so jsq never composes its own.
-func (e *myEngine) StructureSQL(ctx context.Context, t TableRef) (string, error) {
+// (indexes, foreign keys, engine, charset, auto_increment), so jsq never
+// composes its own. Foreign keys can stay inline: the prologue's
+// FOREIGN_KEY_CHECKS=0 lets a CREATE name a table that comes later in the file,
+// and lets the DROP go through while other tables still point at this one.
+func (e *myEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, error) {
 	q := e.QualifiedName(t)
 	var name, ddl string
 	if err := e.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+q).Scan(&name, &ddl); err != nil {
-		return "", err
+		return TableDDL{}, err
 	}
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", q, ddl), nil
+	return TableDDL{Create: fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", q, ddl)}, nil
 }
 
 func (e *myEngine) DumpPrologue() string {
