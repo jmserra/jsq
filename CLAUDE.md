@@ -25,6 +25,11 @@ what README's design section describes. Don't duplicate README here.
   feed `tea.Msg`/`tea.KeyMsg` into `Update`, assert on `View()`. That's the
   pattern for any UI behavior test; no terminal needed. Follow it.
 - The `jsq` binary in the repo root is git-ignored.
+- `demo/` (git-ignored, local only) rebuilds the demo video (`demo/run.sh`; see `demo/README.md`): the
+  real binary driven key by key in tmux against an invented Postgres, each screen
+  rendered to a frame. `demo/tour.py` is the storyboard — **a new or changed
+  keybinding should get its step there**, and its `:wq` guard stops a take whose
+  statement did not do what the script expected.
 
 ## Actual file map (flatter than README's design tree)
 

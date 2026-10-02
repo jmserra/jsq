@@ -3,6 +3,10 @@
 *.sqlite
 /.pgsql/
 
+# The demo video and the scripts that rebuild it (demo/README.md) — local only;
+# the video is hosted elsewhere.
+/demo/
+
 # Dumps written by the export screen (`x`). Its path defaults to ./, so running
 # jsq from the repo drops them here — and they hold real data from whatever you
 # were connected to.

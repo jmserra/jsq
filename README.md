@@ -9,6 +9,10 @@ It's a deliberately smaller, more opinionated take on the same idea: fast,
 keyboard-driven database browsing, with SQL authoring and heavier edits handed
 off to your real `$EDITOR`. See [Relationship to lazysql](#relationship-to-lazysql).
 
+https://github.com/user-attachments/assets/1727f0db-d86e-4c45-9317-0486f44d0c9a
+
+*A five-minute tour of every feature, on invented data.*
+
 This README is both the user guide and the design document — practical usage
 first, then the philosophy and design that shape it.
 
