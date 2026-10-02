@@ -389,6 +389,18 @@ func prepareInsertCmd(ctx context.Context, gen int, eng db.Engine, t db.Table) t
 	}
 }
 
+// prepareStructureCmd reads the table's DDL (a DB call, so off the Update loop)
+// and builds the `E` seed for the table list; it opens in $EDITOR via editorCmd.
+func prepareStructureCmd(ctx context.Context, gen int, eng db.Engine, t db.Table, connName, dbName string) tea.Cmd {
+	return func() tea.Msg {
+		ddl, err := eng.StructureSQL(ctx, t.Ref())
+		if err != nil {
+			return dbErr(ctx, gen, err)
+		}
+		return editorReadyMsg{seed: buildStructureStmt(tableLabel(t), connName, dbName, ddl.Definition()), gen: gen}
+	}
+}
+
 // runQueryCmd runs a free-form read (s/S) and returns its result set to display.
 // The result carries no table/PK provenance, so the grid renders it read-only.
 // seed reopens the query in $EDITOR if it fails (see errView).

@@ -2632,3 +2632,55 @@ func TestDatabaseName(t *testing.T) {
 		}
 	}
 }
+
+// E on the table list opens the highlighted table's definition in $EDITOR:
+// the CREATE and its indexes, without the DROP a dump puts in front — and a
+// statement run from it re-lists the tables.
+func TestTableListStructure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, _ := db.Open(ctx, path)
+	e.Exec(ctx, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)`)
+	e.Exec(ctx, `CREATE INDEX users_name ON users (name)`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("E on the table list should read the structure")
+	}
+	ready, ok := cmd().(editorReadyMsg)
+	if !ok {
+		t.Fatalf("E should yield an editor seed, got %T", cmd())
+	}
+	sql := ready.seed.sql
+	if !strings.HasPrefix(sql, "-- structure of users on test") {
+		t.Errorf("seed should be headed by the table and connection:\n%s", sql)
+	}
+	if !strings.Contains(sql, "CREATE TABLE users") || !strings.Contains(sql, "CREATE INDEX users_name") {
+		t.Errorf("seed should carry the CREATE TABLE and its index:\n%s", sql)
+	}
+	if strings.Contains(sql, "DROP TABLE") {
+		t.Errorf("seed must not carry the dump's DROP:\n%s", sql)
+	}
+	if got := strings.Split(sql, "\n")[ready.seed.line-1]; !strings.HasPrefix(got, "CREATE TABLE") {
+		t.Errorf("cursor should land on the CREATE TABLE, got line %q", got)
+	}
+	if _, cmd := app.Update(ready); cmd == nil {
+		t.Fatal("the seed should open the editor")
+	}
+
+	// A statement written from it runs as a full-path write and re-lists.
+	app = update(t, app, ready)
+	m, cmd = app.Update(editorSubmitMsg{sql: "CREATE TABLE users2 (id INTEGER PRIMARY KEY);", after: ready.seed.after})
+	app = m.(App)
+	m, cmd = app.Update(cmd()) // execDoneMsg → tablesCmd
+	app = update(t, m.(App), cmd())
+	if len(app.sidebar.tables) != 2 {
+		t.Fatalf("the new table should appear in the list, got %d", len(app.sidebar.tables))
+	}
+}

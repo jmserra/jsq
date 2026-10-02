@@ -338,6 +338,14 @@ list into `histView` (an overlay like `jumpView`); Enter runs a read directly
 (`histSeed`, `remember`=current table so a `:wq` re-records + continues the `s`
 loop); `s` opens any entry in `$EDITOR`. History is in-memory only (no persistence).
 
+`E` **on the table list** opens the highlighted table's definition in `$EDITOR`:
+`prepareStructureCmd` → `Engine.StructureSQL` → `TableDDL.Definition()` (the
+export's DDL minus its leading DROP, plus After and only the table's OWN foreign
+keys — `OwnFinal` counts them at the head of `Final`; pg's incoming FKs follow)
+→ `buildStructureStmt` → `editorReadyMsg`. It is an ordinary full path, so an
+edited `:wq` runs it (safe-mode confirm, errView); `afterWriteTables` re-lists.
+No DROP on purpose: `:wq` on the untouched buffer fails with "already exists".
+
 `r` **on a list screen** re-lists it — `tablesCmd`→`tablesMsg` (the only
 tables-only fetch; connecting delivers its tables in `connectedMsg` instead),
 `openDatabases`, `openUsers` — so something created in another session shows up

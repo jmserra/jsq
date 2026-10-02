@@ -55,7 +55,7 @@ var helpItems = []helpItem{
 	{key: "`", desc: "jumplist picker — pick any visited view (j/k, enter)"},
 	{head: "Edit"},
 	{key: "e", desc: "quick-edit cell (keyed UPDATE, runs now; type NULL to null it)"},
-	{key: "E", desc: "edit cell in $EDITOR"},
+	{key: "E", desc: "edit cell in $EDITOR (table list: the table's CREATE TABLE)"},
 	{key: "o", desc: "insert a row (user list: create a user; grants: grant more)"},
 	{key: "D", desc: "delete row (user list: drop the user; grants: revoke)"},
 	{key: "p", desc: "duplicate the current row"},

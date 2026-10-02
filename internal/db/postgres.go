@@ -514,7 +514,7 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 	// Constraints from this table (inline, or Final for a foreign key) and
 	// foreign keys to it from anywhere (Final). contype 'n' — pg 18's catalogued
 	// NOT NULL — is already on the column.
-	var final []string
+	var final, incoming []string
 	rows, err = tx.QueryContext(ctx, `
 		SELECT c.conname, c.contype::text, pg_get_constraintdef(c.oid, true),
 		       c.conrelid = $1::regclass,
@@ -536,7 +536,12 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 			return TableDDL{}, err
 		}
 		if typ == "f" {
-			final = append(final, fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s;", owner, e.QuoteIdent(name), def))
+			fk := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s;", owner, e.QuoteIdent(name), def)
+			if own {
+				final = append(final, fk)
+			} else {
+				incoming = append(incoming, fk)
+			}
 		} else if own {
 			cols = append(cols, "  CONSTRAINT "+e.QuoteIdent(name)+" "+def)
 		}
@@ -590,7 +595,7 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 		b.WriteString(p + "\n")
 	}
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n%s\n);\n", q, strings.Join(cols, ",\n"))
-	out := TableDDL{Create: b.String(), Final: final}
+	out := TableDDL{Create: b.String(), Final: append(final, incoming...), OwnFinal: len(final)}
 	if len(after) > 0 {
 		out.After = strings.Join(after, "\n") + "\n"
 	}

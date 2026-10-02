@@ -41,6 +41,26 @@ type TableDDL struct {
 	Create string   // before the rows: DROP TABLE IF EXISTS + CREATE TABLE
 	After  string   // after the rows: secondary indexes, triggers, sequence positions
 	Final  []string // after every table: foreign keys, which may name a table later in the file (the writer dedupes)
+	// OwnFinal counts the leading Final entries that are the table's own foreign
+	// keys; the rest belong to other tables and merely point at this one.
+	OwnFinal int
+}
+
+// Definition is the structure for reading rather than replaying (`E` on the
+// table list): the CREATE without the DROP that heads it in a dump, then the
+// indexes and the table's own foreign keys — not the ones other tables hold to it.
+func (d TableDDL) Definition() string {
+	s := d.Create
+	if strings.HasPrefix(s, "DROP TABLE ") {
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	s += d.After
+	for _, fk := range d.Final[:d.OwnFinal] {
+		s += fk + "\n"
+	}
+	return s
 }
 
 // ForeignKey is one foreign-key constraint: the local Columns reference

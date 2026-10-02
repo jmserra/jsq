@@ -680,6 +680,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ctx := a.begin("loading users", noPane)
 			a.nextStatus = "ran — user list reloaded"
 			return a, usersCmd(ctx, a.gen, a.engine)
+		case afterWriteTables: // a structure statement ran → the list may have changed
+			ctx := a.begin("loading tables", noPane)
+			return a, tablesCmd(ctx, a.gen, a.engine)
 		case afterWriteGrants: // grant/revoke → re-read that user's privileges
 			if p, ok := a.opTarget(); ok && p.grantsFor.Name != "" {
 				u := p.grantsFor
@@ -1486,6 +1489,14 @@ func (a App) handleTablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tablesCmd(ctx, a.gen, a.engine)
 		case "u": // go to the user list
 			return a.openUsers()
+		case "E": // the highlighted table's CREATE TABLE, in $EDITOR
+			t, ok := a.sidebar.selected()
+			if !ok || a.engine == nil {
+				return a, nil
+			}
+			ctx := a.begin("reading structure", noPane)
+			a.status = "reading structure…"
+			return a, prepareStructureCmd(ctx, a.gen, a.engine, t, a.connName, a.dbName)
 		case "x": // the SQL-export check list over these tables
 			return a.openExport()
 		case ",": // the server's current process list

@@ -91,6 +91,7 @@ const (
 	afterWriteView   afterWrite = iota // the pane's own view (E/o/D/p/s — the default)
 	afterWriteUsers                    // the user list (create user)
 	afterWriteGrants                   // the grants view the write came from (grant/revoke)
+	afterWriteTables                   // the table list (a table's structure, edited and run)
 )
 
 // inlinedKeyPreds renders the "col = literal" WHERE predicates for a full-PK
@@ -352,6 +353,26 @@ func buildCreateUserStmt(eng db.Engine, connName, dbName string) editorSeed {
 	// rather than by quote — one kind covers both.
 	line, col := locate(sql, newUserName)
 	return editorSeed{sql: sql, line: line, col: col, kind: selectWord, after: afterWriteUsers}
+}
+
+// buildStructureStmt is the `E` seed on the table list: the statements that
+// define the table, as the engine reports them (ddl is TableDDL.Definition —
+// no DROP, so a :wq on the untouched buffer fails with "already exists" rather
+// than destroying anything). Mostly it is read and copied; rewritten into an
+// ALTER or a CREATE of a copy, it runs like any other full path.
+func buildStructureStmt(label, connName, dbName, ddl string) editorSeed {
+	head := "-- structure of " + label
+	var where []string
+	for _, part := range []string{connName, dbName} {
+		if part != "" {
+			where = append(where, part)
+		}
+	}
+	if len(where) > 0 {
+		head += " on " + strings.Join(where, " · ")
+	}
+	head += "\n-- :q leaves it alone; :wq RUNS what is here — as it stands, that fails: the table exists\n"
+	return editorSeed{sql: head + ddl, line: 3, col: 1, after: afterWriteTables}
 }
 
 // buildDropUserStmt is the `D` starting point on the user list: the statement
