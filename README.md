@@ -461,7 +461,11 @@ requires. Generated columns are left out; the server recomputes them.
 Rows **stream**: a table is read one row at a time and written straight out, so
 dumping a table far larger than memory costs nothing (the row cap is the one
 exception — taking the newest rows means holding that many to write them
-forwards).
+forwards). On the way out they are grouped into **multi-row `INSERT`s** (up to
+500 rows or 256KB of values per statement, whichever comes first, so a statement
+stays well inside MySQL's `max_allowed_packet`), because a replay's cost is per
+statement — parse, round trip, and a transaction each under autocommit — not per
+row. One row still gets one line, so the file stays greppable and diffable.
 
 **The export blocks the UI while it runs.** A full-screen loader shows the file,
 the table it's on and the rows so far, advancing per table and every few thousand

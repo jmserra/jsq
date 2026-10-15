@@ -204,7 +204,8 @@ without unwinding the export goroutine, so writeDump's own defer can't cover it.
 The write is `exportCmd` → `writeDump` → `dumpTable` in cmd.go (invariant 1: it
 calls the engine). It **streams** — `Engine.Stream`, one row in memory, rendered
 straight to a `bufio.Writer` — because a full table dwarfs any window the grid
-loads. The row cap is the exception: it reads newest-first (`orderKeys("", false,
+loads; rows are batched into multi-row INSERTs on the way out (the replay cost is
+per statement, not per row). The row cap is the exception: it reads newest-first (`orderKeys("", false,
 pk)`, the same total order the grid's default sort uses) and therefore buffers
 those N rendered lines to write them back forwards. Output goes to a UNIQUE temp file beside the
 target (not `<path>.part`, so no export can delete another's file) and is renamed on success, so a cancelled
@@ -213,7 +214,12 @@ literals: `0x…`/`'\x…'::bytea`/`X'…'`, and backslash-doubling for MySQL on
 Postgres's prologue sets `standard_conforming_strings=on`, where doubling
 corrupts), `DumpColumns` (the read/insert column list: every column minus
 generated ones, which reject a value), `DumpInsert` (head/tail around a row's
-values; `upsert` on a capped dump — MySQL `ON DUPLICATE KEY UPDATE c=VALUES(c)`,
+values — `insertBatch` (cmd.go) puts MANY rows between one head and tail,
+`(…),\n(…)`, capped by `insertBatchRows`/`insertBatchBytes` (500 rows / 256KB) so
+a statement stays inside MySQL's max_allowed_packet; both upsert tails below
+apply per row of a multi-row VALUES, so a new dialect's must too, and `flush()`
+after the last row is what closes the statement;
+`upsert` on a capped dump — MySQL `ON DUPLICATE KEY UPDATE c=VALUES(c)`,
 deliberately not REPLACE, which deletes and so cascades; pg/sqlite `ON CONFLICT
 (pk) DO UPDATE`, DO NOTHING with no PK or nothing but key columns; pg always adds
 `OVERRIDING SYSTEM VALUE` for GENERATED ALWAYS identities), `StructureSQL` (full

@@ -191,8 +191,11 @@ type Engine interface {
 	// refuses an explicit value for.
 	DumpColumns(ctx context.Context, t TableRef) ([]string, error)
 
-	// DumpInsert is the text around one row's value list: head ends at the
-	// opening "VALUES (", tail starts at its closing ")" and ends the statement.
+	// DumpInsert is the text around a row's value list: head ends at the opening
+	// "VALUES (", tail starts at its closing ")" and ends the statement. A dump
+	// puts many rows in one statement (see insertBatch), separating them with
+	// "), (" — so a tail must be one that applies per row of a multi-row VALUES,
+	// as both upserts below do.
 	// cols are the (unquoted) column names; upsert makes the statement rerunnable
 	// — keyed on pk, a row that is already there is overwritten rather than
 	// failing (MySQL ON DUPLICATE KEY UPDATE, Postgres/SQLite ON CONFLICT).

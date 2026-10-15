@@ -87,9 +87,11 @@ func TestExportWritesSelectedTables(t *testing.T) {
 		"PRAGMA foreign_keys=OFF;",
 		`DROP TABLE IF EXISTS "logs";`,
 		"CREATE TABLE logs",
-		`INSERT INTO "logs" ("id", "msg") VALUES (1, 'one');`,
-		`INSERT INTO "users" ("id", "name", "note") VALUES (1, 'Ada', 'it''s fine');`,
-		`INSERT INTO "users" ("id", "name", "note") VALUES (2, 'Linus', NULL);`,
+		// Rows ride in one multi-row INSERT per table (both tables are well under
+		// the batch caps), one row per line.
+		"INSERT INTO \"logs\" (\"id\", \"msg\") VALUES (1, 'one'),\n(2, 'two');",
+		"INSERT INTO \"users\" (\"id\", \"name\", \"note\") VALUES (1, 'Ada', 'it''s fine'),\n" +
+			"(2, 'Linus', NULL),\n",
 		// A backslash survives verbatim: SQLite string literals have no escape
 		// character, so doubling it would corrupt the value on reload.
 		`(3, 'Grace', 'C:\path');`,
@@ -346,6 +348,52 @@ func TestExportReplays(t *testing.T) {
 	}
 	if rs.Rows[2][1] != `C:\path` {
 		t.Errorf("backslash did not survive the round trip: %#v", rs.Rows[2][1])
+	}
+}
+
+// TestExportBatchesInserts checks the batch caps: rows are grouped into
+// multi-row INSERTs until a cap says stop, and the split file still replays.
+// The byte cap is also the guarantee that one oversized row gets a statement of
+// its own rather than being dropped or split mid-values.
+func TestExportBatchesInserts(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		rows       int
+		bytes      int
+		statements int // "users" has three rows
+	}{
+		{"row cap", 2, 256 << 10, 2},
+		{"byte cap", 500, 1, 3},
+		{"uncapped", 500, 256 << 10, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			oldRows, oldBytes := insertBatchRows, insertBatchBytes
+			insertBatchRows, insertBatchBytes = c.rows, c.bytes
+			defer func() { insertBatchRows, insertBatchBytes = oldRows, oldBytes }()
+
+			app := exportApp(t)
+			_, body := runExportTo(t, app, "j ") // users only, whole
+			if got := strings.Count(body, `INSERT INTO "users"`); got != c.statements {
+				t.Errorf("%d INSERT statements, want %d:\n%s", got, c.statements, body)
+			}
+
+			ctx := context.Background()
+			fresh, err := db.Open(ctx, filepath.Join(t.TempDir(), "restored.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fresh.Close()
+			if _, err := fresh.Exec(ctx, body); err != nil {
+				t.Fatalf("replaying the dump: %v\n%s", err, body)
+			}
+			rs, err := fresh.Query(ctx, `SELECT id FROM users ORDER BY id`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rs.Rows) != 3 {
+				t.Errorf("restored %d of 3 users:\n%s", len(rs.Rows), body)
+			}
+		})
 	}
 }
 

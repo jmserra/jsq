@@ -712,6 +712,65 @@ func exportWaitCmd(ch chan tea.Msg) tea.Cmd {
 // A var so a test can lower it rather than having to write a big table.
 var exportProgressEvery int64 = 2000
 
+// insertBatchRows and insertBatchBytes cap one multi-row INSERT. A dump's cost
+// on the far side is per *statement*, not per row — parse, round trip, and under
+// autocommit a transaction each — so rows go out in groups:
+//
+//	INSERT INTO "t" ("a", "b") VALUES (1, 'x'),
+//	(2, 'y');
+//
+// The caps exist because the far side also has a limit on one statement: MySQL's
+// max_allowed_packet is 4MB on 5.7 (64MB on 8.0), and mysqldump bounds its own
+// extended inserts the same way. Whichever cap is reached first ends the
+// statement; a single row wider than the byte cap still gets its own statement
+// rather than being split. Vars, not consts, so a test can shrink them.
+var (
+	insertBatchRows  = 500
+	insertBatchBytes = 256 << 10
+)
+
+// insertBatch accumulates rendered value lists into multi-row INSERTs on w,
+// using the engine's own head and tail (so an upsert's ON CONFLICT / ON
+// DUPLICATE KEY tail closes the batch exactly as it closed a single row — both
+// dialects apply it per row of a multi-row VALUES). One row per line is kept on
+// purpose: the file stays greppable and diffable.
+//
+// flush ends the open statement and must be called once a table's rows are done.
+type insertBatch struct {
+	w          *bufio.Writer
+	head, tail string
+	rows       int
+	size       int
+}
+
+func (b *insertBatch) add(vals string) error {
+	if b.rows > 0 && (b.rows >= insertBatchRows || b.size+len(vals) >= insertBatchBytes) {
+		if err := b.flush(); err != nil {
+			return err
+		}
+	}
+	sep := "),\n("
+	if b.rows == 0 {
+		sep = b.head
+	}
+	b.rows++
+	b.size += len(vals)
+	if _, err := b.w.WriteString(sep); err != nil {
+		return err
+	}
+	_, err := b.w.WriteString(vals)
+	return err
+}
+
+func (b *insertBatch) flush() error {
+	if b.rows == 0 {
+		return nil
+	}
+	b.rows, b.size = 0, 0
+	_, err := b.w.WriteString(b.tail)
+	return err
+}
+
 // writeDump streams every selected table into one file and returns the total row
 // count. It writes to a sibling temp file and renames on success, so an
 // interrupted or failed export never leaves a truncated file looking like a
@@ -725,7 +784,9 @@ var exportProgressEvery int64 = 2000
 // anything or failing on the rows already there.
 //
 // Rows stream: a table is read one row at a time and rendered straight to the
-// buffered writer, so dumping a table far larger than memory costs nothing. The
+// buffered writer, so dumping a table far larger than memory costs nothing —
+// batched into multi-row INSERTs on the way out (insertBatch), which is what
+// makes the file quick to replay. The
 // exception is a row cap, which reads the NEWEST rows (primary key descending)
 // and therefore has to buffer them to write them back in insertion order — but
 // that buffer is exactly the cap the user asked for.
@@ -816,8 +877,8 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 }
 
 // dumpTable writes one table's section: its heading, the structure (a full
-// export) or nothing (a capped one), an INSERT per row, and whatever of the
-// structure goes behind the rows. It returns the row count and the statements
+// export) or nothing (a capped one), the rows as multi-row INSERTs
+// (insertBatch), and whatever of the structure goes behind the rows. It returns the row count and the statements
 // that must wait until every table is written. The count also lands in a
 // trailing comment, since streaming means it isn't known until the scan ends.
 func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, []string, error) {
@@ -864,6 +925,7 @@ func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, 
 		q += fmt.Sprintf(" LIMIT %d", req.limit)
 	}
 	head, tail := eng.DumpInsert(qual, cols, pk, req.limit > 0)
+	batch := &insertBatch{w: w, head: head, tail: tail}
 
 	var types []string
 	var n int64
@@ -878,26 +940,28 @@ func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, 
 			for i, v := range vals {
 				lits[i] = eng.SQLLiteral(v, types[i])
 			}
-			line := head + strings.Join(lits, ", ") + tail
+			row := strings.Join(lits, ", ")
 			n++
 			if report != nil && n%exportProgressEvery == 0 {
 				report(n)
 			}
 			if order != "" { // read backwards — hold it and write it forwards
-				buf = append(buf, line)
+				buf = append(buf, row)
 				return nil
 			}
-			_, err := w.WriteString(line)
-			return err
+			return batch.add(row)
 		},
 	})
 	if err != nil {
 		return 0, nil, err
 	}
 	for i := len(buf) - 1; i >= 0; i-- {
-		if _, err := w.WriteString(buf[i]); err != nil {
+		if err := batch.add(buf[i]); err != nil {
 			return 0, nil, err
 		}
+	}
+	if err := batch.flush(); err != nil {
+		return 0, nil, err
 	}
 	fmt.Fprintf(w, "%s", ddl.After)
 
