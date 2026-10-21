@@ -705,8 +705,9 @@ func TestSidebarFilter(t *testing.T) {
 	if len(app.sidebar.visible) != 2 {
 		t.Fatalf("filter %q matched %d tables, want 2", "order", len(app.sidebar.visible))
 	}
-	if t0, _ := app.sidebar.selected(); t0.Name != "order_items" {
-		t.Fatalf("cursor should sit on first match order_items, got %q", t0.Name)
+	// Both are prefix hits; the shorter name is the closer match, so it leads.
+	if t0, _ := app.sidebar.selected(); t0.Name != "orders" {
+		t.Fatalf("cursor should sit on the best match orders, got %q", t0.Name)
 	}
 
 	// Backspace re-widens the match set.
@@ -718,8 +719,8 @@ func TestSidebarFilter(t *testing.T) {
 	// Arrow down moves to the second match, Enter loads it.
 	app = update(t, app, tea.KeyMsg{Type: tea.KeyDown})
 	sel, _ := app.sidebar.selected()
-	if sel.Name != "orders" {
-		t.Fatalf("after ↓, selected = %q, want orders", sel.Name)
+	if sel.Name != "order_items" {
+		t.Fatalf("after ↓, selected = %q, want order_items", sel.Name)
 	}
 	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = m.(App)
@@ -727,8 +728,8 @@ func TestSidebarFilter(t *testing.T) {
 		t.Fatal("Enter should load the highlighted table")
 	}
 	app = update(t, app, cmd())
-	if app.tableSegment() != "orders" {
-		t.Fatalf("loaded table = %q, want orders", app.tableSegment())
+	if app.tableSegment() != "order_items" {
+		t.Fatalf("loaded table = %q, want order_items", app.tableSegment())
 	}
 	if app.screen != screenBrowse {
 		t.Fatal("loading a table should switch to the grid screen")

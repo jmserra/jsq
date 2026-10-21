@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -11,9 +12,9 @@ import (
 // sidebar is the full-screen list buffer shared by the table, database, and
 // connection screens. Navigation is the default mode (arrows / j-k live in the
 // caller, ←/→ jump columns, g/G to the ends); pressing `/` enters filter mode,
-// where typing narrows the list live (same LIKE semantics as the grid column
-// filter §7.1 — trailing % implied, case-insensitive, a purely client-side
-// narrowing of the already-loaded names). Enter keeps the narrowed list and drops
+// where typing narrows the list live and ranks it best match first (rankLabel —
+// a purely client-side narrowing of the already-loaded names; a `%` switches to
+// the grid column filter's LIKE semantics). Enter keeps the narrowed list and drops
 // back to navigation; Esc clears it. This mirrors the grid's two-phase filter so
 // the whole app has one filter model.
 type sidebar struct {
@@ -63,18 +64,42 @@ func tableLabel(t db.Table) string {
 
 const listColGap = 2 // spaces between grid columns
 
-// rebuildVisible narrows `visible` to tables whose label matches the filter,
-// trying an accurate prefix match first and widening to a substring match only
-// when the prefix finds nothing (filterPatterns). Empty filter shows all tables.
-// Callers reset cursor/off before calling.
+// rebuildVisible narrows `visible` to the tables whose label matches the filter
+// and orders them best match first (rankLabel: exact, prefix, word prefix,
+// substring, then the letters in order), so Enter on the top row opens the
+// likeliest one. A filter containing `%` is taken as a LIKE pattern instead —
+// the grid's column-filter syntax — and keeps the list order. Empty filter
+// shows all tables. Callers reset cursor/off before calling.
 func (s *sidebar) rebuildVisible() {
-	for _, pat := range filterPatterns(s.filter.val) {
-		s.matchInto(pat)
-		if len(s.visible) > 0 || pat == "" {
-			break
-		}
+	q := s.filter.val
+	if strings.Contains(q, "%") {
+		s.matchInto(searchPattern(q))
+	} else {
+		s.rankInto(q)
 	}
 	s.cursor = clamp(s.cursor, 0, len(s.visible)-1)
+}
+
+// rankInto sets `visible` to the tables matching q, best first; ties keep the
+// list's own order (stable sort).
+func (s *sidebar) rankInto(q string) {
+	s.visible = s.visible[:0]
+	if q == "" {
+		for i := range s.tables {
+			s.visible = append(s.visible, i)
+		}
+		return
+	}
+	ranks := make(map[int]listRank, len(s.tables))
+	for i := range s.tables {
+		if r, ok := rankLabel(tableLabel(s.tables[i]), q); ok {
+			ranks[i] = r
+			s.visible = append(s.visible, i)
+		}
+	}
+	sort.SliceStable(s.visible, func(a, b int) bool {
+		return ranks[s.visible[a]].less(ranks[s.visible[b]])
+	})
 }
 
 // matchInto sets `visible` to the tables whose label matches pat (all when empty).
