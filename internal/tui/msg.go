@@ -15,6 +15,15 @@ type connectedMsg struct {
 	gen    int
 }
 
+// tableLinksMsg carries the database's foreign keys as table pairs, for the
+// export screen. engine is the one they were read from: a reply that arrives
+// after a switch to another connection or database describes other tables and is
+// dropped.
+type tableLinksMsg struct {
+	engine db.Engine
+	links  []db.TableLink
+}
+
 // rowsMsg is delivered when a table's first window of rows loads. full is true
 // if the window came back completely filled (so more rows may exist). gen is the
 // dispatching op's token (App.gen), so a stale load can be ignored.

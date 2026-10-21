@@ -38,9 +38,9 @@ type Column struct {
 
 // TableDDL is one table's structure in a dump, split by where it has to go.
 type TableDDL struct {
-	Create string   // before the rows: DROP TABLE IF EXISTS + CREATE TABLE
-	After  string   // after the rows: secondary indexes, triggers, sequence positions
-	Final  []string // after every table: foreign keys, which may name a table later in the file (the writer dedupes)
+	Create string    // before the rows: DROP TABLE IF EXISTS + CREATE TABLE
+	After  string    // after the rows: secondary indexes, triggers, sequence positions
+	Final  []FinalFK // after every table: foreign keys, which may name a table later in the file (the writer dedupes)
 	// OwnFinal counts the leading Final entries that are the table's own foreign
 	// keys; the rest belong to other tables and merely point at this one.
 	OwnFinal int
@@ -58,9 +58,30 @@ func (d TableDDL) Definition() string {
 	}
 	s += d.After
 	for _, fk := range d.Final[:d.OwnFinal] {
-		s += fk + "\n"
+		s += fk.SQL + "\n"
 	}
 	return s
+}
+
+// FinalFK is one foreign key a dump adds once every table exists.
+type FinalFK struct {
+	SQL string // ALTER TABLE … ADD CONSTRAINT …; — checked against every row as it lands
+
+	// Loose is the form for a key that leaves the export: one of its two tables
+	// keeps the rows the target already had, which nothing says match the rows
+	// the dump writes. It adds the key NOT VALID, then validates it in a block
+	// that warns — naming the key and counting the rows that break it — instead
+	// of failing the load. "" when there is no such form (the writer uses SQL).
+	Loose string
+
+	From, To TableRef // the table holding the key, and the table it references
+}
+
+// TableLink is one foreign key reduced to the two tables it joins: From holds
+// the key, To is referenced. The export screen walks these to say which links
+// leave the selection.
+type TableLink struct {
+	From, To TableRef
 }
 
 // ForeignKey is one foreign-key constraint: the local Columns reference
@@ -113,6 +134,9 @@ type Engine interface {
 	Columns(ctx context.Context, t TableRef) ([]Column, error)
 	PrimaryKey(ctx context.Context, t TableRef) ([]string, error)
 	ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, error)
+	// TableLinks is every foreign key in the database as a table → table edge,
+	// self-references left out.
+	TableLinks(ctx context.Context) ([]TableLink, error)
 	Query(ctx context.Context, query string, args ...any) (*ResultSet, error)
 	Exec(ctx context.Context, query string, args ...any) (int64, error)
 	Databases(ctx context.Context) ([]string, error) // deferred picker; may be nil
@@ -237,6 +261,25 @@ func Open(ctx context.Context, dsn string) (Engine, error) {
 // dialect-agnostic Query/Exec/Close over a *sql.DB. Each engine embeds it and
 // implements only its dialect methods (quoting, placeholders, introspection).
 type stdEngine struct{ db *sql.DB }
+
+// tableLinks runs an engine's TableLinks query: four columns — from schema,
+// from table, to schema, to table — the schemas ” where there are none.
+func (e *stdEngine) tableLinks(ctx context.Context, query string) ([]TableLink, error) {
+	rows, err := e.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TableLink
+	for rows.Next() {
+		var l TableLink
+		if err := rows.Scan(&l.From.Schema, &l.From.Name, &l.To.Schema, &l.To.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
 
 func (e *stdEngine) Query(ctx context.Context, query string, args ...any) (*ResultSet, error) {
 	return scanQuery(ctx, e.db, query, args...)

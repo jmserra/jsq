@@ -139,6 +139,21 @@ func tablesCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
 	}
 }
 
+// tableLinksCmd reads the database's table-to-table foreign keys for the export
+// screen's boundary warning. Best-effort, like the FKs on a table load: on an
+// error the screen just has no warning to give, so the error is dropped rather
+// than reported. Not an op — it neither shows the spinner nor takes the op
+// slot — so the msg carries the engine it asked instead of a gen.
+func tableLinksCmd(eng db.Engine) tea.Cmd {
+	return func() tea.Msg {
+		links, err := eng.TableLinks(context.Background())
+		if err != nil {
+			return nil
+		}
+		return tableLinksMsg{engine: eng, links: links}
+	}
+}
+
 // databasesCmd lists the databases on the current connection (for the T picker).
 func databasesCmd(ctx context.Context, gen int, eng db.Engine) tea.Cmd {
 	return func() tea.Msg {
@@ -827,7 +842,7 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 	fmt.Fprintf(w, "\n%s\n", eng.DumpPrologue())
 
 	var total int64
-	var final []string
+	var final []db.FinalFK
 	seen := map[string]bool{}
 	for i, t := range req.tables {
 		step := exportProgressMsg{table: tableLabel(t), index: i + 1, total: len(req.tables)}
@@ -851,15 +866,15 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 		total += n
 		// Two dumped tables report the same foreign key between them; it goes in
 		// once.
-		for _, s := range fin {
-			if !seen[s] {
-				seen[s] = true
-				final = append(final, s)
+		for _, fk := range fin {
+			if !seen[fk.SQL] {
+				seen[fk.SQL] = true
+				final = append(final, fk)
 			}
 		}
 	}
 	if len(final) > 0 {
-		fmt.Fprintf(w, "-- foreign keys, once every table exists\n%s\n\n", strings.Join(final, "\n"))
+		fmt.Fprintf(w, "-- foreign keys, once every table exists\n%s\n\n", strings.Join(finalFKs(final, req.tables), "\n"))
 	}
 
 	fmt.Fprintf(w, "%s", eng.DumpEpilogue())
@@ -876,12 +891,33 @@ func writeDump(ctx context.Context, eng db.Engine, req exportReq, report func(ex
 	return total, nil
 }
 
+// finalFKs renders the foreign keys that close a dump. A key between two
+// exported tables is added as is: both sides come from the same source, so it
+// should hold, and if it doesn't the load fails and rolls back. A key that
+// reaches a table outside the export joins the dump's rows to whatever the
+// target already holds, which nothing says match — that one takes its loose
+// form (db.FinalFK.Loose), which warns instead of failing.
+func finalFKs(fks []db.FinalFK, tables []db.Table) []string {
+	in := map[string]bool{}
+	for _, t := range tables {
+		in[tableLabel(t)] = true
+	}
+	out := make([]string, len(fks))
+	for i, fk := range fks {
+		out[i] = fk.SQL
+		if fk.Loose != "" && !(in[tableLabel(db.Table(fk.From))] && in[tableLabel(db.Table(fk.To))]) {
+			out[i] = fk.Loose
+		}
+	}
+	return out
+}
+
 // dumpTable writes one table's section: its heading, the structure (a full
 // export) or nothing (a capped one), the rows as multi-row INSERTs
 // (insertBatch), and whatever of the structure goes behind the rows. It returns the row count and the statements
 // that must wait until every table is written. The count also lands in a
 // trailing comment, since streaming means it isn't known until the scan ends.
-func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, []string, error) {
+func dumpTable(ctx context.Context, w *bufio.Writer, eng db.Engine, t db.Table, req exportReq, report func(int64)) (int64, []db.FinalFK, error) {
 	ref := t.Ref()
 	qual := eng.QualifiedName(ref)
 

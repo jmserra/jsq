@@ -357,6 +357,21 @@ func (e *pgEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	return acc.result(), nil
 }
 
+// TableLinks reads every foreign key outside the system schemas (the same
+// schemas Tables lists) as a table pair.
+func (e *pgEngine) TableLinks(ctx context.Context) ([]TableLink, error) {
+	return e.tableLinks(ctx, `
+		SELECT DISTINCT n.nspname, r.relname, fn.nspname, fr.relname
+		FROM pg_constraint c
+		JOIN pg_class r      ON r.oid = c.conrelid
+		JOIN pg_namespace n  ON n.oid = r.relnamespace
+		JOIN pg_class fr     ON fr.oid = c.confrelid
+		JOIN pg_namespace fn ON fn.oid = fr.relnamespace
+		WHERE c.contype = 'f' AND c.conrelid <> c.confrelid
+		  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_'
+		ORDER BY 1, 2, 3, 4`)
+}
+
 // --- SQL export (see dump.go) ---
 
 func (e *pgEngine) SQLLiteral(v any, colType string) string {
@@ -513,15 +528,29 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 
 	// Constraints from this table (inline, or Final for a foreign key) and
 	// foreign keys to it from anywhere (Final). contype 'n' — pg 18's catalogued
-	// NOT NULL — is already on the column.
-	var final, incoming []string
+	// NOT NULL — is already on the column. For a foreign key it also reads what
+	// the loose form needs (pgLooseFK): both tables, and the key's columns as
+	// the NOT NULL test and the join of an orphan count — formatted here, where
+	// %I quotes each name exactly as the server would.
+	var final, incoming []FinalFK
 	rows, err = tx.QueryContext(ctx, `
 		SELECT c.conname, c.contype::text, pg_get_constraintdef(c.oid, true),
-		       c.conrelid = $1::regclass,
-		       quote_ident(n.nspname) || '.' || quote_ident(r.relname)
+		       c.conrelid = $1::regclass, c.convalidated,
+		       quote_ident(n.nspname) || '.' || quote_ident(r.relname), n.nspname, r.relname,
+		       COALESCE(quote_ident(fn.nspname) || '.' || quote_ident(fr.relname), ''),
+		       COALESCE(fn.nspname, ''), COALESCE(fr.relname, ''),
+		       COALESCE((SELECT string_agg(format('c.%I IS NOT NULL', a.attname), ' AND ' ORDER BY k.i)
+		                 FROM unnest(c.conkey) WITH ORDINALITY k(own, i)
+		                 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.own), ''),
+		       COALESCE((SELECT string_agg(format('p.%I = c.%I', fa.attname, a.attname), ' AND ' ORDER BY k.i)
+		                 FROM unnest(c.conkey, c.confkey) WITH ORDINALITY k(own, ref, i)
+		                 JOIN pg_attribute a  ON a.attrelid = c.conrelid   AND a.attnum = k.own
+		                 JOIN pg_attribute fa ON fa.attrelid = c.confrelid AND fa.attnum = k.ref), '')
 		FROM pg_constraint c
 		JOIN pg_class r ON r.oid = c.conrelid
 		JOIN pg_namespace n ON n.oid = r.relnamespace
+		LEFT JOIN pg_class fr ON fr.oid = c.confrelid
+		LEFT JOIN pg_namespace fn ON fn.oid = fr.relnamespace
 		WHERE (c.conrelid = $1::regclass AND c.contype IN ('p', 'u', 'c', 'x', 'f') AND c.conislocal)
 		   OR (c.confrelid = $1::regclass AND c.contype = 'f')
 		ORDER BY c.contype, c.conname`, reg)
@@ -529,14 +558,24 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 		return TableDDL{}, err
 	}
 	for rows.Next() {
-		var name, typ, def, owner string
-		var own bool
-		if err := rows.Scan(&name, &typ, &def, &own, &owner); err != nil {
+		var name, typ, def, owner, ownSchema, ownName, ref, refSchema, refName, notNull, match string
+		var own, validated bool
+		if err := rows.Scan(&name, &typ, &def, &own, &validated, &owner, &ownSchema, &ownName,
+			&ref, &refSchema, &refName, &notNull, &match); err != nil {
 			rows.Close()
 			return TableDDL{}, err
 		}
 		if typ == "f" {
-			fk := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s;", owner, e.QuoteIdent(name), def)
+			fk := FinalFK{
+				SQL:  fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s;", owner, e.QuoteIdent(name), def),
+				From: TableRef{Schema: ownSchema, Name: ownName},
+				To:   TableRef{Schema: refSchema, Name: refName},
+			}
+			// A key the source never validated already reads NOT VALID in def,
+			// and so never fails as it lands: it has no looser form.
+			if validated {
+				fk.Loose = pgLooseFK(owner, name, e.QuoteIdent(name), def, ref, notNull, match)
+			}
 			if own {
 				final = append(final, fk)
 			} else {
@@ -602,15 +641,48 @@ func (e *pgEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 	return out, nil
 }
 
+// pgLooseFK is the foreign key for a dump that leaves out one of its tables:
+// added NOT VALID, so the load never fails on it and new writes are still
+// checked, then validated inside a block that turns a failure into a WARNING
+// with the number of rows that point at nothing. Catching the error rolls back
+// only the block's own subtransaction, so the surrounding load carries on — and
+// commits the key NOT VALID, which is exactly what it is.
+//
+// The count is MATCH SIMPLE's rule (a row with any NULL key column is exempt),
+// the default and the only kind the orphan count is exact for.
+func pgLooseFK(owner, rawName, name, def, ref, notNull, match string) string {
+	return fmt.Sprintf(`ALTER TABLE %[1]s ADD CONSTRAINT %[2]s %[3]s NOT VALID;
+DO $jsq$
+BEGIN
+  ALTER TABLE %[1]s VALIDATE CONSTRAINT %[2]s;
+EXCEPTION WHEN foreign_key_violation THEN
+  RAISE WARNING '%% rows of %% point at nothing in %%; foreign key %% is kept NOT VALID',
+    (SELECT count(*) FROM %[1]s c WHERE %[5]s AND NOT EXISTS (SELECT 1 FROM %[4]s p WHERE %[6]s)),
+    %[7]s, %[8]s, %[9]s;
+END
+$jsq$;`, owner, name, def, ref, notNull, match,
+		sqlQuote(owner, false), sqlQuote(ref, false), sqlQuote(rawName, false))
+}
+
 // DumpPrologue disables foreign-key triggers for the load, which lets the tables
 // replay in any order. session_replication_role needs superuser (or pg 15+'s
 // pg_write_all_data); without it the SET fails and the load runs with the
 // constraints live, which only matters if the table order is wrong.
+//
+// Then the whole load is one transaction — Postgres DDL is transactional, so a
+// statement that fails (a foreign key the rows don't satisfy) rolls back every
+// DROP with it instead of leaving the target missing what the CASCADE took. The
+// SETs stay outside it: inside, the one allowed to fail would abort the load.
 func (e *pgEngine) DumpPrologue() string {
-	return "SET client_encoding = 'UTF8';\n" +
+	return "-- One transaction: any error rolls the whole file back. With psql, run it\n" +
+		"-- with -v ON_ERROR_STOP=1 so the first error stops the run.\n" +
+		"SET client_encoding = 'UTF8';\n" +
 		"SET standard_conforming_strings = on;\n" +
 		"SET timezone = 'UTC';\n" + // times are written as UTC with no offset (stdSQLLiteral)
-		"SET session_replication_role = 'replica';\n"
+		"SET session_replication_role = 'replica';\n" +
+		"BEGIN;\n"
 }
 
-func (e *pgEngine) DumpEpilogue() string { return "SET session_replication_role = 'origin';\n" }
+func (e *pgEngine) DumpEpilogue() string {
+	return "COMMIT;\nSET session_replication_role = 'origin';\n"
+}

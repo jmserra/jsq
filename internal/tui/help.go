@@ -66,6 +66,7 @@ var helpItems = []helpItem{
 	{key: ",", desc: "server process list (table list; MySQL/Postgres only)"},
 	{head: "Export (x on the table list)"},
 	{key: "space / a", desc: "check the table under the cursor / everything the filter shows"},
+	{key: "+", desc: "check the tables the selection's foreign keys point at (one hop)"},
 	{key: "n", desc: "rows per table — newest N by primary key, upserted (empty = all, recreated)"},
 	{key: "Enter", desc: "write a generated .sql file in the working directory"},
 	{key: "Esc", desc: "cancel the running export (the UI waits on it until then)"},

@@ -463,6 +463,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.layout()
 		return a, nil
 
+	case tableLinksMsg:
+		if msg.engine == a.engine {
+			a.export.links = msg.links
+		}
+		return a, nil
+
 	case tablesMsg:
 		if a.stale(msg.gen) {
 			return a, nil
@@ -1521,7 +1527,9 @@ func (a App) openExport() (tea.Model, tea.Cmd) {
 	a.export.open(a.sidebar.tables)
 	a.screen = screenExport
 	a.layout()
-	return a, nil
+	// Re-read on every open: the links are one cheap query, and a schema change
+	// made since the last export would otherwise warn about the old one.
+	return a, tableLinksCmd(a.engine)
 }
 
 // exportPrefix is what the generated file name leads with: the connection, or —
@@ -1536,7 +1544,8 @@ func (a App) exportPrefix() string {
 
 // handleExportKey drives the export screen: the shared list navigation and `/`
 // filter, <space> to check the table under the cursor, `a` to check everything
-// the filter is showing, n for the row cap, Enter to write the file, and
+// the filter is showing, `+` to check the tables the selection's keys point at,
+// n for the row cap, Enter to write the file, and
 // Backspace to step back to the table list. (A running export never gets here:
 // its loader takes every key in handleKey.)
 func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1574,6 +1583,14 @@ func (a App) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.export.list.toggleAll()
 		case "n": // the per-table row cap
 			a.export.editRows()
+		case "+": // check the tables the selection's keys point at
+			// Named, not counted: a checked table is replaced on import, and the
+			// one added may be hidden by the filter.
+			if added := a.export.addLinked(); len(added) > 0 {
+				a.status = "checked " + strings.Join(added, ", ")
+			} else {
+				a.status = "no key leaves the selection for a table outside it"
+			}
 		}
 	}
 	return a, nil

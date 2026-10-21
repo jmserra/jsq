@@ -216,6 +216,16 @@ func (e *sqliteEngine) PrimaryKey(ctx context.Context, t TableRef) ([]string, er
 	return pk, rows.Err()
 }
 
+// TableLinks walks every table's foreign_key_list in one query, through the
+// pragma's table-valued form.
+func (e *sqliteEngine) TableLinks(ctx context.Context) ([]TableLink, error) {
+	return e.tableLinks(ctx, `
+		SELECT DISTINCT '', m.name, '', f."table"
+		FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f
+		WHERE m.type = 'table' AND m.name <> f."table"
+		ORDER BY 2, 4`)
+}
+
 // ForeignKeys reads FK constraints via PRAGMA foreign_key_list, grouping the
 // per-column rows by constraint id. A NULL "to" (a `REFERENCES parent` without an
 // explicit column) means the parent's primary key, resolved here.

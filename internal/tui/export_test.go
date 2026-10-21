@@ -552,3 +552,94 @@ func TestExportOutcomeScreen(t *testing.T) {
 		t.Errorf("the selection should be cleared after a successful export, %d still checked", n)
 	}
 }
+
+// linkedExportApp is a three-table chain, feedback → sessions → users, on the
+// export screen with the links loaded and `sessions` alone checked.
+func linkedExportApp(t *testing.T) App {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	e, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExecT(t, e, `CREATE TABLE users (id INTEGER PRIMARY KEY)`)
+	mustExecT(t, e, `CREATE TABLE sessions (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), parent INTEGER REFERENCES sessions(id))`)
+	mustExecT(t, e, `CREATE TABLE feedback (id INTEGER PRIMARY KEY, session_id INTEGER REFERENCES sessions(id))`)
+	e.Close()
+
+	app := New(nil, config.Conn{URL: path, Name: "test"})
+	app = update(t, app, app.Init()())
+	app = update(t, app, tea.WindowSizeMsg{Width: 200, Height: 24})
+	m, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	app = m.(App)
+	if cmd == nil {
+		t.Fatal("`x` should fetch the table links")
+	}
+	app = update(t, app, cmd())
+	return typeRunes(t, app, "j ") // the list is feedback, sessions, users
+}
+
+// TestExportWarnsOnLinksOutside: the footer names every link with one end
+// outside the selection — both directions on a full export, only the outgoing
+// one on a capped export (an upsert deletes nothing, so what pointed in still
+// lands) — the self-reference never. `+` checks the tables the keys point at
+// and names them, but never a table pointing in: a full export replaces every
+// checked table, so that link stays on the line for the user to decide.
+func TestExportWarnsOnLinksOutside(t *testing.T) {
+	app := linkedExportApp(t)
+	foot := app.export.footer("test")
+	for _, want := range []string{"2 links outside the selection", "+ checks 1 table they point at", "feedback → sessions", "sessions → users"} {
+		if !strings.Contains(foot, want) {
+			t.Errorf("footer lacks %q:\n%s", want, foot)
+		}
+	}
+	if strings.Contains(foot, "sessions → sessions") {
+		t.Errorf("a self-reference never leaves the selection:\n%s", foot)
+	}
+
+	capped := capRows(t, app, "10")
+	if foot := capped.export.footer("test"); !strings.Contains(foot, "1 link outside") || strings.Contains(foot, "feedback →") {
+		t.Errorf("a capped export should warn about the outgoing link only:\n%s", foot)
+	}
+
+	app = runeKey(t, app, '+')
+	if got := tableNames(app.export.list.checkedTables()); got != "sessions,users" {
+		t.Fatalf("`+` checked %s, want sessions,users (never the referencing feedback)", got)
+	}
+	if app.status != "checked users" {
+		t.Errorf("status = %q, want the added table named", app.status)
+	}
+	foot = app.export.footer("test")
+	if !strings.Contains(foot, "1 link outside the selection · feedback → sessions") {
+		t.Errorf("the incoming link should stay listed, with nothing for + to add:\n%s", foot)
+	}
+	if app = runeKey(t, app, '+'); tableNames(app.export.list.checkedTables()) != "sessions,users" {
+		t.Errorf("a second `+` with only an incoming link left must check nothing")
+	}
+}
+
+func tableNames(ts []db.Table) string {
+	var s []string
+	for _, t := range ts {
+		s = append(s, t.Name)
+	}
+	return strings.Join(s, ",")
+}
+
+// TestFinalFKsLooseAtTheBoundary: a key between two exported tables is written
+// as is, one reaching outside takes its loose form, and one without a loose
+// form (the source never validated it) stays as is wherever it points.
+func TestFinalFKsLooseAtTheBoundary(t *testing.T) {
+	ref := func(n string) db.TableRef { return db.TableRef{Schema: "public", Name: n} }
+	fks := []db.FinalFK{
+		{SQL: "inside", Loose: "inside-loose", From: ref("sessions"), To: ref("users")},
+		{SQL: "out", Loose: "out-loose", From: ref("sessions"), To: ref("orgs")},
+		{SQL: "in", Loose: "in-loose", From: ref("feedback"), To: ref("sessions")},
+		{SQL: "unvalidated", From: ref("feedback"), To: ref("users")},
+	}
+	got := strings.Join(finalFKs(fks, []db.Table{{Schema: "public", Name: "sessions"}, {Schema: "public", Name: "users"}}), " ")
+	if want := "inside out-loose in-loose unvalidated"; got != want {
+		t.Errorf("finalFKs = %q, want %q", got, want)
+	}
+}

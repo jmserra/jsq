@@ -29,6 +29,11 @@ import (
 type export struct {
 	list sidebar // the table list in check mode (marks non-nil)
 	opts exportOpts
+
+	// links is every foreign key in the database as a table pair, read when the
+	// screen opens (tableLinksCmd); nil until it lands, or if it couldn't be
+	// read, which only costs the boundary warning.
+	links []db.TableLink
 }
 
 // exportOpts is the settings footer's state: the one field there is. rows is a
@@ -53,8 +58,8 @@ func (o exportOpts) limit() int {
 	return n
 }
 
-// exportLines is the footer's height (settings, file, key hints).
-const exportLines = 3
+// exportLines is the footer's height (settings, links, file, key hints).
+const exportLines = 4
 
 // defaultExportPath is the file an export writes, in the directory jsq was
 // started from: where it came from, what's in it, the row cap, and a timestamp —
@@ -139,6 +144,9 @@ func (e export) footer(from string) string {
 	}
 	b.WriteByte('\n')
 
+	b.WriteString(e.linksLine(tables, w))
+	b.WriteByte('\n')
+
 	// The name is stamped when the export starts; this shows its shape.
 	path := defaultExportPath(from, tables, e.opts.limit(), time.Now())
 	b.WriteString(faintStyle.Render(runewidth.Truncate("→ "+path, w, "…")))
@@ -153,6 +161,97 @@ func (e export) footer(from string) string {
 }
 
 var faintStyle = lipgloss.NewStyle().Faint(true)
+
+// crossing is a foreign key with one end in the selection and one outside it:
+// the dump's rows on one side, the target's own rows on the other, and nothing
+// to say they agree. far is the end outside; out says it is the referenced end
+// (a key out of the selection), which is the only kind `+` follows.
+type crossing struct {
+	link db.TableLink
+	far  db.Table
+	out  bool
+}
+
+// crossings lists the links that leave the selection. Which ones matter follows
+// the file's shape:
+//   - a key out of a checked table (sessions → users) always does: the dump's
+//     rows may name a parent the target doesn't have;
+//   - a key into one (feedback → sessions) only on a full export, whose DROP …
+//     CASCADE takes it and replaces the rows it pointed at. A capped export
+//     upserts and deletes nothing, so what pointed at the old rows still does.
+func (e export) crossings(checked []db.Table) []crossing {
+	in := map[string]bool{}
+	for _, t := range checked {
+		in[tableLabel(t)] = true
+	}
+	full := e.opts.limit() == 0
+	var out []crossing
+	for _, l := range e.links {
+		from, to := db.Table(l.From), db.Table(l.To)
+		switch {
+		case in[tableLabel(from)] && !in[tableLabel(to)]:
+			out = append(out, crossing{l, to, true})
+		case full && in[tableLabel(to)] && !in[tableLabel(from)]:
+			out = append(out, crossing{l, from, false})
+		}
+	}
+	return out
+}
+
+// linksLine is the footer's warning about links that leave the selection, or a
+// blank line when there are none (or nothing is checked, or the links are still
+// loading) — the footer keeps its height either way, so the list doesn't jump.
+func (e export) linksLine(checked []db.Table, w int) string {
+	cs := e.crossings(checked)
+	if len(cs) == 0 {
+		return ""
+	}
+	listed, far := e.listed(), map[string]bool{}
+	pairs := make([]string, len(cs))
+	for i, c := range cs {
+		if c.out && listed[tableLabel(c.far)] {
+			far[tableLabel(c.far)] = true
+		}
+		pairs[i] = tableLabel(db.Table(c.link.From)) + " → " + tableLabel(db.Table(c.link.To))
+	}
+	add := ""
+	if len(far) > 0 {
+		add = fmt.Sprintf(" · + checks %d %s they point at", len(far), plural(len(far), "table"))
+	}
+	s := fmt.Sprintf("⚠ %d %s outside the selection%s · %s",
+		len(cs), plural(len(cs), "link"), add, strings.Join(pairs, ", "))
+	return filterStyle.Render(runewidth.Truncate(s, w, "…"))
+}
+
+// listed is the set of labels the list holds — the only tables a mark can
+// export. A link can reach one it doesn't show (an extension's, say).
+func (e export) listed() map[string]bool {
+	m := make(map[string]bool, len(e.list.tables))
+	for _, t := range e.list.tables {
+		m[tableLabel(t)] = true
+	}
+	return m
+}
+
+// addLinked checks the tables the selection's keys point at but leaves out,
+// and returns their labels. It follows keys OUT of the selection only, to the
+// parents its rows need: every table a full export checks is dropped and
+// replaced in the target, and following keys INTO the selection would sweep up
+// each table that references it (check `users`, get half the schema) — rows
+// the user never chose to overwrite. Those stay on the warning line for the
+// user to check by hand. One hop at a time for the same reason: the parents it
+// adds have keys of their own, which the line then shows.
+func (e *export) addLinked() []string {
+	listed := e.listed()
+	var added []string
+	for _, c := range e.crossings(e.list.checkedTables()) {
+		if lbl := tableLabel(c.far); c.out && listed[lbl] && !e.list.marks[lbl] {
+			e.list.marks[lbl] = true
+			added = append(added, lbl)
+		}
+	}
+	return added
+}
 
 // exportSummary is the status line after a dump lands: what was written, where.
 func exportSummary(path string, tables int, rows int64) string {

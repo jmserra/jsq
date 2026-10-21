@@ -398,6 +398,17 @@ func (e *myEngine) ForeignKeys(ctx context.Context, t TableRef) ([]ForeignKey, e
 	return acc.result(), nil
 }
 
+// TableLinks reads the current database's foreign keys as table pairs, leaving
+// out any that reference another database — that table can't be in the list.
+func (e *myEngine) TableLinks(ctx context.Context) ([]TableLink, error) {
+	return e.tableLinks(ctx, `
+		SELECT DISTINCT '', table_name, '', referenced_table_name
+		FROM information_schema.referential_constraints
+		WHERE constraint_schema = DATABASE() AND unique_constraint_schema = DATABASE()
+		  AND table_name <> referenced_table_name
+		ORDER BY 2, 4`)
+}
+
 // --- SQL export (see dump.go) ---
 
 func (e *myEngine) SQLLiteral(v any, colType string) string {
@@ -504,6 +515,8 @@ func (e *myEngine) StructureSQL(ctx context.Context, t TableRef) (TableDDL, erro
 	return TableDDL{Create: fmt.Sprintf("DROP TABLE IF EXISTS %s;\n%s;\n", q, ddl)}, nil
 }
 
+// No BEGIN/COMMIT around the load, unlike pg and sqlite: MySQL commits
+// implicitly on every DROP and CREATE, so a transaction would protect nothing.
 func (e *myEngine) DumpPrologue() string {
 	return "SET sql_mode='NO_ENGINE_SUBSTITUTION';\n" +
 		"SET time_zone='+00:00';\n" +

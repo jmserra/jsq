@@ -141,7 +141,7 @@ are never gated. Use it on the connections where a stray keystroke would hurt.
 | `s` | free-form SQL in `$EDITOR` — prefilled with `SELECT * FROM <table> LIMIT 100;`, or your last query on this table; `:wq` runs it (a read shows its rows, a write reports the affected count). Also works from the **table list**, where it opens an empty buffer headed by a `-- connection · database` comment |
 | `b` | open the query-history buffer — every free-form (`s`) query run on this connection, most-recent first, each showing its last result count (`+` when a read hit its own `LIMIT`). `Enter` re-runs a read (a write opens in `$EDITOR` for review); `s` opens any entry in `$EDITOR` to evolve it; `j`/`k`/`g`/`G` move, `Esc` closes |
 | `E` | *(table list)* open the highlighted table's **`CREATE TABLE`** in `$EDITOR` — with its indexes and foreign keys — to read or copy. `:q` leaves it alone; rewritten into an `ALTER` or a copy, `:wq` runs it like any other full-path statement (Postgres has no `SHOW CREATE TABLE`, so there it is composed from the catalogs) |
-| `x` | *(table list)* open the **SQL export** screen — the same table list with `[ ]` check boxes. `Space` checks the table under the cursor, `a` checks everything the filter is showing, `n` caps each table to its newest *N* rows, and `Enter` writes one `.sql` file with a generated name. The whole table is recreated (`DROP` + `CREATE` + `INSERT`); a capped one is upserted with no DDL, so it reruns over the live table. See [SQL export](#sql-export-x) below |
+| `x` | *(table list)* open the **SQL export** screen — the same table list with `[ ]` check boxes. `Space` checks the table under the cursor, `a` checks everything the filter is showing, `+` checks the tables the selection's foreign keys point at, `n` caps each table to its newest *N* rows, and `Enter` writes one `.sql` file with a generated name. The whole table is recreated (`DROP` + `CREATE` + `INSERT`); a capped one is upserted with no DDL, so it reruns over the live table. See [SQL export](#sql-export-x) below |
 | `,` | *(table list)* show the server's current process list — MySQL's `information_schema.processlist` or Postgres's `pg_stat_activity`, longest-running first. It opens in the grid as a read-only ad-hoc result, so `r` re-runs it to watch it change and `/` is unavailable (SQLite has no server, so it reports that instead) |
 | `r` | reload the current view — the table load (keeping sort, filters, and cursor), the ad-hoc query behind an `s` result, or a user's privileges. On a **list** it re-lists: tables, databases, or users, so an account or table created elsewhere shows up without leaving |
 | `Space v` | **split vertically** — a second pane on the right showing exactly what you're looking at (same table, sort, filters, scroll position; an `s` query result clones as the result). The new pane takes focus, so you can navigate away and leave the original behind |
@@ -407,7 +407,7 @@ navigation.
 ### SQL export (`x`)
 
 `x` on the table list opens the export screen: the same list, in check mode,
-over a three-line settings footer.
+over a four-line settings footer.
 
 ```
 ⌕ tables to export
@@ -415,6 +415,7 @@ over a three-line settings footer.
  [ ] products       [ ] invoices       [ ] events
 
 2 selected · rows: newest 5000 · upsert, no ddl
+⚠ 1 link outside the selection · + checks 1 table they point at · orders → products
 → ./prod_users_orders_last5000_20260917_140233.sql
 space select · a all · n rows · enter export · bksp back
 ```
@@ -423,6 +424,20 @@ space select · a all · n rows · enter export · bksp back
 visible, which is what makes the `/` filter useful here — narrow to `log_`, press
 `a`, and only those are ticked. `Enter` writes the file; `Backspace` steps back to
 the table list and keeps the selection, so a second export is a few keystrokes.
+
+**Links that leave the selection** get the footer's second line. A foreign key
+with one end checked and the other not joins the file's rows to whatever the
+target already holds, and nothing says those agree: `orders → products` means
+an exported order may name a product the target doesn't have. On a full export
+the keys *into* a checked table count too (`feedback → sessions`), because the
+`DROP … CASCADE` replaces the rows they pointed at; a capped export deletes
+nothing, so only the outgoing ones are listed. `+` checks the tables those keys
+**point at** (`products`, above) and names them in the status line — never the
+tables pointing *in*: every table a full export checks is dropped and replaced
+on import, and following keys inward would sweep up everything that references,
+say, `users`. Check those by hand if you mean to overwrite them. It goes one hop
+at a time, so the tables it adds show their own keys next. Exporting anyway is
+fine; see below for what the file does with those keys.
 
 There is one setting, **`n` — rows per table**, and it decides what kind of file
 you get:
@@ -436,7 +451,11 @@ you get:
   generated expressions, the primary-key/unique/check/exclusion constraints,
   indexes, sequence positions, and every foreign key from *or to* the table
   (re-added at the end of the file, since the `DROP … CASCADE` takes the ones
-  other tables hold). Not carried there: triggers, policies, comments, grants,
+  other tables hold). A key between two exported tables is added as is. One that
+  reaches a table *outside* the export is added `NOT VALID` — so new writes are
+  checked but the rows already there aren't — and then validated in a block that,
+  if the rows don't match, prints a `WARNING` with the count of rows that point at
+  nothing and leaves the key `NOT VALID` rather than failing the load. Not carried there: triggers, policies, comments, grants,
   partitioning, and views that depend on the table — `pg_dump` is still the tool
   for a schema.
 - **A number: the newest *N* rows, upserted.** The read is ordered by primary key
@@ -453,7 +472,11 @@ you get:
 The file is one `.sql` for the whole selection, bracketed by the session settings
 that let it replay in any table order (`FOREIGN_KEY_CHECKS=0` on MySQL,
 `session_replication_role='replica'` on Postgres, `PRAGMA foreign_keys=OFF` on
-SQLite). Values are inlined as literals, rendered per dialect — `0x…` vs
+SQLite). On Postgres and SQLite it is also **one transaction**, so a statement
+that fails rolls the whole file back instead of leaving the target half-loaded —
+run it with `psql -v ON_ERROR_STOP=1`, or psql carries on past the first error and
+reports every later statement as aborted. MySQL commits on every `DROP` and
+`CREATE`, so there a transaction would protect nothing and the file has none. Values are inlined as literals, rendered per dialect — `0x…` vs
 `'\x…'::bytea` vs `X'…'` for binary, and backslashes escaped for MySQL but left
 alone for Postgres, which the file's own `standard_conforming_strings = on`
 requires. Generated columns are left out; the server recomputes them.
